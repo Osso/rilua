@@ -45,6 +45,7 @@ World of Warcraft's addon system uses Lua 5.1.1. Key 5.1-specific traits:
 - Hexadecimal number literals
 - Comments: single-line (`--`) and long brackets (`--[[...]]`)
 - Long strings (`[[...]]`, `[=[...]=]`, etc.)
+- String escape sequences: named (`\n`, `\t`, etc.) and decimal byte (`\ddd`)
 
 ### Runtime
 
@@ -53,6 +54,7 @@ World of Warcraft's addon system uses Lua 5.1.1. Key 5.1-specific traits:
 - Mark-sweep garbage collector with interned strings
 - REPL with multi-line input
 - File execution mode
+- Line and column tracking in error messages
 
 ### Standard Library
 
@@ -66,7 +68,6 @@ World of Warcraft's addon system uses Lua 5.1.1. Key 5.1-specific traits:
 - Most standard library modules (`string`, `table`, `math`, `os`, `io`,
   `coroutine`, `debug`)
 - `pcall`, `xpcall`, `error`, `tostring`, `tonumber`
-- String escape sequences, line number tracking
 
 ## Usage
 
@@ -81,11 +82,17 @@ cargo run -- script.lua
 ### As a Library
 
 ```rust
-use rilua::State;
+fn main() {
+    let mut state = rilua::State::new();
+    state.open_libs();
+    state.do_string("print('hello from rilua')").unwrap();
+}
+```
 
-let mut state = State::new();
-state.open_libs();
-state.do_string("print('hello from rilua')").unwrap();
+See [`examples/hello.rs`](examples/hello.rs) for a runnable version:
+
+```bash
+cargo run --example hello
 ```
 
 ## Building
@@ -158,7 +165,7 @@ Dual-licensed under either:
   distribution documenting the WoW client's Lua configuration
 - Meorawr for [Elune](https://github.com/Meorawr/elune), a Lua 5.1 fork
   implementing WoW's tainted execution model
-- Meorawr for [WoWBench](https://sourceforge.net/projects/wowbench), a
+- mikeclueby4 for [WoWBench](https://sourceforge.net/projects/wowbench), a
   standalone test harness emulating the WoW Lua addon environment
 
 ## Resources
