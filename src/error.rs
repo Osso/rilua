@@ -34,6 +34,7 @@ pub struct ArgError {
 #[derive(Debug)]
 pub enum SyntaxError {
     BadNumber,
+    BreakOutsideLoop(usize),
     Complexity,
     EscapeTooLarge,
     InvalidCharacter(char),
@@ -157,6 +158,9 @@ impl fmt::Display for SyntaxError {
         use SyntaxError::*;
         match self {
             BadNumber => write!(f, "malformed number"),
+            BreakOutsideLoop(line) => {
+                write!(f, "<break> at line {line} not inside a loop")
+            }
             Complexity => write!(f, "complexity"),
             EscapeTooLarge => write!(f, "escape sequence too large"),
             InvalidCharacter(c) => write!(f, "invalid character {c}"),

@@ -45,6 +45,30 @@ and this project adheres to
   - `tostring(e)` for all current types
   - Numeric `for` loop string coercion: `for i = "1", "10", "1" do ... end`
 - Integration test `test14.lua` covering type coercion and comparison
+- Lua 5.1.1 "Variables" (section 2.3) semantics:
+  - `break` statement with backpatching: terminates innermost `while`,
+    `repeat`, or numeric `for` loop. Syntax error when used outside a loop.
+    Must be the last statement in a block (Lua 5.1 constraint).
+  - Upvalues and closures: inner functions capture outer local variables as
+    shared references. Two-state upvalue model (open: points to stack slot;
+    closed: owns value after enclosing scope exits). Multiple closures share
+    the same upvalue when capturing the same variable.
+  - Three-stage variable resolution: local, upvalue, global (mirrors
+    PUC-Rio's `singlevaraux` in `lparser.c`)
+  - `UpvalueDesc` metadata in `Chunk` for compile-time upvalue tracking
+  - `LuaClosure` type replacing `LuaFn`, carrying `Chunk` + upvalue vector
+  - `GetUpval`, `SetUpval`, `Close` VM instructions
+  - Per-iteration upvalue closing in `for` loops: each iteration snapshots
+    captured variables so closures created in different iterations hold
+    independent values
+  - Open upvalue registry (`BTreeMap`) in VM state for upvalue sharing and
+    scope-exit closing
+- Integration test `test15.lua` covering `break` in `while`, `repeat`, and
+  numeric `for` loops
+- Integration test `test16.lua` covering closures: basic counter, independent
+  instances, shared upvalues, three-level chains, for-loop per-iteration
+  capture, break with upvalues, while-loop closures, multiple upvalues,
+  shadowing, and accumulator patterns
 
 ### Fixed
 
@@ -144,8 +168,6 @@ Initial development by Chris Neidhart. No tagged release exists.
 ### Not Yet Implemented
 
 - Multiple return values
-- `break`
-- Closures and upvalues
 - Generic `for` loops (`pairs`, iterators)
 - Metatables and metamethods
 - Method calls (`:` syntax)

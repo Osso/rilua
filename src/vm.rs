@@ -10,8 +10,9 @@ pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
+use std::rc::Rc;
 
 use super::Chunk;
 use super::Instr;
@@ -22,6 +23,7 @@ use super::error::ErrorKind;
 use super::error::TypeError;
 
 use frame::Frame;
+use lua_val::Upvalue;
 use lua_val::Val;
 use lua_val::lua_fmt_number;
 use object::{GcHeap, Markable};
@@ -39,6 +41,10 @@ pub struct State {
     heap: GcHeap,
     /// The string literals (as `Val`s) of every active `Frame`.
     string_literals: Vec<Val>,
+    /// Open upvalues, keyed by absolute stack index.
+    /// Used to ensure that multiple closures capturing the same local
+    /// share one `Upvalue` object.
+    open_upvalues: BTreeMap<usize, Rc<Upvalue>>,
 }
 
 // Important note on how the stack is tracked:
@@ -53,6 +59,11 @@ impl Markable for State {
         self.stack.mark_reachable();
         self.globals.mark_reachable();
         self.string_literals.mark_reachable();
+        // Mark values inside closed upvalues (open ones reference the stack,
+        // which is already marked above)
+        for uv in self.open_upvalues.values() {
+            uv.mark_reachable();
+        }
     }
 }
 
@@ -76,6 +87,7 @@ impl State {
             stack_bottom: 0,
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
             string_literals: Vec::new(),
+            open_upvalues: BTreeMap::new(),
         }
     }
 
@@ -117,8 +129,10 @@ impl State {
             }
             self.stack_bottom = old_stack_bottom;
             num_ret_reported
-        } else if let Some(chunk) = func_val.as_lua_function() {
-            self.eval_chunk(chunk, num_args)?
+        } else if let Some(closure) = func_val.as_closure() {
+            let chunk = (*closure.chunk).clone();
+            let upvalues = closure.upvalues.clone();
+            self.eval_chunk(chunk, num_args, upvalues)?
         } else {
             return Err(self.type_error(TypeError::FunctionCall(func_val.typ())));
         };
@@ -449,7 +463,7 @@ impl State {
         Error::new(kind, pos, column)
     }
 
-    fn eval_chunk(&mut self, chunk: Chunk, num_args: u8) -> Result<u8> {
+    fn eval_chunk(&mut self, chunk: Chunk, num_args: u8, upvalues: Vec<Rc<Upvalue>>) -> Result<u8> {
         let old_stack_bottom = self.stack_bottom;
         self.stack_bottom = self.stack.len() - num_args as usize;
 
@@ -469,8 +483,11 @@ impl State {
             self.push_nil();
         }
 
-        let mut frame = self.initialize_frame(chunk);
+        let mut frame = self.initialize_frame(chunk, upvalues);
         let num_vals_returned = frame.eval(self)?;
+        // Close any open upvalues that reference this frame's stack slots
+        // before truncating the stack.
+        self.close_upvalues(self.stack_bottom);
         match num_vals_returned {
             0 => {
                 self.stack.truncate(self.stack_bottom);
@@ -489,7 +506,7 @@ impl State {
         Ok(num_vals_returned)
     }
 
-    fn initialize_frame(&mut self, chunk: Chunk) -> Frame {
+    fn initialize_frame(&mut self, chunk: Chunk, upvalues: Vec<Rc<Upvalue>>) -> Frame {
         let string_literal_start = self.string_literals.len();
         for s in &chunk.string_literals {
             let string_ptr = {
@@ -507,7 +524,7 @@ impl State {
             };
             self.string_literals.push(Val::Str(string_ptr));
         }
-        Frame::new(chunk, string_literal_start)
+        Frame::new(chunk, string_literal_start, upvalues)
     }
 
     /// Pop a value from the stack
@@ -515,19 +532,51 @@ impl State {
         self.stack.pop().unwrap()
     }
 
-    fn push_chunk(&mut self, chunk: Chunk) {
+    fn push_closure(&mut self, chunk: Chunk, upvalues: Vec<Rc<Upvalue>>) {
         let Self {
             stack,
             globals,
             string_literals,
             ..
         } = self;
-        let obj = self.heap.new_lua_fn(chunk, || {
+        let obj = self.heap.new_closure(chunk, upvalues, || {
             stack.mark_reachable();
             globals.mark_reachable();
             string_literals.mark_reachable();
         });
         self.stack.push(Val::Obj(obj));
+    }
+
+    /// Push a top-level chunk onto the stack as a closure with no upvalues.
+    fn push_chunk(&mut self, chunk: Chunk) {
+        self.push_closure(chunk, Vec::new());
+    }
+
+    /// Get or create an open upvalue for the given absolute stack index.
+    ///
+    /// If an open upvalue already exists for this index (because another closure
+    /// captured the same local), reuse it. Otherwise create a new one.
+    fn find_or_create_open_upvalue(&mut self, stack_idx: usize) -> Rc<Upvalue> {
+        if let Some(uv) = self.open_upvalues.get(&stack_idx) {
+            return uv.clone();
+        }
+        let uv = Upvalue::new_open(stack_idx);
+        self.open_upvalues.insert(stack_idx, uv.clone());
+        uv
+    }
+
+    /// Close all open upvalues at stack positions >= `base`.
+    ///
+    /// When a scope containing captured locals exits, this transitions
+    /// the upvalues from pointing at stack slots to owning their values.
+    fn close_upvalues(&mut self, base: usize) {
+        // Collect the keys to close (all indices >= base)
+        let keys_to_close: Vec<usize> = self.open_upvalues.range(base..).map(|(&k, _)| k).collect();
+        for key in keys_to_close {
+            if let Some(uv) = self.open_upvalues.remove(&key) {
+                uv.close(&self.stack);
+            }
+        }
     }
 
     fn type_error(&self, e: TypeError) -> Error {
@@ -553,7 +602,7 @@ mod tests {
     fn vm_test01() {
         let mut state = State::new();
         let input = parse_str("a = 1").unwrap();
-        state.eval_chunk(input, 0).unwrap();
+        state.eval_chunk(input, 0, Vec::new()).unwrap();
         assert_eq!(Val::Num(1.0), *state.globals.get("a").unwrap());
     }
 
@@ -571,7 +620,7 @@ mod tests {
             string_literals: vec![b"key".to_vec(), b"a".to_vec(), b"b".to_vec()],
             ..Chunk::default()
         };
-        state.eval_chunk(input, 0).unwrap();
+        state.eval_chunk(input, 0, Vec::new()).unwrap();
         let val = state.globals.get("key").unwrap();
         assert_eq!(b"ab".as_slice(), val.as_bytes().unwrap());
     }
@@ -585,7 +634,7 @@ mod tests {
             string_literals: vec![b"a".to_vec()],
             ..Chunk::default()
         };
-        state.eval_chunk(input, 0).unwrap();
+        state.eval_chunk(input, 0, Vec::new()).unwrap();
         assert_eq!(Val::Bool(true), *state.globals.get("a").unwrap());
     }
 
@@ -604,7 +653,7 @@ mod tests {
             string_literals: vec![b"key".to_vec()],
             ..Chunk::default()
         };
-        state.eval_chunk(input, 0).unwrap();
+        state.eval_chunk(input, 0, Vec::new()).unwrap();
         assert_eq!(Val::Bool(false), *state.globals.get("key").unwrap());
     }
 
@@ -624,7 +673,7 @@ mod tests {
             string_literals: vec![b"a".to_vec()],
             ..Chunk::default()
         };
-        state.eval_chunk(chunk, 0).unwrap();
+        state.eval_chunk(chunk, 0, Vec::new()).unwrap();
         assert_eq!(Val::Num(5.0), *state.globals.get("a").unwrap());
     }
 
@@ -646,7 +695,7 @@ mod tests {
             string_literals: vec![b"a".to_vec()],
             ..Chunk::default()
         };
-        state.eval_chunk(chunk, 0).unwrap();
+        state.eval_chunk(chunk, 0, Vec::new()).unwrap();
         assert!(state.globals.get("a").is_none());
     }
 
@@ -673,7 +722,7 @@ mod tests {
             ..Chunk::default()
         };
         let mut state = State::new();
-        state.eval_chunk(chunk, 0).unwrap();
+        state.eval_chunk(chunk, 0, Vec::new()).unwrap();
     }
 
     #[test]
@@ -707,7 +756,7 @@ mod tests {
             ..Chunk::default()
         };
         let mut state = State::new();
-        state.eval_chunk(chunk, 0).unwrap();
+        state.eval_chunk(chunk, 0, Vec::new()).unwrap();
         assert_eq!(Val::Num(10.0), *state.globals.get("x").unwrap());
     }
 
@@ -734,7 +783,7 @@ mod tests {
             ..Chunk::default()
         };
         let mut state = State::new();
-        state.eval_chunk(chunk, 0).unwrap();
+        state.eval_chunk(chunk, 0, Vec::new()).unwrap();
         assert!(state.globals.get("a").is_none());
     }
 
@@ -747,7 +796,7 @@ mod tests {
             end";
         let chunk = parse_str(&text).unwrap();
         let mut state = State::new();
-        state.eval_chunk(chunk, 0).unwrap();
+        state.eval_chunk(chunk, 0, Vec::new()).unwrap();
         let a = state.globals.get("a").unwrap().as_num().unwrap();
         assert_eq!(a, 6.0);
     }

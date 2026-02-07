@@ -25,10 +25,12 @@ use std::fmt;
 use std::hash::Hash;
 use std::ops::Drop;
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
 
 use super::Chunk;
 use super::LuaType;
 use super::Table;
+use super::lua_val::Upvalue;
 
 /// A wrapper around the `LuaVal`s which need to be garbage-collected.
 struct WrappedObject {
@@ -41,10 +43,14 @@ struct WrappedObject {
     color: Cell<Color>,
 }
 
+/// A Lua closure: a chunk (function prototype) plus captured upvalues.
+pub(super) struct LuaClosure {
+    pub(super) chunk: Box<Chunk>,
+    pub(super) upvalues: Vec<Rc<Upvalue>>,
+}
+
 enum RawObject {
-    // Wrap this in a box to reduce the memory usage. Minimal performance impact
-    // because functions are rarely accessed.
-    LuaFn(Box<Chunk>),
+    Closure(LuaClosure),
     Table(Table),
 }
 
@@ -52,7 +58,7 @@ impl RawObject {
     #[must_use]
     pub(super) const fn typ(&self) -> LuaType {
         match self {
-            Self::LuaFn(_) => LuaType::Function,
+            Self::Closure(_) => LuaType::Function,
             Self::Table(_) => LuaType::Table,
         }
     }
@@ -65,9 +71,9 @@ pub(super) struct ObjectPtr {
 }
 
 impl ObjectPtr {
-    pub(super) fn as_lua_function(self) -> Option<Chunk> {
+    pub(super) fn as_closure(&self) -> Option<&LuaClosure> {
         match &self.deref().raw {
-            RawObject::LuaFn(chunk) => Some((**chunk).clone()),
+            RawObject::Closure(c) => Some(c),
             _ => None,
         }
     }
@@ -104,7 +110,7 @@ impl ObjectPtr {
 impl fmt::Display for ObjectPtr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.deref().raw {
-            RawObject::LuaFn(_) => write!(f, "function: {:p}", self.ptr),
+            RawObject::Closure(_) => write!(f, "function: {:p}", self.ptr),
             RawObject::Table(_) => write!(f, "table: {:p}", self.ptr),
         }
     }
@@ -205,8 +211,17 @@ impl GcHeap {
         self.size >= self.threshold
     }
 
-    pub(super) fn new_lua_fn(&mut self, chunk: Chunk, mark: impl FnOnce()) -> ObjectPtr {
-        let raw = RawObject::LuaFn(Box::new(chunk));
+    pub(super) fn new_closure(
+        &mut self,
+        chunk: Chunk,
+        upvalues: Vec<Rc<Upvalue>>,
+        mark: impl FnOnce(),
+    ) -> ObjectPtr {
+        let closure = LuaClosure {
+            chunk: Box::new(chunk),
+            upvalues,
+        };
+        let raw = RawObject::Closure(closure);
         self.new_obj_from_raw(raw, mark)
     }
 
@@ -297,7 +312,12 @@ impl Markable for WrappedObject {
 impl Markable for RawObject {
     fn mark_reachable(&self) {
         match self {
-            Self::LuaFn(_) => (),
+            Self::Closure(c) => {
+                // Mark values inside closed upvalues (they may contain ObjectPtrs)
+                for upval in &c.upvalues {
+                    upval.mark_reachable();
+                }
+            }
             Self::Table(tbl) => tbl.mark_reachable(),
         }
     }

@@ -45,6 +45,16 @@ pub(super) enum Instr {
     /// index.
     SetLocal(u8),
 
+    /// Push the value of the upvalue at the given index onto the stack.
+    GetUpval(u8),
+
+    /// Pop the top of the stack and store it in the upvalue at the given index.
+    SetUpval(u8),
+
+    /// Close all upvalues at stack positions >= the given base (relative to
+    /// `stack_bottom`). This transitions open upvalues to closed state.
+    Close(u8),
+
     /// Create a new table and place it on the stack.
     NewTable,
 

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::ops;
+use std::rc::Rc;
 
 use super::super::error::ErrorKind;
 use super::super::error::TypeError;
@@ -9,6 +10,7 @@ use super::LuaType;
 use super::Result;
 use super::State;
 use super::Val;
+use super::lua_val::Upvalue;
 
 /// Comparison operation for ordering instructions.
 enum CmpOp {
@@ -27,17 +29,25 @@ pub(super) struct Frame {
     /// Offset into `State.string_literals` where this chunk's literals are
     /// stored.
     string_literal_start: usize,
+    /// The upvalues captured by the closure that created this frame.
+    /// Empty for top-level chunks.
+    upvalues: Vec<Rc<Upvalue>>,
 }
 
 impl Frame {
     /// Create a new Frame.
     #[must_use]
-    pub(super) fn new(chunk: Chunk, string_literal_start: usize) -> Self {
+    pub(super) fn new(
+        chunk: Chunk,
+        string_literal_start: usize,
+        upvalues: Vec<Rc<Upvalue>>,
+    ) -> Self {
         let ip = 0;
         Self {
             chunk,
             ip,
             string_literal_start,
+            upvalues,
         }
     }
 
@@ -154,6 +164,20 @@ impl Frame {
 
                 Instr::SetList(n) => state.instr_set_list(n)?,
 
+                // Upvalues
+                Instr::GetUpval(i) => {
+                    let val = self.upvalues[i as usize].get(&state.stack);
+                    state.stack.push(val);
+                }
+                Instr::SetUpval(i) => {
+                    let val = state.pop_val();
+                    self.upvalues[i as usize].set(&mut state.stack, val);
+                }
+                Instr::Close(base) => {
+                    let abs_base = state.stack_bottom + base as usize;
+                    state.close_upvalues(abs_base);
+                }
+
                 // Misc.
                 Instr::Concat => state.concat_helper(2)?,
             }
@@ -178,7 +202,19 @@ impl State {
 
     fn instr_closure(&mut self, frame: &mut Frame, i: u8) {
         let chunk = frame.get_nested_chunk(i);
-        self.push_chunk(chunk);
+        let mut upvalues = Vec::with_capacity(chunk.upvalue_descs.len());
+        for desc in &chunk.upvalue_descs {
+            let uv = if desc.is_local {
+                // Capture a local from the current frame's stack
+                let abs_idx = self.stack_bottom + desc.index as usize;
+                self.find_or_create_open_upvalue(abs_idx)
+            } else {
+                // Capture an upvalue from the parent closure
+                frame.upvalues[desc.index as usize].clone()
+            };
+            upvalues.push(uv);
+        }
+        self.push_closure(chunk, upvalues);
     }
 
     fn instr_for_prep(&mut self, frame: &mut Frame, local: u8, body_len: isize) -> Result<()> {

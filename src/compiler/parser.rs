@@ -14,6 +14,23 @@ use super::token::TokenType;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 
+/// Tracks whether a block is a loop (for `break` validation) and collects
+/// the code indices of `break` jumps that need backpatching when the loop ends.
+#[derive(Debug)]
+struct BlockInfo {
+    is_loop: bool,
+    break_jumps: Vec<usize>,
+}
+
+/// Info about a local variable: name, nesting level, and whether it was
+/// captured by a closure (requiring `Close` on scope exit).
+#[derive(Debug)]
+struct LocalInfo {
+    name: String,
+    level: i32,
+    captured: bool,
+}
+
 /// Tracks the current state, to make parsing easier.
 #[derive(Debug)]
 struct Parser<'a> {
@@ -21,8 +38,13 @@ struct Parser<'a> {
     input: TokenStream<'a>,
     chunk: Chunk,
     nest_level: i32,
-    locals: Vec<(String, i32)>,
+    locals: Vec<LocalInfo>,
     outer_chunks: Vec<Chunk>,
+    /// Stack of block scopes for `break` statement validation and backpatching.
+    block_stack: Vec<BlockInfo>,
+    /// When entering a nested function, the current locals count is pushed here.
+    /// This marks the boundary between the outer function's locals and the inner one's.
+    outer_local_counts: Vec<usize>,
 }
 
 /// Parses Lua source code into a `Chunk`.
@@ -33,6 +55,8 @@ pub(super) fn parse_str(source: &str) -> Result<Chunk> {
         nest_level: 0,
         locals: Vec::new(),
         outer_chunks: Vec::new(),
+        block_stack: Vec::new(),
+        outer_local_counts: Vec::new(),
     };
     parser.parse_all()
 }
@@ -43,11 +67,17 @@ impl<'a> Parser<'a> {
     /// Creates a new local slot at the current nest_level.
     /// Fails if we have exceeded the maximum number of locals.
     fn add_local(&mut self, name: &str) -> Result<()> {
-        if self.locals.len() == u8::MAX as usize {
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        if self.locals.len() - base >= u8::MAX as usize {
             Err(self.error(SyntaxError::TooManyLocals))
         } else {
-            self.locals.push((name.to_string(), self.nest_level));
-            if self.locals.len() > self.chunk.num_locals as usize {
+            self.locals.push(LocalInfo {
+                name: name.to_string(),
+                level: self.nest_level,
+                captured: false,
+            });
+            let locals_in_chunk = self.locals.len() - base;
+            if locals_in_chunk > self.chunk.num_locals as usize {
                 self.chunk.num_locals += 1;
             }
             Ok(())
@@ -162,13 +192,25 @@ impl<'a> Parser<'a> {
     }
 
     /// Lowers the nesting level by one, discarding any locals from that block.
+    /// Emits `Close` if any discarded locals were captured by closures.
     fn level_down(&mut self) {
-        while let Some((_, lvl)) = self.locals.last() {
-            if *lvl == self.nest_level {
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        let mut need_close = false;
+        let mut close_base = self.locals.len();
+        while let Some(local) = self.locals.last() {
+            if local.level == self.nest_level {
+                if local.captured {
+                    need_close = true;
+                    close_base = self.locals.len() - 1;
+                }
                 self.locals.pop();
             } else {
                 break;
             }
+        }
+        if need_close {
+            let slot = (close_base - base) as u8;
+            self.push(Instr::Close(slot));
         }
         self.nest_level -= 1;
     }
@@ -195,11 +237,16 @@ impl<'a> Parser<'a> {
     /// Parses a `Chunk`.
     fn parse_chunk(&mut self, params: &[&str]) -> Result<Chunk> {
         self.outer_chunks.push(self.chunk.clone());
+        self.outer_local_counts.push(self.locals.len());
         self.chunk = Chunk::default();
 
         self.chunk.num_params = params.len() as u8;
         for &param in params {
-            self.locals.push((param.into(), self.nest_level));
+            self.locals.push(LocalInfo {
+                name: param.into(),
+                level: self.nest_level,
+                captured: false,
+            });
         }
 
         self.parse_statements()?;
@@ -207,6 +254,10 @@ impl<'a> Parser<'a> {
 
         let tmp_chunk = self.chunk.clone();
         self.chunk = self.outer_chunks.pop().unwrap();
+
+        // Restore locals to the boundary of the enclosing function
+        let boundary = self.outer_local_counts.pop().unwrap();
+        self.locals.truncate(boundary);
 
         if option_env!("LUA_DEBUG_PARSER").is_some() {
             println!("Compiled chunk: {:#?}", &tmp_chunk);
@@ -232,6 +283,7 @@ impl<'a> Parser<'a> {
                 TokenType::Semi => {
                     self.input.next()?;
                 }
+                TokenType::Break => break self.parse_break(),
                 TokenType::Return => break self.parse_return(),
                 _ => break Ok(()),
             }
@@ -256,7 +308,8 @@ impl<'a> Parser<'a> {
         let instr = match place_exp {
             PlaceExp::Local(i) => Instr::SetLocal(i),
             PlaceExp::Global(i) => Instr::SetGlobal(i),
-            _ => unreachable!("place expression was not a local or global variable"),
+            PlaceExp::Upvalue(i) => Instr::SetUpval(i),
+            _ => unreachable!("place expression was not a variable"),
         };
         self.parse_fndef()?;
         self.push(instr);
@@ -268,7 +321,8 @@ impl<'a> Parser<'a> {
         let table_instr = match self.parse_prefix_identifier(table_name)? {
             PlaceExp::Local(i) => Instr::GetLocal(i),
             PlaceExp::Global(i) => Instr::GetGlobal(i),
-            _ => unreachable!("place expression was not a local or global variable"),
+            PlaceExp::Upvalue(i) => Instr::GetUpval(i),
+            _ => unreachable!("place expression was not a variable"),
         };
         self.push(table_instr);
 
@@ -294,6 +348,73 @@ impl<'a> Parser<'a> {
         self.push(Instr::Return(n));
         self.input.try_pop(TokenType::Semi)?;
         Ok(())
+    }
+
+    /// Parses a `break` statement. In Lua 5.1, `break` must be the last
+    /// statement in a block and can only appear inside a loop.
+    fn parse_break(&mut self) -> Result<()> {
+        let break_token = self.input.next()?; // 'break' keyword
+        let (line, _col) = self.input.line_and_column(break_token.start);
+
+        // Find the innermost enclosing loop block
+        let found_loop = self.block_stack.iter().rev().any(|block| block.is_loop);
+
+        if !found_loop {
+            return Err(self.error_at(SyntaxError::BreakOutsideLoop(line), break_token.start));
+        }
+
+        // Emit Close if any locals in scope are captured by closures.
+        // This ensures upvalues are properly closed before exiting the loop.
+        self.emit_close_if_needed();
+
+        // Emit a placeholder jump — will be backpatched when the loop ends
+        let jump_index = self.chunk.code.len();
+        self.push(Instr::Jump(0));
+
+        // Record the jump index in the innermost loop block
+        for block in self.block_stack.iter_mut().rev() {
+            if block.is_loop {
+                block.break_jumps.push(jump_index);
+                break;
+            }
+        }
+
+        // In Lua 5.1, `break` must be the last statement in a block.
+        // An optional semicolon may follow.
+        self.input.try_pop(TokenType::Semi)?;
+        Ok(())
+    }
+
+    /// Emits a `Close` instruction if any locals in the current scope have
+    /// been captured by closures.
+    fn emit_close_if_needed(&mut self) {
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        let mut min_captured = None;
+        for (i, local) in self.locals.iter().enumerate().skip(base) {
+            if local.captured {
+                match min_captured {
+                    None => min_captured = Some(i - base),
+                    Some(prev) => {
+                        if i - base < prev {
+                            min_captured = Some(i - base);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(slot) = min_captured {
+            self.push(Instr::Close(slot as u8));
+        }
+    }
+
+    /// Backpatches all break jumps in the given block to jump to the
+    /// current code position.
+    fn backpatch_breaks(&mut self, block: &BlockInfo) {
+        let target = self.chunk.code.len();
+        for &jump_index in &block.break_jumps {
+            let offset = (target - jump_index - 1) as isize;
+            self.chunk.code[jump_index] = Instr::Jump(offset);
+        }
     }
 
     /// Parses a statement which could be a variable assignment or a function call.
@@ -347,6 +468,7 @@ impl<'a> Parser<'a> {
             let instr = match place_exp {
                 PlaceExp::Local(i) => Instr::SetLocal(i),
                 PlaceExp::Global(i) => Instr::SetGlobal(i),
+                PlaceExp::Upvalue(i) => Instr::SetUpval(i),
                 PlaceExp::FieldAccess(literal_id) => {
                     let stack_offset = num_lvals as u8 - i as u8 - 1;
                     Instr::SetField(stack_offset, literal_id)
@@ -384,6 +506,7 @@ impl<'a> Parser<'a> {
                 let instr = match place {
                     PlaceExp::Local(i) => Instr::GetLocal(*i),
                     PlaceExp::Global(i) => Instr::GetGlobal(*i),
+                    PlaceExp::Upvalue(i) => Instr::GetUpval(*i),
                     PlaceExp::FieldAccess(i) => Instr::GetField(*i),
                     PlaceExp::TableIndex => Instr::GetTable,
                 };
@@ -392,20 +515,128 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a variable's name. This should only ever return `Local` or `Global`.
+    /// Resolves a variable name to a local, upvalue, or global.
+    ///
+    /// Three-stage resolution (matching PUC-Rio's `singlevaraux` in `lparser.c`):
+    /// 1. Local in current function scope
+    /// 2. Upvalue (walking up through enclosing functions)
+    /// 3. Global
     fn parse_prefix_identifier(&mut self, name: &str) -> Result<PlaceExp> {
-        if let Some(i) = find_last_local(&self.locals, name) {
-            Ok(PlaceExp::Local(i as u8))
-        } else {
-            let i = self.find_or_add_string(name.as_bytes())?;
-            Ok(PlaceExp::Global(i))
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        // Stage 1: Local in current function
+        if let Some(abs_idx) = find_last_local(&self.locals, name, base) {
+            let local_idx = (abs_idx - base) as u8;
+            return Ok(PlaceExp::Local(local_idx));
         }
+
+        // Stage 2: Upvalue (search enclosing functions)
+        if let Some(upval_idx) = self.resolve_upvalue(name)? {
+            return Ok(PlaceExp::Upvalue(upval_idx));
+        }
+
+        // Stage 3: Global
+        let i = self.find_or_add_string(name.as_bytes())?;
+        Ok(PlaceExp::Global(i))
+    }
+
+    /// Attempts to resolve `name` as an upvalue. Returns the upvalue index
+    /// in the current chunk's `upvalue_descs` if found.
+    ///
+    /// This walks outward through enclosing function scopes. Each scope
+    /// either finds the variable as a local (creating `is_local: true` desc)
+    /// or as an upvalue of the next-outer scope (creating `is_local: false`
+    /// desc that chains through intermediate functions).
+    fn resolve_upvalue(&mut self, name: &str) -> Result<Option<u8>> {
+        let num_outers = self.outer_local_counts.len();
+        if num_outers == 0 {
+            return Ok(None);
+        }
+        self.resolve_upvalue_recursive(name, num_outers)
+    }
+
+    /// Recursive helper for upvalue resolution.
+    /// `depth` is the number of function boundaries to look through
+    /// (depth=1 means look in the immediately enclosing function).
+    fn resolve_upvalue_recursive(&mut self, name: &str, depth: usize) -> Result<Option<u8>> {
+        if depth == 0 {
+            return Ok(None);
+        }
+
+        // The locals base for the function at `depth - 1` levels up
+        let outer_base = if depth >= 2 {
+            self.outer_local_counts[depth - 2]
+        } else {
+            0
+        };
+        let outer_top = self.outer_local_counts[depth - 1];
+
+        // Check if the variable is a local in that outer function
+        if let Some(abs_idx) = find_last_local(&self.locals, name, outer_base) {
+            if abs_idx < outer_top {
+                let local_idx = (abs_idx - outer_base) as u8;
+                // Mark the local as captured
+                self.locals[abs_idx].captured = true;
+
+                // Add upvalue descriptor to the chunk at depth
+                let upval_idx = self.add_upvalue_desc(name, true, local_idx, depth)?;
+                return Ok(Some(upval_idx));
+            }
+        }
+
+        // Recurse: look further out
+        if let Some(parent_upval_idx) = self.resolve_upvalue_recursive(name, depth - 1)? {
+            // The variable was found further out. Add a chained upvalue descriptor
+            // that captures the parent's upvalue.
+            let upval_idx = self.add_upvalue_desc(name, false, parent_upval_idx, depth)?;
+            return Ok(Some(upval_idx));
+        }
+
+        Ok(None)
+    }
+
+    /// Adds an `UpvalueDesc` to the chunk at the given depth level.
+    /// `depth == num_outers` means the current chunk.
+    /// Returns the index of the upvalue in that chunk's desc list.
+    fn add_upvalue_desc(
+        &mut self,
+        name: &str,
+        is_local: bool,
+        index: u8,
+        depth: usize,
+    ) -> Result<u8> {
+        let descs = if depth == self.outer_local_counts.len() {
+            // Current chunk
+            &mut self.chunk.upvalue_descs
+        } else {
+            // An outer chunk at the given depth
+            &mut self.outer_chunks[depth].upvalue_descs
+        };
+
+        // Check if we already have this exact upvalue
+        for (i, desc) in descs.iter().enumerate() {
+            if desc.is_local == is_local && desc.index == index {
+                return Ok(i as u8);
+            }
+        }
+
+        // Add new descriptor
+        if descs.len() >= u8::MAX as usize {
+            return Err(self.error(SyntaxError::Complexity));
+        }
+        let idx = descs.len() as u8;
+        descs.push(super::UpvalueDesc {
+            name: name.as_bytes().to_vec(),
+            is_local,
+            index,
+        });
+        Ok(idx)
     }
 
     /// Parses a `local` declaration.
     fn parse_locals(&mut self) -> Result<()> {
         self.input.next().unwrap(); // `local` keyword
-        let old_local_count = self.locals.len() as u8;
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        let old_local_count = (self.locals.len() - base) as u8;
 
         let names = self.parse_namelist()?;
 
@@ -476,12 +707,14 @@ impl<'a> Parser<'a> {
     /// Parses a numeric `for` loop, starting with the first expression after the `=`.
     fn parse_numeric_for(&mut self, name: &str) -> Result<()> {
         // The start(current), stop and step are stored in three "hidden" local slots.
-        let current_local_slot = self.locals.len() as u8;
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        let current_local_slot = (self.locals.len() - base) as u8;
         self.add_local("")?;
         self.add_local("")?;
         self.add_local("")?;
 
         // The actual local is in a fourth slot, so that it can be reassigned to.
+        let visible_local_idx = self.locals.len();
         self.add_local(name)?;
 
         // First, all 3 control expressions are evaluated.
@@ -498,13 +731,32 @@ impl<'a> Parser<'a> {
         self.push(Instr::ForPrep(current_local_slot, -1));
 
         // body
+        self.block_stack.push(BlockInfo {
+            is_loop: true,
+            break_jumps: Vec::new(),
+        });
         self.parse_statements()?;
         self.expect(TokenType::End)?;
+
+        // If the for-loop variable or any body locals are captured as upvalues,
+        // emit Close before ForLoop so each iteration closes its upvalues.
+        // This ensures closures created in different iterations capture
+        // distinct values.
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        let any_captured = self.locals[visible_local_idx..].iter().any(|l| l.captured);
+        if any_captured {
+            let slot = (visible_local_idx - base) as u8;
+            self.push(Instr::Close(slot));
+        }
+
         let body_length = (self.chunk.code.len() - loop_start_instr_index) as isize;
         self.push(Instr::ForLoop(current_local_slot, -(body_length)));
 
         // Correct the ForPrep instruction.
         self.chunk.code[loop_start_instr_index] = Instr::ForPrep(current_local_slot, body_length);
+
+        let block = self.block_stack.pop().unwrap();
+        self.backpatch_breaks(&block);
 
         Ok(())
     }
@@ -531,8 +783,13 @@ impl<'a> Parser<'a> {
     fn parse_do(&mut self) -> Result<()> {
         self.input.next()?; // `do` keyword
         self.nest_level += 1;
+        self.block_stack.push(BlockInfo {
+            is_loop: false,
+            break_jumps: Vec::new(),
+        });
         self.parse_statements()?;
         self.expect(TokenType::End)?;
+        self.block_stack.pop();
         self.level_down();
         Ok(())
     }
@@ -541,12 +798,20 @@ impl<'a> Parser<'a> {
     fn parse_repeat(&mut self) -> Result<()> {
         self.input.next()?; // `repeat` keyword
         self.nest_level += 1;
+        self.block_stack.push(BlockInfo {
+            is_loop: true,
+            break_jumps: Vec::new(),
+        });
         let body_start = self.chunk.code.len() as isize;
         self.parse_statements()?;
         self.expect(TokenType::Until)?;
         self.parse_expr()?;
         let expr_end = self.chunk.code.len() as isize;
         self.push(Instr::BranchFalse(body_start - (expr_end + 1)));
+
+        let block = self.block_stack.pop().unwrap();
+        self.backpatch_breaks(&block);
+
         self.level_down();
         Ok(())
     }
@@ -558,6 +823,7 @@ impl<'a> Parser<'a> {
         // - `BranchFalse` to evaluate condition and skip body
         // - Body instructions
         // - `Jump` back to condition start
+        // - (break jumps land here)
         self.input.next()?;
         self.nest_level += 1;
         let condition_start = self.chunk.code.len();
@@ -567,6 +833,10 @@ impl<'a> Parser<'a> {
         let test_position = self.chunk.code.len();
         self.push(Instr::BranchFalse(0));
 
+        self.block_stack.push(BlockInfo {
+            is_loop: true,
+            break_jumps: Vec::new(),
+        });
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
@@ -575,6 +845,9 @@ impl<'a> Parser<'a> {
 
         let body_len = body_end - test_position;
         self.chunk.code[test_position] = Instr::BranchFalse(body_len as isize);
+
+        let block = self.block_stack.pop().unwrap();
+        self.backpatch_breaks(&block);
 
         self.level_down();
 
@@ -1131,13 +1404,14 @@ fn process_escapes(
     Ok(result)
 }
 
-/// Finds the index of the last local entry which matches `name`.
+/// Finds the index of the last local entry which matches `name`,
+/// searching only within the current function's scope (from `base` to end).
 #[must_use]
-fn find_last_local(locals: &[(String, i32)], name: &str) -> Option<usize> {
+fn find_last_local(locals: &[LocalInfo], name: &str, base: usize) -> Option<usize> {
     let mut i = locals.len();
-    while i > 0 {
+    while i > base {
         i -= 1;
-        if locals[i].0 == name {
+        if locals[i].name == name {
             return Some(i);
         }
     }
@@ -1705,19 +1979,18 @@ mod tests {
 
     #[test]
     fn test29() {
-        let default = Chunk::default();
         let text = "x = function () local y = 7 end";
         let inner_chunk = Chunk {
             code: vec![PushNum(0), SetLocal(0), Return(0)],
             number_literals: vec![7.0],
             num_locals: 1,
-            ..default
+            ..Chunk::default()
         };
         let outer_chunk = Chunk {
             code: vec![Closure(0), SetGlobal(0), Return(0)],
             string_literals: vec![b"x".to_vec()],
             nested: vec![inner_chunk],
-            ..default
+            ..Chunk::default()
         };
         check_it(text, outer_chunk);
     }

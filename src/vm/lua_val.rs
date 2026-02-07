@@ -1,12 +1,84 @@
-use super::Chunk;
 use super::Markable;
 use super::Result;
 use super::State;
 use super::Table;
 use super::object::{ObjectPtr, StringPtr};
 
+use std::cell::RefCell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
+/// Runtime representation of an upvalue (a captured outer variable).
+///
+/// While the enclosing function is active, the upvalue is "open" and points
+/// to a stack slot. When the enclosing scope exits, the upvalue is "closed"
+/// and owns the value directly.
+///
+/// Multiple closures can share the same upvalue via `Rc`, ensuring that
+/// mutations to a shared captured variable are visible to all closures.
+#[derive(Debug)]
+pub(super) struct Upvalue {
+    pub(super) state: RefCell<UpvalueState>,
+}
+
+#[derive(Debug)]
+pub(super) enum UpvalueState {
+    /// Points to a stack index (absolute).
+    Open(usize),
+    /// Owns the value after the enclosing scope has exited.
+    Closed(Val),
+}
+
+impl Upvalue {
+    pub(super) fn new_open(stack_index: usize) -> Rc<Self> {
+        Rc::new(Self {
+            state: RefCell::new(UpvalueState::Open(stack_index)),
+        })
+    }
+
+    /// Read the upvalue's current value.
+    pub(super) fn get(&self, stack: &[Val]) -> Val {
+        match &*self.state.borrow() {
+            UpvalueState::Open(idx) => stack[*idx].clone(),
+            UpvalueState::Closed(val) => val.clone(),
+        }
+    }
+
+    /// Write a new value into the upvalue.
+    pub(super) fn set(&self, stack: &mut [Val], val: Val) {
+        let is_open = match &*self.state.borrow() {
+            UpvalueState::Open(idx) => Some(*idx),
+            UpvalueState::Closed(_) => None,
+        };
+        if let Some(idx) = is_open {
+            stack[idx] = val;
+        } else {
+            *self.state.borrow_mut() = UpvalueState::Closed(val);
+        }
+    }
+
+    /// Transition from open to closed by reading the value from the stack.
+    pub(super) fn close(&self, stack: &[Val]) {
+        let val = {
+            let state = self.state.borrow();
+            match &*state {
+                UpvalueState::Open(idx) => stack[*idx].clone(),
+                UpvalueState::Closed(_) => return, // already closed
+            }
+        };
+        *self.state.borrow_mut() = UpvalueState::Closed(val);
+    }
+}
+
+impl Markable for Upvalue {
+    fn mark_reachable(&self) {
+        if let UpvalueState::Closed(val) = &*self.state.borrow() {
+            val.mark_reachable();
+        }
+        // Open upvalues reference stack slots, which are already roots
+    }
+}
 
 /// Format a number using Lua 5.1.1's `%.14g` convention.
 ///
@@ -183,9 +255,9 @@ pub(super) enum Val {
 use Val::*;
 
 impl Val {
-    pub(super) fn as_lua_function(&self) -> Option<Chunk> {
+    pub(super) fn as_closure(&self) -> Option<&super::object::LuaClosure> {
         if let Obj(o) = self {
-            o.as_lua_function()
+            o.as_closure()
         } else {
             None
         }

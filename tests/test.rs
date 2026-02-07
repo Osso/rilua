@@ -76,6 +76,16 @@ fn test14() -> Result<()> {
     run_file("tests/test14.lua")
 }
 
+#[test]
+fn test15() -> Result<()> {
+    run_file("tests/test15.lua")
+}
+
+#[test]
+fn test16() -> Result<()> {
+    run_file("tests/test16.lua")
+}
+
 // PUC-Rio Lua 5.1.1 official test suite (verbatim copies)
 // Source: ~/Repos/github.com/lua/tests at tag v5_1_1
 
