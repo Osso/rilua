@@ -101,11 +101,11 @@ impl<'a> Parser<'a> {
     /// Expects an identifier and returns the id of its string literal.
     fn expect_identifier_id(&mut self) -> Result<u8> {
         let name = self.expect_identifier()?;
-        self.find_or_add_string(name)
+        self.find_or_add_string(name.as_bytes())
     }
 
-    /// Stores a literal string and returns its index.
-    fn find_or_add_string(&mut self, string: &str) -> Result<u8> {
+    /// Stores a literal string (as bytes) and returns its index.
+    fn find_or_add_string(&mut self, string: &[u8]) -> Result<u8> {
         find_or_add(&mut self.chunk.string_literals, string)
             .ok_or_else(|| self.error(SyntaxError::TooManyStrings))
     }
@@ -116,12 +116,12 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.error(SyntaxError::TooManyNumbers))
     }
 
-    /// Converts a literal string token into its semantic string value.
+    /// Converts a literal string token into its semantic byte value.
     ///
     /// For long strings, strips delimiters and the optional leading newline.
     /// For short strings, strips quotes and processes escape sequences per
     /// the Lua 5.1.1 spec (`llex.c:276-329`).
-    fn get_literal_string_contents(&self, tok: Token) -> Result<String> {
+    fn get_literal_string_contents(&self, tok: Token) -> Result<Vec<u8>> {
         let Token { start, len, typ } = tok;
         assert_eq!(typ, TokenType::LiteralString);
         let text = self.input.substring(start..(start + len as usize));
@@ -145,7 +145,8 @@ impl<'a> Parser<'a> {
                 inner
             };
             // Normalize \r\n and \r to \n in the body (Lua spec: llex.c:257-263)
-            Ok(normalize_line_endings(inner))
+            // Long strings come from source &str, so always valid UTF-8
+            Ok(normalize_line_endings(inner).into_bytes())
         } else {
             // Short string: strip quotes and process escape sequences
             assert!(len >= 2);
@@ -396,7 +397,7 @@ impl<'a> Parser<'a> {
         if let Some(i) = find_last_local(&self.locals, name) {
             Ok(PlaceExp::Local(i as u8))
         } else {
-            let i = self.find_or_add_string(name)?;
+            let i = self.find_or_add_string(name.as_bytes())?;
             Ok(PlaceExp::Global(i))
         }
     }
@@ -852,7 +853,7 @@ impl<'a> Parser<'a> {
                 self.eval_prefix_exp(&base_expr);
                 self.input.next()?;
                 let field_name = self.expect_identifier()?;
-                let name_idx = self.find_or_add_string(field_name)?;
+                let name_idx = self.find_or_add_string(field_name.as_bytes())?;
                 let prefix = PlaceExp::FieldAccess(name_idx).into();
                 self.parse_prefix_extension(prefix)
             }
@@ -907,8 +908,8 @@ impl<'a> Parser<'a> {
                 self.push(Instr::PushNum(idx));
             }
             TokenType::LiteralString => {
-                let text = self.get_literal_string_contents(tok)?;
-                let idx = self.find_or_add_string(&text)?;
+                let bytes = self.get_literal_string_contents(tok)?;
+                let idx = self.find_or_add_string(&bytes)?;
                 self.push(Instr::PushString(idx));
             }
             TokenType::Function => self.parse_fndef()?,
@@ -1056,13 +1057,15 @@ fn process_escapes(
     raw: &str,
     tok_start: usize,
     line_col: impl Fn(usize) -> (usize, usize),
-) -> Result<String> {
-    let mut result = String::with_capacity(raw.len());
+) -> Result<Vec<u8>> {
+    let mut result = Vec::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
 
     while let Some(c) = chars.next() {
         if c != '\\' {
-            result.push(c);
+            // Non-escape characters: encode as UTF-8 bytes (source is text)
+            let mut buf = [0u8; 4];
+            result.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
             continue;
         }
 
@@ -1070,22 +1073,22 @@ fn process_escapes(
         let Some(esc) = chars.next() else {
             // Backslash at end of string — shouldn't happen since the
             // lexer ensures the closing quote exists, but handle gracefully
-            result.push('\\');
+            result.push(b'\\');
             break;
         };
 
         match esc {
-            'a' => result.push('\x07'),
-            'b' => result.push('\x08'),
-            'f' => result.push('\x0C'),
-            'n' => result.push('\n'),
-            'r' => result.push('\r'),
-            't' => result.push('\t'),
-            'v' => result.push('\x0B'),
+            'a' => result.push(0x07),
+            'b' => result.push(0x08),
+            'f' => result.push(0x0C),
+            'n' => result.push(b'\n'),
+            'r' => result.push(b'\r'),
+            't' => result.push(b'\t'),
+            'v' => result.push(0x0B),
             '\n' | '\r' => {
                 // Backslash-newline: insert a newline. For \r\n or \n\r
                 // pairs, consume the second character too.
-                result.push('\n');
+                result.push(b'\n');
                 if let Some(&next) = chars.peek() {
                     if (esc == '\r' && next == '\n') || (esc == '\n' && next == '\r') {
                         chars.next();
@@ -1113,11 +1116,15 @@ fn process_escapes(
                     let (line, col) = line_col(tok_start);
                     return Err(Error::new(SyntaxError::EscapeTooLarge, line, col));
                 }
-                result.push(char::from(value as u8));
+                // THE FIX: push exactly one byte, not a multi-byte UTF-8 char
+                result.push(value as u8);
             }
             // Default: drop the backslash, keep the character.
             // This handles \\, \", \', and any unknown escape.
-            other => result.push(other),
+            other => {
+                let mut buf = [0u8; 4];
+                result.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
         }
     }
 
@@ -1173,7 +1180,7 @@ mod tests {
         let out = Chunk {
             code: vec![PushNum(0), PushNum(1), Add, SetGlobal(0), Return(0)],
             number_literals: vec![5.0, 6.0],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, out);
@@ -1185,7 +1192,7 @@ mod tests {
         let out = Chunk {
             code: vec![PushNum(0), PushNum(1), Pow, Negate, SetGlobal(0), Return(0)],
             number_literals: vec![5.0, 2.0],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, out);
@@ -1205,7 +1212,7 @@ mod tests {
                 Return(0),
             ],
             number_literals: vec![5.0],
-            string_literals: vec!["x".into(), "hi".into()],
+            string_literals: vec![b"x".to_vec(), b"hi".to_vec()],
             ..Chunk::default()
         };
         check_it(text, out);
@@ -1225,7 +1232,7 @@ mod tests {
                 Return(0),
             ],
             number_literals: vec![1.0, 2.0, 3.0],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, output);
@@ -1237,7 +1244,7 @@ mod tests {
         let output = Chunk {
             code: vec![PushNum(0), PushNum(1), Negate, Pow, SetGlobal(0), Return(0)],
             number_literals: vec![2.0, 3.0],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, output);
@@ -1249,7 +1256,7 @@ mod tests {
         let output = Chunk {
             code: vec![PushNum(0), Instr::Not, Instr::Not, SetGlobal(0), Return(0)],
             number_literals: vec![1.0],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, output);
@@ -1261,7 +1268,7 @@ mod tests {
         let output = Chunk {
             code: vec![PushNum(0), SetGlobal(0), Return(0)],
             number_literals: vec![5.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec![b"a".to_vec()],
             ..Chunk::default()
         };
         check_it(text, output);
@@ -1279,7 +1286,7 @@ mod tests {
                 SetGlobal(0),
                 Return(0),
             ],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, output);
@@ -1302,7 +1309,7 @@ mod tests {
         let output = Chunk {
             code,
             number_literals: vec![5.0],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, output);
@@ -1321,7 +1328,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec![b"a".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1344,7 +1351,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0, 4.0],
-            string_literals: vec!["a".to_string(), "b".to_string()],
+            string_literals: vec![b"a".to_vec(), b"b".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1366,7 +1373,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0, 4.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec![b"a".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1395,7 +1402,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0, 6.0, 7.0, 3.0, 4.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec![b"a".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1419,7 +1426,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![10.0, 1.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec![b"a".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1442,7 +1449,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0, 4.0],
-            string_literals: vec!["a".into(), "b".into(), "y".into()],
+            string_literals: vec![b"a".to_vec(), b"b".to_vec(), b"y".to_vec()],
             num_locals: 1,
             ..Chunk::default()
         };
@@ -1477,7 +1484,7 @@ mod tests {
         ];
         let chunk = Chunk {
             code,
-            string_literals: vec!["print".into()],
+            string_literals: vec![b"print".to_vec()],
             num_locals: 2,
             ..Chunk::default()
         };
@@ -1500,7 +1507,7 @@ mod tests {
         ];
         let chunk = Chunk {
             code,
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             num_locals: 2,
             ..Chunk::default()
         };
@@ -1521,7 +1528,7 @@ mod tests {
         ];
         let chunk = Chunk {
             code,
-            string_literals: vec!["x".into(), "i".into()],
+            string_literals: vec![b"x".to_vec(), b"i".to_vec()],
             num_locals: 1,
             ..Chunk::default()
         };
@@ -1545,7 +1552,7 @@ mod tests {
         ];
         let chunk = Chunk {
             code,
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             num_locals: 2,
             ..Chunk::default()
         };
@@ -1568,7 +1575,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0, 5.0],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             num_locals: 4,
             ..Chunk::default()
         };
@@ -1582,7 +1589,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0],
-            string_literals: vec!["a".to_string(), "b".to_string()],
+            string_literals: vec![b"a".to_vec(), b"b".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1601,7 +1608,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0, 2.0],
-            string_literals: vec!["a".to_string(), "b".to_string()],
+            string_literals: vec![b"a".to_vec(), b"b".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1622,7 +1629,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0, 2.0, 3.0],
-            string_literals: vec!["a".to_string(), "b".to_string()],
+            string_literals: vec![b"a".to_vec(), b"b".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1634,7 +1641,7 @@ mod tests {
         let code = vec![GetGlobal(0), Call(0, 0), Return(0)];
         let chunk = Chunk {
             code,
-            string_literals: vec!["puts".to_string()],
+            string_literals: vec![b"puts".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1653,7 +1660,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0],
-            string_literals: vec!["y".into(), "x".into()],
+            string_literals: vec![b"y".to_vec(), b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1671,7 +1678,7 @@ mod tests {
         ];
         let chunk = Chunk {
             code,
-            string_literals: vec!["t".to_string(), "x".to_string(), "y".to_string()],
+            string_literals: vec![b"t".to_vec(), b"x".to_vec(), b"y".to_vec()],
             num_locals: 1,
             ..Chunk::default()
         };
@@ -1682,7 +1689,7 @@ mod tests {
     fn test28() {
         let text = "x = function () end";
         let code = vec![Closure(0), SetGlobal(0), Return(0)];
-        let string_literals = vec!["x".into()];
+        let string_literals = vec![b"x".to_vec()];
         let nested = vec![Chunk {
             code: vec![Return(0)],
             ..Chunk::default()
@@ -1708,7 +1715,7 @@ mod tests {
         };
         let outer_chunk = Chunk {
             code: vec![Closure(0), SetGlobal(0), Return(0)],
-            string_literals: vec!["x".into()],
+            string_literals: vec![b"x".to_vec()],
             nested: vec![inner_chunk],
             ..default
         };
@@ -1742,7 +1749,7 @@ mod tests {
                 Call(1, 0),
                 Return(0),
             ],
-            string_literals: vec!["print".into()],
+            string_literals: vec![b"print".to_vec()],
             nested: vec![y],
             num_locals: 1,
             ..Chunk::default()
@@ -1756,7 +1763,7 @@ mod tests {
                 Return(0),
             ],
             nested: vec![z, x],
-            string_literals: vec!["z".into(), "x".into()],
+            string_literals: vec![b"z".to_vec(), b"x".to_vec()],
             ..Chunk::default()
         };
         check_it(text, outer_chunk);
@@ -1770,7 +1777,7 @@ mod tests {
             code,
             num_locals: 1,
             number_literals: vec![4.0],
-            string_literals: vec!["type".into()],
+            string_literals: vec![b"type".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -1832,7 +1839,7 @@ mod tests {
         let chunk = Chunk {
             code,
             num_locals: 1,
-            string_literals: vec!["b".to_string()],
+            string_literals: vec![b"b".to_vec()],
             ..Chunk::default()
         };
         check_it(text, chunk);

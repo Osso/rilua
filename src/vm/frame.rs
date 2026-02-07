@@ -215,8 +215,10 @@ impl State {
     }
 
     fn instr_get_global(&mut self, frame: &Frame, string_num: u8) {
-        let s = &frame.chunk.string_literals[string_num as usize];
-        self.get_global(s);
+        let bytes = &frame.chunk.string_literals[string_num as usize];
+        // Global names are identifiers, always valid UTF-8
+        let name = std::str::from_utf8(bytes).expect("global name is not valid UTF-8");
+        self.get_global(name);
     }
 
     fn instr_get_local(&mut self, local_num: u8) {
@@ -272,8 +274,8 @@ impl State {
         let val = self.pop_val();
         match val.typ() {
             LuaType::String => {
-                let s = val.as_string().unwrap();
-                let len = s.len();
+                let bytes = val.as_bytes().unwrap();
+                let len = bytes.len();
                 self.stack.push(Val::Num(len as f64));
                 Ok(())
             }
@@ -309,14 +311,11 @@ impl State {
     }
 
     fn instr_set_global(&mut self, frame: &Frame, string_num: u8) {
-        let s = self.get_string_constant(frame, string_num);
+        let bytes = &frame.chunk.string_literals[string_num as usize];
+        // Global names are identifiers, always valid UTF-8
+        let name = std::str::from_utf8(bytes).expect("global name is not valid UTF-8");
         let val = self.pop_val();
-        if let Some(s) = s.as_string() {
-            self.globals.insert(s.into(), val);
-        } else {
-            // TODO handle this better
-            panic!("Tried to index globals with {} instead of string", s.typ());
-        }
+        self.globals.insert(name.to_string(), val);
     }
 
     fn instr_set_list(&mut self, count: u8) -> Result<()> {

@@ -29,17 +29,30 @@ and this project adheres to
   bracket bodies (leading newline skip and body normalization to `\n`)
 - Reference: `~/Repos/github.com/cogwheel/lua-wow` (WoW-compatible Lua
   5.1.1 distribution documenting WoW client configuration)
+- Acknowledgments in `README.md` for lua-wow, Elune, and WoWBench
+  reference projects
+
+### Fixed
+
+- `#` operator on strings with bytes 128-255 returned incorrect length
+  (e.g. `#"\255"` returned 2 instead of 1) because Rust `String` encoded
+  high bytes as multi-byte UTF-8
 
 ### Changed
 
+- Internal string representation changed from `String` to `Vec<u8>` for
+  binary-safe Lua string semantics. Lua strings are arbitrary byte
+  sequences, not UTF-8 text. Affects `MarkedString.data`,
+  `Chunk.string_literals`, `process_escapes`, and all string-handling paths
+  through the compiler and VM.
 - Crate renamed from `lua` to `rilua`
 - Package metadata updated: author, description, repository URL
 - REPL banner changed from "Lua in Rust by Chris Neidhart" to
   "rilua {version} -- Lua 5.1.1 in Rust"
 - Crate-level doc comment updated to reference rilua
 - `.cargo/config.toml` header comment updated to reference rilua
-- `get_literal_string_contents` returns `Result<String>` instead of
-  `&str` to support escape processing and CR normalization
+- `get_literal_string_contents` returns `Result<Vec<u8>>` instead of
+  `&str` to support escape processing, CR normalization, and binary content
 - PUC-Rio Lua 5.1.1 test suite tests marked `#[ignore]` (skip in CI,
   run with `cargo test -- --ignored`)
 

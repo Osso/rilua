@@ -38,9 +38,11 @@ impl Val {
         }
     }
 
-    pub(super) fn as_string(&self) -> Option<&str> {
+    /// Returns the raw bytes of a string value. This is the primary accessor
+    /// for Lua strings, which are arbitrary byte sequences.
+    pub(super) fn as_bytes(&self) -> Option<&[u8]> {
         if let Str(s) = self {
-            Some(s.as_str())
+            Some(s.as_bytes())
         } else {
             None
         }
@@ -90,8 +92,9 @@ impl fmt::Display for Val {
             Nil => write!(f, "nil"),
             Bool(b) => b.fmt(f),
             Num(n) => n.fmt(f),
+            Str(s) => s.fmt(f),
             Obj(o) => o.fmt(f),
-            _ => write!(f, "{self:#?}"),
+            RustFn(func) => write!(f, "function: {func:p}"),
         }
     }
 }

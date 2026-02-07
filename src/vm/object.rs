@@ -210,8 +210,8 @@ impl GcHeap {
         self.new_obj_from_raw(raw, mark)
     }
 
-    pub(super) fn new_string(&mut self, s: String, mark: impl FnOnce()) -> StringPtr {
-        if let Some(ptr) = self.strings.get(s.as_str()) {
+    pub(super) fn new_string(&mut self, s: Vec<u8>, mark: impl FnOnce()) -> StringPtr {
+        if let Some(ptr) = self.strings.get(s.as_slice()) {
             ptr.clone()
         } else {
             if self.is_full() {
@@ -329,7 +329,7 @@ impl<K, V: Markable> Markable for HashMap<K, V> {
 }
 
 struct MarkedString {
-    data: String,
+    data: Vec<u8>,
     color: Cell<Color>,
 }
 
@@ -344,8 +344,10 @@ impl StringPtr {
         a.0 == b.0
     }
 
+    /// Returns the raw byte content of the string. This is the primary
+    /// accessor — Lua strings are arbitrary byte sequences.
     #[must_use]
-    pub(crate) fn as_str(&self) -> &str {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         // SAFETY: The pointer was created by `Box::into_raw` in
         // `GcHeap::new_string`. It remains valid because the GC only frees
         // unmarked strings, and any live `StringPtr` is reachable (marked)
@@ -354,21 +356,21 @@ impl StringPtr {
     }
 }
 
-impl Borrow<str> for StringPtr {
-    fn borrow(&self) -> &str {
-        self.as_str()
+impl Borrow<[u8]> for StringPtr {
+    fn borrow(&self) -> &[u8] {
+        self.as_bytes()
     }
 }
 
 impl Hash for StringPtr {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state);
+        self.as_bytes().hash(state);
     }
 }
 
 impl PartialEq for StringPtr {
     fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
+        self.as_bytes() == other.as_bytes()
     }
 }
 impl Eq for StringPtr {}
@@ -385,7 +387,8 @@ impl Markable for StringPtr {
 
 impl fmt::Display for StringPtr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        let lossy = String::from_utf8_lossy(self.as_bytes());
+        f.write_str(&lossy)
     }
 }
 
@@ -396,11 +399,11 @@ mod test {
     #[test]
     fn gc_test_strings() {
         let mut gc = GcHeap::with_threshold(2000);
-        gc.new_string("good".into(), || {});
+        gc.new_string(b"good".to_vec(), || {});
         assert_eq!(1, gc.strings.len());
-        gc.new_string("good".into(), || {});
+        gc.new_string(b"good".to_vec(), || {});
         assert_eq!(1, gc.strings.len());
-        gc.new_string("jorts".into(), || {});
+        gc.new_string(b"jorts".to_vec(), || {});
         assert_eq!(2, gc.strings.len());
         gc.collect();
         assert_eq!(0, gc.strings.len());
