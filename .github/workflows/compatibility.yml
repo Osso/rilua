@@ -2,13 +2,9 @@
 name: Compatibility
 
 on:
-  push:
-    branches: [main]
-
-  pull_request:
-    branches: [main]
-
-  merge_group:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,16 +16,19 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
 
 jobs:
   compatibility:
     name: PUC-Rio Lua 5.1.1 Comparison
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Install system dependencies
         run: sudo apt-get install -y -qq libreadline-dev
@@ -61,7 +60,7 @@ jobs:
           shared-key: "compat-${{ hashFiles('**/Cargo.lock') }}"
           cache-on-failure: true
           cache-all-crates: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event.workflow_run.head_branch == 'main' }}
 
       - name: Build rilua
         run: cargo build --release
