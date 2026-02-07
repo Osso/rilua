@@ -81,6 +81,71 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(1)
     });
 
+    // tonumber(e [, base])
+    //
+    // Tries to convert its argument to a number. If the argument is already
+    // a number or a string convertible to a number, then tonumber returns
+    // this number; otherwise, it returns nil.
+    //
+    // An optional argument specifies the base to interpret the numeral.
+    // The base can be any integer between 2 and 36, inclusive. In bases
+    // above 10, the letter 'A' (in either upper or lower case) represents
+    // 10, 'B' represents 11, and so forth.
+    add("tonumber", |state| {
+        state.check_any(1)?;
+        if state.get_top() >= 2 {
+            // tonumber(e, base) — explicit base conversion
+            let base_f = state.to_number(2)?;
+            #[allow(clippy::cast_possible_truncation)]
+            let base = base_f as i64;
+            if !(2..=36).contains(&base) {
+                return Err(state.error(ErrorKind::WithMessage(
+                    "bad argument #2 to 'tonumber' (invalid base)".to_string(),
+                )));
+            }
+            if state.typ(1) != LuaType::String {
+                // With explicit base, first arg must be a string
+                state.set_top(0);
+                state.push_nil();
+                return Ok(1);
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let result = state.to_number_base(1, base as u32);
+            state.set_top(0);
+            match result {
+                Some(n) => state.push_number(n),
+                None => state.push_nil(),
+            }
+        } else {
+            // tonumber(e) — default base
+            let result = state.to_number_opt(1);
+            state.set_top(0);
+            match result {
+                Some(n) => state.push_number(n),
+                None => state.push_nil(),
+            }
+        }
+        Ok(1)
+    });
+
+    // tostring(e)
+    //
+    // Receives an argument of any type and converts it to a string in a
+    // reasonable format. For complete control of how numbers are converted,
+    // use string.format.
+    add("tostring", |state| {
+        state.check_any(1)?;
+        if state.typ(1) == LuaType::String {
+            // String stays as-is — just return it
+            state.set_top(1);
+            return Ok(1);
+        }
+        let s = state.to_string(1);
+        state.set_top(0);
+        state.push_string(s);
+        Ok(1)
+    });
+
     // unpack(list)
     //
     // Returns list[1], list[2], ... list[#list]. The Lua version can take

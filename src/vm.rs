@@ -23,6 +23,7 @@ use super::error::TypeError;
 
 use frame::Frame;
 use lua_val::Val;
+use lua_val::lua_fmt_number;
 use object::{GcHeap, Markable};
 use table::Table;
 
@@ -311,12 +312,31 @@ impl State {
         val.truthy()
     }
 
-    /// Attempts to convert the value at the given index to a number.
+    /// Attempts to convert the value at the given index to a number,
+    /// applying Lua's string-to-number coercion.
     pub fn to_number(&self, idx: isize) -> Result<f64> {
         let i = self.convert_idx(idx);
         let val = &self.stack[i];
-        val.as_num()
+        val.to_number()
             .ok_or_else(|| self.type_error(TypeError::Arithmetic(val.typ())))
+    }
+
+    /// Attempts to convert the value at the given index to a number,
+    /// returning `None` on failure instead of an error. Used by
+    /// `tonumber()`.
+    pub fn to_number_opt(&self, idx: isize) -> Option<f64> {
+        let i = self.convert_idx(idx);
+        self.stack[i].to_number()
+    }
+
+    /// Attempts to convert the string at the given index to a number
+    /// using the specified base (2-36). Returns `None` on failure.
+    /// Used by `tonumber(s, base)`.
+    pub fn to_number_base(&self, idx: isize, base: u32) -> Option<f64> {
+        let i = self.convert_idx(idx);
+        let val = &self.stack[i];
+        val.as_bytes()
+            .and_then(|bytes| lua_val::str_to_number_base(bytes, base))
     }
 
     /// Converts the value at the given index to a string.
@@ -392,6 +412,8 @@ impl State {
         for val in drain {
             if let Some(bytes) = val.as_bytes() {
                 buffer.extend_from_slice(bytes);
+            } else if let Val::Num(num) = &val {
+                buffer.extend_from_slice(lua_fmt_number(*num).as_bytes());
             } else {
                 abort = Some(TypeError::Concat(val.typ()));
                 break;

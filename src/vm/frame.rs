@@ -1,5 +1,7 @@
+use std::cmp::Ordering;
 use std::ops;
 
+use super::super::error::ErrorKind;
 use super::super::error::TypeError;
 use super::Chunk;
 use super::Instr;
@@ -7,6 +9,14 @@ use super::LuaType;
 use super::Result;
 use super::State;
 use super::Val;
+
+/// Comparison operation for ordering instructions.
+enum CmpOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
 
 /// A `Frame` represents a single stack-frame of a Lua function.
 pub(super) struct Frame {
@@ -119,10 +129,10 @@ impl Frame {
                 }
 
                 // Orderings
-                Instr::Less => state.eval_float_bool(<f64 as PartialOrd>::lt)?,
-                Instr::Greater => state.eval_float_bool(<f64 as PartialOrd>::gt)?,
-                Instr::LessEqual => state.eval_float_bool(<f64 as PartialOrd>::le)?,
-                Instr::GreaterEqual => state.eval_float_bool(<f64 as PartialOrd>::ge)?,
+                Instr::Less => state.eval_comparison(CmpOp::Lt)?,
+                Instr::Greater => state.eval_comparison(CmpOp::Gt)?,
+                Instr::LessEqual => state.eval_comparison(CmpOp::Le)?,
+                Instr::GreaterEqual => state.eval_comparison(CmpOp::Ge)?,
 
                 // `for` loops
                 Instr::ForLoop(slot, offset) => state.instr_for_loop(self, slot, offset)?,
@@ -172,10 +182,24 @@ impl State {
     }
 
     fn instr_for_prep(&mut self, frame: &mut Frame, local: u8, body_len: isize) -> Result<()> {
-        // These slots should only be assigned to during this function.
-        let step = self.pop_val().as_num().unwrap();
-        let end = self.pop_val().as_num().unwrap();
-        let start = self.pop_val().as_num().unwrap();
+        let step_val = self.pop_val();
+        let end_val = self.pop_val();
+        let start_val = self.pop_val();
+        let step = step_val.to_number().ok_or_else(|| {
+            self.error(ErrorKind::WithMessage(
+                "'for' step must be a number".to_string(),
+            ))
+        })?;
+        let end = end_val.to_number().ok_or_else(|| {
+            self.error(ErrorKind::WithMessage(
+                "'for' limit must be a number".to_string(),
+            ))
+        })?;
+        let start = start_val.to_number().ok_or_else(|| {
+            self.error(ErrorKind::WithMessage(
+                "'for' initial value must be a number".to_string(),
+            ))
+        })?;
         if check_numeric_for_condition(start, end, step) {
             let mut local_slot = local as usize + self.stack_bottom;
             for &n in &[start, end, step, start] {
@@ -190,9 +214,17 @@ impl State {
 
     fn instr_for_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: isize) -> Result<()> {
         let slot = local_slot as usize + self.stack_bottom;
-        let mut var = self.stack[slot].as_num().unwrap();
-        let limit = self.stack[slot + 1].as_num().unwrap();
-        let step = self.stack[slot + 2].as_num().unwrap();
+        // These values were coerced to numbers by instr_for_prep, so
+        // as_num() should always succeed. Use ok_or_else for lint safety.
+        let mut var = self.stack[slot]
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot].typ())))?;
+        let limit = self.stack[slot + 1]
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot + 1].typ())))?;
+        let step = self.stack[slot + 2]
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot + 2].typ())))?;
         var += step;
         if check_numeric_for_condition(var, limit, step) {
             self.stack[slot] = Val::Num(var);
@@ -356,10 +388,30 @@ impl State {
 
     // Helper methods
 
-    fn eval_float_bool(&mut self, f: impl Fn(&f64, &f64) -> bool) -> Result<()> {
-        let n2 = self.pop_num()?;
-        let n1 = self.pop_num()?;
-        self.stack.push(Val::Bool(f(&n1, &n2)));
+    fn eval_comparison(&mut self, op: CmpOp) -> Result<()> {
+        let val2 = self.pop_val();
+        let val1 = self.pop_val();
+        let result = match (&val1, &val2) {
+            (Val::Num(a), Val::Num(b)) => match op {
+                CmpOp::Lt => *a < *b,
+                CmpOp::Le => *a <= *b,
+                CmpOp::Gt => *a > *b,
+                CmpOp::Ge => *a >= *b,
+            },
+            (Val::Str(a), Val::Str(b)) => {
+                let ord = a.as_bytes().cmp(b.as_bytes());
+                match op {
+                    CmpOp::Lt => ord == Ordering::Less,
+                    CmpOp::Le => ord != Ordering::Greater,
+                    CmpOp::Gt => ord == Ordering::Greater,
+                    CmpOp::Ge => ord != Ordering::Less,
+                }
+            }
+            _ => {
+                return Err(self.type_error(TypeError::Comparison(val1.typ(), val2.typ())));
+            }
+        };
+        self.push_boolean(result);
         Ok(())
     }
 
@@ -378,7 +430,7 @@ impl State {
 
     fn pop_num(&mut self) -> Result<f64> {
         let val = self.pop_val();
-        val.as_num()
+        val.to_number()
             .ok_or_else(|| self.type_error(TypeError::Arithmetic(val.typ())))
     }
 }

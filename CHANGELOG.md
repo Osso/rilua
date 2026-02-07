@@ -35,6 +35,16 @@ and this project adheres to
   runs all test files through both interpreters, producing a PASS/FAIL
   comparison table as a GitHub job summary. Informational only, never
   blocks PRs.
+- Lua 5.1.1 "Values and Types" (section 2.2) semantics:
+  - String-to-number coercion in arithmetic: `"3" + 5` evaluates to `8`
+  - Number-to-string coercion in concatenation: `3 .. " apples"` evaluates
+    to `"3 apples"`
+  - String comparison with byte ordering: `"a" < "b"` works correctly
+  - Number formatting matching C's `%.14g` (`lua_fmt_number`)
+  - `tonumber(e [, base])` with base 2-36 support
+  - `tostring(e)` for all current types
+  - Numeric `for` loop string coercion: `for i = "1", "10", "1" do ... end`
+- Integration test `test14.lua` covering type coercion and comparison
 
 ### Fixed
 
@@ -144,7 +154,7 @@ Initial development by Chris Neidhart. No tagged release exists.
   `coroutine`, `debug`)
 - `pcall`, `xpcall`, `error`
 - `loadstring`, `loadfile`, `dofile`
-- `tostring`, `tonumber`
+- `tostring` with `__tostring` metamethod support
 - `select`, `rawget`, `rawset`, `rawequal`
 - `setmetatable`, `getmetatable`
 - `collectgarbage` API
