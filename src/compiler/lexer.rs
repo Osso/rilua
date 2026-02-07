@@ -186,10 +186,14 @@ impl<'a> Lexer<'a> {
             // The `[` and any `=` signs were consumed, but that's fine —
             // we just fall through to consume the rest of the line.
         }
-        while let Some(c) = self.next_char() {
-            if c == '\n' {
+        // Short comment: scan until newline or EOF. The newline is consumed
+        // by next_char() which handles line tracking (including \r\n pairs).
+        while let Some(c) = self.peek_char() {
+            if c == '\n' || c == '\r' {
+                self.next_char(); // consume the newline (handles \r\n pairs)
                 return self.next_token();
             }
+            self.next_char();
         }
         Ok(self.end_of_file())
     }
@@ -239,8 +243,9 @@ impl<'a> Lexer<'a> {
     /// Per the Lua spec, a leading newline immediately after the opening
     /// bracket is skipped.
     fn read_long_bracket_body(&mut self, level: usize, is_string: bool) -> Result<()> {
-        // Skip an optional leading newline
-        if self.peek_char() == Some('\n') {
+        // Skip an optional leading newline (\n, \r, \r\n, or \n\r).
+        // next_char handles the \r\n / \n\r pair consumption.
+        if matches!(self.peek_char(), Some('\n') | Some('\r')) {
             self.next_char();
         }
         loop {
@@ -269,12 +274,21 @@ impl<'a> Lexer<'a> {
         self.iter.peek().map(|(_, c)| *c)
     }
 
-    /// Pops and returns the next character.
+    /// Pops and returns the next character. Handles line ending tracking:
+    /// `\n`, `\r`, `\r\n`, and `\n\r` are all single line endings (matching
+    /// Lua 5.1.1's `inclinenumber` in `llex.c:127-135`).
     fn next_char(&mut self) -> Option<char> {
         match self.iter.next() {
             Some((pos, c)) => {
                 self.pos = pos + c.len_utf8();
-                if c == '\n' {
+                if c == '\n' || c == '\r' {
+                    // Consume the second character of a \r\n or \n\r pair
+                    if let Some(&(next_pos, next_c)) = self.iter.peek() {
+                        if (c == '\r' && next_c == '\n') || (c == '\n' && next_c == '\r') {
+                            self.iter.next();
+                            self.pos = next_pos + next_c.len_utf8();
+                        }
+                    }
                     self.linebreaks.push(self.pos);
                 }
                 Some(c)
@@ -290,7 +304,7 @@ impl<'a> Lexer<'a> {
             if !c.is_ascii_whitespace() {
                 break;
             }
-            if c == '\n' {
+            if c == '\n' || c == '\r' {
                 ret = true;
             }
             self.next_char();
@@ -368,26 +382,35 @@ impl<'a> Lexer<'a> {
     /// Tokenizes a 'short' literal string, AKA a string denoted by single or
     /// double quotes and not by two square brackets.
     fn lex_string(&mut self, quote: char, _tok_start: usize) -> Result<TokenType> {
-        while let Some(c) = self.next_char() {
-            if c == quote {
-                return Ok(LiteralString);
-            } else if c == '\\' {
-                // TODO make backslash-escapes actually work. For now, we just
-                // ignore the next character, which is the correct behavior for
-                // newlines and quotes, but not escapes like '\n'.
-                self.next_char();
-            } else if c == '\n' {
-                return Err(self.error(SyntaxError::UnclosedString));
+        loop {
+            match self.peek_char() {
+                None => return Err(self.error(SyntaxError::UnclosedString)),
+                Some(c) if c == quote => {
+                    self.next_char();
+                    return Ok(LiteralString);
+                }
+                Some('\\') => {
+                    // Consume the backslash
+                    self.next_char();
+                    // Skip the escaped character. For \ddd, we just skip
+                    // one digit here; the parser handles full parsing.
+                    // For backslash-newline, next_char handles \r\n pairs.
+                    self.next_char();
+                }
+                Some('\n') | Some('\r') => {
+                    return Err(self.error(SyntaxError::UnclosedString));
+                }
+                _ => {
+                    self.next_char();
+                }
             }
         }
-
-        Err(self.error(SyntaxError::UnclosedString))
     }
 
     /// Reads in a number which starts with a digit (as opposed to a decimal point).
     fn lex_full_number(&mut self, tok_start: usize, first_char: char) -> Result<TokenType> {
         // Check for hex values
-        if first_char == '0' && self.try_next('x') {
+        if first_char == '0' && (self.try_next('x') || self.try_next('X')) {
             // Has to be at least one digit
             match self.next_char() {
                 Some(c) if c.is_ascii_hexdigit() => (),
@@ -686,6 +709,20 @@ mod tests {
         ];
         let linebreaks = &[0, 8, 43];
         check(input, tokens, linebreaks);
+    }
+
+    #[test]
+    fn hex_uppercase_prefix() {
+        let input = "0XFF";
+        let tokens = &[(LiteralHexNumber, 0, 4)];
+        check_line(input, tokens);
+    }
+
+    #[test]
+    fn hex_mixed_case() {
+        let input = "0XaB";
+        let tokens = &[(LiteralHexNumber, 0, 4)];
+        check_line(input, tokens);
     }
 
     // --- Long bracket tests ---

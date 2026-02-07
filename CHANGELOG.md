@@ -15,6 +15,20 @@ and this project adheres to
 - Dual MIT/Apache-2.0 license (upstream was MIT only)
 - `README.md` written for the WoW Emulation project context
 - `CLAUDE.md` with project-specific guidance for AI-assisted development
+- GitHub Actions CI workflow: format, clippy, test (MSRV 1.92.0 + stable),
+  docs, with branch protection gate
+- Short string escape sequence processing (Lua 5.1.1 `llex.c` `read_string`):
+  named escapes (`\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v`, `\\`, `\"`,
+  `\'`), decimal byte escapes (`\ddd`, 0-255), backslash-newline, and
+  unknown escape passthrough (backslash dropped)
+- `EscapeTooLarge` syntax error for `\ddd` values above 255
+- Uppercase hex literal prefix (`0X`) support alongside existing `0x`
+- Carriage return (`\r`) line ending support throughout the lexer:
+  `\r`, `\r\n`, and `\n\r` recognized as line endings in whitespace,
+  comments, short strings (rejected as unescaped newlines), and long
+  bracket bodies (leading newline skip and body normalization to `\n`)
+- Reference: `~/Repos/github.com/cogwheel/lua-wow` (WoW-compatible Lua
+  5.1.1 distribution documenting WoW client configuration)
 
 ### Changed
 
@@ -24,6 +38,10 @@ and this project adheres to
   "rilua {version} -- Lua 5.1.1 in Rust"
 - Crate-level doc comment updated to reference rilua
 - `.cargo/config.toml` header comment updated to reference rilua
+- `get_literal_string_contents` returns `Result<String>` instead of
+  `&str` to support escape processing and CR normalization
+- PUC-Rio Lua 5.1.1 test suite tests marked `#[ignore]` (skip in CI,
+  run with `cargo test -- --ignored`)
 
 ---
 

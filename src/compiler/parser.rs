@@ -116,9 +116,12 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.error(SyntaxError::TooManyNumbers))
     }
 
-    /// Converts a literal string's offsets into a real String.
-    #[must_use]
-    fn get_literal_string_contents(&self, tok: Token) -> &'a str {
+    /// Converts a literal string token into its semantic string value.
+    ///
+    /// For long strings, strips delimiters and the optional leading newline.
+    /// For short strings, strips quotes and processes escape sequences per
+    /// the Lua 5.1.1 spec (`llex.c:276-329`).
+    fn get_literal_string_contents(&self, tok: Token) -> Result<String> {
         let Token { start, len, typ } = tok;
         assert_eq!(typ, TokenType::LiteralString);
         let text = self.input.substring(start..(start + len as usize));
@@ -128,12 +131,26 @@ impl<'a> Parser<'a> {
             let level = text[1..].chars().take_while(|&c| c == '=').count();
             let delim_len = 2 + level; // `[` + `=`*level + `[`
             let inner = &text[delim_len..text.len() - delim_len];
-            // Skip a leading newline (Lua spec: first newline is ignored)
-            inner.strip_prefix('\n').unwrap_or(inner)
+            // Skip a leading newline: \n, \r, \r\n, or \n\r
+            // (Lua spec: first newline after opening bracket is ignored)
+            let inner = if let Some(rest) = inner.strip_prefix("\r\n") {
+                rest
+            } else if let Some(rest) = inner.strip_prefix("\n\r") {
+                rest
+            } else if let Some(rest) = inner.strip_prefix('\r') {
+                rest
+            } else if let Some(rest) = inner.strip_prefix('\n') {
+                rest
+            } else {
+                inner
+            };
+            // Normalize \r\n and \r to \n in the body (Lua spec: llex.c:257-263)
+            Ok(normalize_line_endings(inner))
         } else {
-            // Short string: strip the surrounding quotes
+            // Short string: strip quotes and process escape sequences
             assert!(len >= 2);
-            &text[1..text.len() - 1]
+            let raw = &text[1..text.len() - 1];
+            process_escapes(raw, start, |pos| self.input.line_and_column(pos))
         }
     }
 
@@ -883,15 +900,15 @@ impl<'a> Parser<'a> {
                 self.push(Instr::PushNum(idx));
             }
             TokenType::LiteralHexNumber => {
-                // Cut off the "0x"
+                // Cut off the "0x" or "0X" prefix
                 let text = &self.get_text(tok)[2..];
                 let number = u128::from_str_radix(text, 16).unwrap() as f64;
                 let idx = self.find_or_add_number(number)?;
                 self.push(Instr::PushNum(idx));
             }
             TokenType::LiteralString => {
-                let text = self.get_literal_string_contents(tok);
-                let idx = self.find_or_add_string(text)?;
+                let text = self.get_literal_string_contents(tok)?;
+                let idx = self.find_or_add_string(&text)?;
                 self.push(Instr::PushString(idx));
             }
             TokenType::Function => self.parse_fndef()?,
@@ -1007,6 +1024,104 @@ impl<'a> Parser<'a> {
         self.expect(TokenType::RParen)?;
         Ok(tup)
     }
+}
+
+/// Processes escape sequences in a short string's raw content (after quote
+/// stripping). Implements the Lua 5.1.1 escape rules from `llex.c:287-316`:
+///
+/// - Named escapes: `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v`
+/// - Decimal byte escapes: `\ddd` (up to 3 digits, value 0-255)
+/// Normalizes line endings in long string/comment bodies.
+/// Converts `\r\n` and standalone `\r` to `\n` per Lua spec (llex.c:257-263).
+fn normalize_line_endings(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            result.push('\n');
+            // Consume a following \n if present (\r\n -> single \n)
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// - Backslash-newline: `\` followed by `\n` or `\r` inserts a newline
+/// - Default: unknown escapes drop the backslash (e.g. `\z` -> `z`)
+fn process_escapes(
+    raw: &str,
+    tok_start: usize,
+    line_col: impl Fn(usize) -> (usize, usize),
+) -> Result<String> {
+    let mut result = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            result.push(c);
+            continue;
+        }
+
+        // Consume the character after the backslash
+        let Some(esc) = chars.next() else {
+            // Backslash at end of string — shouldn't happen since the
+            // lexer ensures the closing quote exists, but handle gracefully
+            result.push('\\');
+            break;
+        };
+
+        match esc {
+            'a' => result.push('\x07'),
+            'b' => result.push('\x08'),
+            'f' => result.push('\x0C'),
+            'n' => result.push('\n'),
+            'r' => result.push('\r'),
+            't' => result.push('\t'),
+            'v' => result.push('\x0B'),
+            '\n' | '\r' => {
+                // Backslash-newline: insert a newline. For \r\n or \n\r
+                // pairs, consume the second character too.
+                result.push('\n');
+                if let Some(&next) = chars.peek() {
+                    if (esc == '\r' && next == '\n') || (esc == '\n' && next == '\r') {
+                        chars.next();
+                    }
+                }
+            }
+            '0'..='9' => {
+                // Decimal byte escape: up to 3 digits, value 0-255
+                let mut value: u32 = u32::from(esc as u8 - b'0');
+                let mut count = 1;
+                while count < 3 {
+                    if let Some(&next) = chars.peek() {
+                        if next.is_ascii_digit() {
+                            value = value * 10 + u32::from(next as u8 - b'0');
+                            chars.next();
+                            count += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if value > 255 {
+                    let (line, col) = line_col(tok_start);
+                    return Err(Error::new(SyntaxError::EscapeTooLarge, line, col));
+                }
+                result.push(char::from(value as u8));
+            }
+            // Default: drop the backslash, keep the character.
+            // This handles \\, \", \', and any unknown escape.
+            other => result.push(other),
+        }
+    }
+
+    Ok(result)
 }
 
 /// Finds the index of the last local entry which matches `name`.
