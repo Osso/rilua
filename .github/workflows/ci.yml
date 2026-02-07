@@ -63,6 +63,13 @@ jobs:
           DEPS_CHANGED: ${{ steps.changed-files.outputs.deps_any_changed }}
           CI_CHANGED: ${{ steps.changed-files.outputs.ci_any_changed }}
         run: |
+          # On initial commits, tj-actions/changed-files produces empty
+          # outputs because there is no previous commit to diff against.
+          # Treat empty values as "true" so all jobs run.
+          [ -z "$RUST_CHANGED" ] && RUST_CHANGED="true"
+          [ -z "$DEPS_CHANGED" ] && DEPS_CHANGED="true"
+          [ -z "$CI_CHANGED" ] && CI_CHANGED="true"
+
           echo "Rust code changed: $RUST_CHANGED"
           echo "Dependencies changed: $DEPS_CHANGED"
           echo "CI changed: $CI_CHANGED"
