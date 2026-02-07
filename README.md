@@ -153,6 +153,13 @@ Dual-licensed under either:
 - Chris Neidhart for [lua-in-rust](https://github.com/cjneidhart/lua-in-rust)
 - Roberto Ierusalimschy, Waldemar Celes, and Luiz Henrique de Figueiredo for
   [Lua](https://lua.org)
+- Matthew Orlando (cogwheel) for
+  [lua-wow](https://github.com/cogwheel/lua-wow), a WoW-compatible Lua 5.1.1
+  distribution documenting the WoW client's Lua configuration
+- Meorawr for [Elune](https://github.com/Meorawr/elune), a Lua 5.1 fork
+  implementing WoW's tainted execution model
+- Meorawr for [WoWBench](https://sourceforge.net/projects/wowbench), a
+  standalone test harness emulating the WoW Lua addon environment
 
 ## Resources
 
