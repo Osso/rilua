@@ -31,6 +31,10 @@ and this project adheres to
   5.1.1 distribution documenting WoW client configuration)
 - Acknowledgments in `README.md` for lua-wow, Elune, and WoWBench
   reference projects
+- Compatibility CI workflow: builds PUC-Rio Lua 5.1.1 alongside rilua and
+  runs all test files through both interpreters, producing a PASS/FAIL
+  comparison table as a GitHub job summary. Informational only, never
+  blocks PRs.
 
 ### Fixed
 
