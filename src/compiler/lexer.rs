@@ -16,6 +16,9 @@ use std::str::CharIndices;
 pub(super) struct TokenStream<'a> {
     lexer: Lexer<'a>,
     lookahead: Option<Token>,
+    /// Second lookahead token, used only for table constructor disambiguation
+    /// (PUC-Rio's `luaX_lookahead`). Filled by `peek_next_type`.
+    lookahead2: Option<Token>,
 }
 
 /// A `Lexer` handles the raw conversion of characters to tokens.
@@ -36,13 +39,18 @@ impl<'a> TokenStream<'a> {
         Self {
             lexer: Lexer::new(source),
             lookahead: None,
+            lookahead2: None,
         }
     }
 
     /// Returns the next `Token`.
     pub(super) fn next(&mut self) -> Result<Token> {
         match self.lookahead.take() {
-            Some(token) => Ok(token),
+            Some(token) => {
+                // Promote lookahead2 to lookahead if present.
+                self.lookahead = self.lookahead2.take();
+                Ok(token)
+            }
             None => self.lexer.next_token(),
         }
     }
@@ -58,6 +66,21 @@ impl<'a> TokenStream<'a> {
     /// Returns the type of the next token.
     pub(super) fn peek_type(&mut self) -> Result<TokenType> {
         Ok(self.peek()?.typ)
+    }
+
+    /// Returns the type of the token *after* the next token (two-token lookahead).
+    /// Used only for table constructor disambiguation: `Name '='` vs expression.
+    /// Mirrors PUC-Rio's `luaX_lookahead`.
+    pub(super) fn peek_next_type(&mut self) -> Result<TokenType> {
+        // Ensure the first lookahead is filled.
+        if self.lookahead.is_none() {
+            self.lookahead = Some(self.lexer.next_token()?);
+        }
+        // Fill the second lookahead if needed.
+        if self.lookahead2.is_none() {
+            self.lookahead2 = Some(self.lexer.next_token()?);
+        }
+        Ok(self.lookahead2.as_ref().unwrap().typ)
     }
 
     /// Returns whether the next token is of the given type.

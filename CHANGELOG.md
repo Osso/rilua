@@ -69,6 +69,28 @@ and this project adheres to
   instances, shared upvalues, three-level chains, for-loop per-iteration
   capture, break with upvalues, while-loop closures, multiple upvalues,
   shadowing, and accumulator patterns
+- Lua 5.1.1 "Statements" (section 2.4) semantics:
+  - Multiple return values: `eval_chunk` handles arbitrary return counts
+    (previously panicked on >1)
+  - `local function` syntax: `local function f() ... end` with name visible
+    in body for recursion
+  - Unparenthesized function calls: `f "string"` and `f {table}` as single-
+    argument call forms
+  - Method call syntax: `obj:method(args)` with `Self_` instruction that
+    pushes method function and receiver. Method declarations
+    (`function t:m() ... end`) inject implicit `self` parameter.
+  - Generic `for` loop: `for k, v in explist do ... end` with `TForLoop`
+    instruction implementing the iterator protocol (generator, state,
+    control)
+  - `pairs(t)` and `next(table [, key])` standard library functions for
+    table iteration
+  - Table `#` length operator for sequence-style tables
+  - Two-token lookahead in table constructors for `Name '='` vs expression
+    disambiguation (mirrors PUC-Rio's `luaX_lookahead`)
+- Integration test `test17.lua` covering multiple return values, `local
+  function` recursion, upvalue capture, and unparenthesized calls
+- Integration test `test18.lua` covering method calls, generic `for` with
+  `pairs`/`ipairs`, table length operator, and `next()` function
 
 ### Fixed
 

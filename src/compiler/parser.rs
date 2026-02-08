@@ -297,6 +297,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
         match self.input.peek_type()? {
             TokenType::Dot => self.parse_fndecl_table(name),
+            TokenType::Colon => self.parse_fndecl_method(name),
             _ => self.parse_fndecl_basic(name),
         }
     }
@@ -326,7 +327,7 @@ impl<'a> Parser<'a> {
         };
         self.push(table_instr);
 
-        // Parse all the fields. There must be at least one.
+        // Parse all the dot-separated fields. There must be at least one.
         self.expect(TokenType::Dot)?;
         let mut last_field_id = self.expect_identifier_id()?;
         while self.input.try_pop(TokenType::Dot)?.is_some() {
@@ -334,9 +335,70 @@ impl<'a> Parser<'a> {
             last_field_id = self.expect_identifier_id()?;
         }
 
-        // Parse the function params and body.
-        self.parse_fndef()?;
-        self.push(Instr::SetField(0, last_field_id));
+        // Check for trailing `:method` (e.g. `function t.a:m() ... end`)
+        if self.input.try_pop(TokenType::Colon)?.is_some() {
+            self.push(Instr::GetField(last_field_id));
+            let method_id = self.expect_identifier_id()?;
+            self.parse_fndef_with_self()?;
+            self.push(Instr::SetField(0, method_id));
+        } else {
+            // Parse the function params and body.
+            self.parse_fndef()?;
+            self.push(Instr::SetField(0, last_field_id));
+        }
+        Ok(())
+    }
+
+    /// Parses `function Name:method(params) body end`.
+    ///
+    /// Like `parse_fndecl_table` but adds an implicit `self` parameter.
+    fn parse_fndecl_method(&mut self, table_name: &'a str) -> Result<()> {
+        // Push the table onto the stack.
+        let table_instr = match self.parse_prefix_identifier(table_name)? {
+            PlaceExp::Local(i) => Instr::GetLocal(i),
+            PlaceExp::Global(i) => Instr::GetGlobal(i),
+            PlaceExp::Upvalue(i) => Instr::GetUpval(i),
+            _ => unreachable!("place expression was not a variable"),
+        };
+        self.push(table_instr);
+
+        // Consume ':' and get method name
+        self.expect(TokenType::Colon)?;
+        let method_id = self.expect_identifier_id()?;
+
+        // Parse function body with implicit `self` parameter
+        self.parse_fndef_with_self()?;
+        self.push(Instr::SetField(0, method_id));
+        Ok(())
+    }
+
+    /// Parses a function definition body with an implicit `self` first parameter.
+    fn parse_fndef_with_self(&mut self) -> Result<()> {
+        let mut params = vec!["self"];
+        let lparen_tok = self.input.next()?;
+        match lparen_tok.typ {
+            TokenType::LParen | TokenType::LParenLineStart => (),
+            _ => return Err(self.err_unexpected(lparen_tok, TokenType::LParen)),
+        }
+        if self.input.try_pop(TokenType::RParen)?.is_none() {
+            params.push(self.expect_identifier()?);
+            while self.input.try_pop(TokenType::Comma)?.is_some() {
+                params.push(self.expect_identifier()?);
+            }
+            self.expect(TokenType::RParen)?;
+        }
+
+        if self.chunk.nested.len() >= u8::MAX as usize {
+            return Err(self.error(SyntaxError::Complexity));
+        }
+
+        self.nest_level += 1;
+        let new_chunk = self.parse_chunk(&params)?;
+        self.level_down();
+
+        self.chunk.nested.push(new_chunk);
+        self.push(Instr::Closure(self.chunk.nested.len() as u8 - 1));
+        self.expect(TokenType::End)?;
         Ok(())
     }
 
@@ -632,9 +694,16 @@ impl<'a> Parser<'a> {
         Ok(idx)
     }
 
-    /// Parses a `local` declaration.
+    /// Parses a `local` declaration, including `local function`.
     fn parse_locals(&mut self) -> Result<()> {
         self.input.next().unwrap(); // `local` keyword
+
+        // `local function Name funcbody` is syntactic sugar for
+        // `local Name; Name = function funcbody end`
+        if self.input.check_type(TokenType::Function)? {
+            return self.parse_local_function();
+        }
+
         let base = self.outer_local_counts.last().copied().unwrap_or(0);
         let old_local_count = (self.locals.len() - base) as u8;
 
@@ -683,6 +752,27 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parses `local function Name funcbody`.
+    ///
+    /// The name is added to locals **before** the body is parsed so that the
+    /// function can reference itself recursively.
+    fn parse_local_function(&mut self) -> Result<()> {
+        self.input.next()?; // consume `function`
+        let name = self.expect_identifier()?;
+
+        // Add local BEFORE parsing body so recursion works
+        self.add_local(name)?;
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        let local_slot = (self.locals.len() - 1 - base) as u8;
+
+        // Parse function body -> emits Closure instruction
+        self.parse_fndef()?;
+
+        // Assign closure to local
+        self.push(Instr::SetLocal(local_slot));
+        Ok(())
+    }
+
     /// Parse a comma-separated list of identifiers.
     fn parse_namelist(&mut self) -> Result<Vec<&'a str>> {
         let mut names = vec![self.expect_identifier()?];
@@ -692,14 +782,21 @@ impl<'a> Parser<'a> {
         Ok(names)
     }
 
-    /// Parses a `for` loop, before we know whether it's generic (`for i in t do`) or
-    /// numeric (`for i = 1,5 do`).
+    /// Parses a `for` loop, dispatching to numeric or generic forms.
     fn parse_for(&mut self) -> Result<()> {
         self.input.next()?; // `for` keyword
         let name = self.expect_identifier()?;
         self.nest_level += 1;
-        self.expect(TokenType::Assign)?;
-        self.parse_numeric_for(name)?;
+        match self.input.peek_type()? {
+            TokenType::Assign => {
+                self.input.next()?;
+                self.parse_numeric_for(name)?;
+            }
+            TokenType::Comma | TokenType::In => {
+                self.parse_generic_for(name)?;
+            }
+            _ => return Err(self.error(SyntaxError::UnexpectedTok)),
+        }
         self.level_down();
         Ok(())
     }
@@ -754,6 +851,110 @@ impl<'a> Parser<'a> {
 
         // Correct the ForPrep instruction.
         self.chunk.code[loop_start_instr_index] = Instr::ForPrep(current_local_slot, body_length);
+
+        let block = self.block_stack.pop().unwrap();
+        self.backpatch_breaks(&block);
+
+        Ok(())
+    }
+
+    /// Parses a generic `for` loop: `for var {, var} in explist do body end`.
+    ///
+    /// Three hidden locals hold the iterator state (generator, state, control).
+    /// User-declared variables come after those.
+    fn parse_generic_for(&mut self, first_name: &str) -> Result<()> {
+        // Collect all loop variable names
+        let mut names = vec![first_name.to_string()];
+        while self.input.try_pop(TokenType::Comma)?.is_some() {
+            let name = self.expect_identifier()?;
+            names.push(name.to_string());
+        }
+        self.expect(TokenType::In)?;
+
+        // Parse expression list (e.g. `pairs(t)`)
+        let (num_exprs, last_exp) = self.parse_explist()?;
+
+        // Adjust to exactly 3 values (generator, state, control)
+        match num_exprs.cmp(&3) {
+            Ordering::Less => {
+                if num_exprs < 3 {
+                    if let ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) = last_exp {
+                        // Last expr is a function call — adjust to return enough
+                        self.chunk.code.pop(); // pop the old Call
+                        self.push(Instr::Call(num_args, 3 - num_exprs + 1));
+                    } else {
+                        for _ in num_exprs..3 {
+                            self.push(Instr::PushNil);
+                        }
+                    }
+                }
+            }
+            Ordering::Greater => {
+                for _ in 3..num_exprs {
+                    self.push(Instr::Pop);
+                }
+            }
+            Ordering::Equal => (),
+        }
+
+        self.expect(TokenType::Do)?;
+
+        // Add three hidden locals: (for generator), (for state), (for control)
+        let base = self.outer_local_counts.last().copied().unwrap_or(0);
+        let hidden_base = (self.locals.len() - base) as u8;
+        self.add_local("")?; // generator
+        self.add_local("")?; // state
+        self.add_local("")?; // control
+
+        // Store the 3 iterator values into hidden locals
+        for i in (0..3).rev() {
+            self.push(Instr::SetLocal(hidden_base + i));
+        }
+
+        // Add user-declared loop variables
+        let num_vars = names.len() as u8;
+        for name in &names {
+            self.add_local(name)?;
+        }
+        // Initialize user variables to nil
+        for _ in 0..num_vars {
+            self.push(Instr::PushNil);
+        }
+        for i in (0..num_vars).rev() {
+            self.push(Instr::SetLocal(hidden_base + 3 + i));
+        }
+
+        // Jump to the TForLoop instruction (skip body on first entry)
+        let jump_index = self.chunk.code.len();
+        self.push(Instr::Jump(0)); // placeholder
+
+        // Parse body
+        self.block_stack.push(BlockInfo {
+            is_loop: true,
+            break_jumps: Vec::new(),
+        });
+        let body_start = self.chunk.code.len();
+        self.parse_statements()?;
+        self.expect(TokenType::End)?;
+
+        // If any loop variables are captured as upvalues, emit Close
+        let user_var_start = base + hidden_base as usize + 3;
+        let any_captured = self.locals[user_var_start..].iter().any(|l| l.captured);
+        if any_captured {
+            let slot = (user_var_start - base) as u8;
+            self.push(Instr::Close(slot));
+        }
+
+        // Emit TForLoop with embedded jump-back offset.
+        // After get_instr advances IP past TForLoop, jump(offset) must land
+        // exactly at body_start. So offset = body_start - (tforloop_index + 1).
+        let tforloop_index = self.chunk.code.len();
+        let jump_back = -((tforloop_index - body_start) as isize) - 1;
+        self.push(Instr::TForLoop(hidden_base, num_vars, jump_back));
+
+        // Backpatch the initial jump to skip to the TForLoop
+        let skip_offset = (tforloop_index - jump_index - 1) as isize;
+        self.chunk.code[jump_index] = Instr::Jump(skip_offset);
 
         let block = self.block_stack.pop().unwrap();
         self.backpatch_breaks(&block);
@@ -1138,10 +1339,9 @@ impl<'a> Parser<'a> {
                 let prefix = PlaceExp::TableIndex.into();
                 self.parse_prefix_extension(prefix)
             }
-            TokenType::LParen => {
+            TokenType::LParen | TokenType::LiteralString | TokenType::LCurly => {
                 self.eval_prefix_exp(&base_expr);
-                self.input.next()?;
-                let (num_args, _) = self.parse_call()?;
+                let num_args = self.parse_funcargs()?;
                 let prefix = PrefixExp::FunctionCall(num_args);
                 self.parse_prefix_extension(prefix)
             }
@@ -1149,11 +1349,49 @@ impl<'a> Parser<'a> {
                 let pos = self.input.next()?.start;
                 Err(self.error_at(SyntaxError::LParenLineStart, pos))
             }
-            TokenType::Colon => panic!("Method calls unsupported"),
-            TokenType::LiteralString | TokenType::LCurly => {
-                panic!("Unparenthesized function calls unsupported")
+            TokenType::Colon => {
+                self.eval_prefix_exp(&base_expr);
+                self.input.next()?; // consume ':'
+                let method_name = self.expect_identifier()?;
+                let name_idx = self.find_or_add_string(method_name.as_bytes())?;
+                self.push(Instr::Self_(name_idx));
+                let num_args = self.parse_funcargs()?;
+                let prefix = PrefixExp::FunctionCall(num_args + 1); // +1 for self
+                self.parse_prefix_extension(prefix)
             }
             _ => Ok(base_expr),
+        }
+    }
+
+    /// Parses function arguments in all three Lua forms:
+    /// - `(explist)` — parenthesized arguments
+    /// - `"string"` — single string literal argument
+    /// - `{fields}` — single table constructor argument
+    ///
+    /// Returns the number of arguments.
+    fn parse_funcargs(&mut self) -> Result<u8> {
+        match self.input.peek_type()? {
+            TokenType::LParen => {
+                self.input.next()?;
+                let (num_args, _) = self.parse_call()?;
+                Ok(num_args)
+            }
+            TokenType::LiteralString => {
+                let tok = self.input.next()?;
+                let bytes = self.get_literal_string_contents(tok)?;
+                let idx = self.find_or_add_string(&bytes)?;
+                self.push(Instr::PushString(idx));
+                Ok(1)
+            }
+            TokenType::LCurly => {
+                self.input.next()?; // consume '{'
+                self.parse_table()?;
+                Ok(1)
+            }
+            _ => {
+                let tok = self.input.next()?;
+                Err(self.err_unexpected(tok, TokenType::LParen))
+            }
         }
     }
 
@@ -1262,8 +1500,9 @@ impl<'a> Parser<'a> {
     /// Parses a table entry.
     fn parse_table_entry(&mut self, counter: u8) -> Result<u8> {
         match self.input.peek_type()? {
-            TokenType::Identifier => {
-                let index = self.expect_identifier_id().unwrap();
+            TokenType::Identifier if self.input.peek_next_type()? == TokenType::Assign => {
+                // Field assignment: Name '=' expr
+                let index = self.expect_identifier_id()?;
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
                 self.push(Instr::InitField(counter, index));

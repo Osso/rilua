@@ -146,6 +146,38 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(1)
     });
 
+    // next(table [, index])
+    //
+    // Allows a program to traverse all fields of a table. Its first argument
+    // is a table and its second argument is an index in this table. next
+    // returns the next index of the table and its associated value. When
+    // called with nil as its second argument, next returns an initial index
+    // and its associated value. When called with the last index, or with nil
+    // in an empty table, next returns nil.
+    add("next", |state| {
+        state.check_type(1, LuaType::Table)?;
+        // If no key provided, use nil (start of iteration)
+        let has_key = state.get_top() >= 2;
+        state.next_table(1, has_key)
+    });
+
+    // pairs(t)
+    //
+    // Returns three values: the next function, the table t, and nil, so
+    // that the construction `for k,v in pairs(t) do body end` will iterate
+    // over all key-value pairs of table t.
+    add("pairs", |state| {
+        state.check_type(1, LuaType::Table)?;
+        state.push_rust_fn(|state| {
+            state.check_type(1, LuaType::Table)?;
+            let has_key = state.get_top() >= 2;
+            state.next_table(1, has_key)
+        });
+        state.push_value(1);
+        state.push_nil();
+        Ok(3)
+    });
+
     // unpack(list)
     //
     // Returns list[1], list[2], ... list[#list]. The Lua version can take

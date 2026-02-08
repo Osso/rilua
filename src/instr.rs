@@ -110,6 +110,14 @@ pub(super) enum Instr {
     /// parameter.
     ForLoop(u8, isize),
 
+    /// Generic for loop iteration.
+    /// `param0` is the base local slot (generator at base, state at base+1,
+    /// control at base+2, user variables at base+3..).
+    /// `param1` is the number of user variables.
+    /// `param2` is the jump offset back to the loop body (negative) if the
+    /// iterator returns non-nil.
+    TForLoop(u8, u8, isize),
+
     /// Function call (number of arguments, number of needed return values).
     Call(u8, u8),
 
@@ -171,6 +179,12 @@ pub(super) enum Instr {
 
     /// Return n values from the chunk.
     Return(u8),
+
+    /// Method call setup: pop object, look up `object[string_literal[idx]]`,
+    /// push the method function, then push the object.
+    /// Stack after: `... method_fn object`
+    /// Used for `obj:method()` syntax.
+    Self_(u8),
 
     /// Create a closure from a Chunk and push it onto the stack.
     Closure(u8),

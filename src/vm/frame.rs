@@ -100,6 +100,7 @@ impl Frame {
                 Instr::SetGlobal(i) => state.instr_set_global(self, i),
 
                 // Functions
+                Instr::Self_(i) => state.instr_self(self, i)?,
                 Instr::Closure(i) => state.instr_closure(self, i),
                 Instr::Call(num_args, num_rets) => state.call(num_args, num_rets)?,
                 Instr::Return(n) => {
@@ -147,6 +148,9 @@ impl Frame {
                 // `for` loops
                 Instr::ForLoop(slot, offset) => state.instr_for_loop(self, slot, offset)?,
                 Instr::ForPrep(slot, len) => state.instr_for_prep(self, slot, len)?,
+                Instr::TForLoop(base, nvars, offset) => {
+                    state.instr_tfor_loop(self, base, nvars, offset)?;
+                }
 
                 // Unary
                 Instr::Length => state.instr_length()?,
@@ -217,6 +221,46 @@ impl State {
         self.push_closure(chunk, upvalues);
     }
 
+    fn instr_tfor_loop(
+        &mut self,
+        frame: &mut Frame,
+        base: u8,
+        nvars: u8,
+        offset: isize,
+    ) -> Result<()> {
+        let slot = base as usize + self.stack_bottom;
+        // Read generator, state, control from hidden locals
+        let generator = self.stack[slot].clone();
+        let state_val = self.stack[slot + 1].clone();
+        let control = self.stack[slot + 2].clone();
+
+        // Call generator(state, control)
+        self.stack.push(generator);
+        self.stack.push(state_val);
+        self.stack.push(control);
+        self.call(2, nvars)?;
+
+        // Check if first result is nil
+        let first_result_idx = self.stack.len() - nvars as usize;
+        let first_result = self.stack[first_result_idx].clone();
+
+        if matches!(first_result, Val::Nil) {
+            // Nil: exit loop. Pop results from the temp area.
+            self.stack.truncate(first_result_idx);
+        } else {
+            // Not nil: update control variable and copy results to user vars
+            self.stack[slot + 2] = first_result;
+            for i in 0..nvars as usize {
+                self.stack[slot + 3 + i] = self.stack[first_result_idx + i].clone();
+            }
+            // Pop the results from the temp area
+            self.stack.truncate(first_result_idx);
+            // Jump back to the loop body
+            frame.jump(offset);
+        }
+        Ok(())
+    }
+
     fn instr_for_prep(&mut self, frame: &mut Frame, local: u8, body_len: isize) -> Result<()> {
         let step_val = self.pop_val();
         let end_val = self.pop_val();
@@ -267,6 +311,21 @@ impl State {
             self.stack[slot + 3] = Val::Num(var);
             frame.jump(offset);
         }
+        Ok(())
+    }
+
+    fn instr_self(&mut self, frame: &mut Frame, field_id: u8) -> Result<()> {
+        // Pop the object, look up the method, push method then object.
+        // Use a block to limit the mutable borrow through as_table().
+        let mut obj = self.pop_val();
+        let obj_typ = obj.typ();
+        let key = self.get_string_constant(frame, field_id);
+        let method = obj
+            .as_table()
+            .map(|t| t.get(&key))
+            .ok_or_else(|| self.type_error(TypeError::TableIndex(obj_typ)))?;
+        self.stack.push(method);
+        self.stack.push(obj);
         Ok(())
     }
 
@@ -339,7 +398,7 @@ impl State {
     }
 
     fn instr_length(&mut self) -> Result<()> {
-        let val = self.pop_val();
+        let mut val = self.pop_val();
         match val.typ() {
             LuaType::String => {
                 let bytes = val.as_bytes().unwrap();
@@ -348,7 +407,10 @@ impl State {
                 Ok(())
             }
             LuaType::Table => {
-                panic!("Unsupported: Length of tables");
+                let t = val.as_table().unwrap();
+                let len = t.sequence_length();
+                self.stack.push(Val::Num(len as f64));
+                Ok(())
             }
             typ => Err(self.type_error(TypeError::Length(typ))),
         }

@@ -488,21 +488,15 @@ impl State {
         // Close any open upvalues that reference this frame's stack slots
         // before truncating the stack.
         self.close_upvalues(self.stack_bottom);
-        match num_vals_returned {
-            0 => {
-                self.stack.truncate(self.stack_bottom);
-                self.stack_bottom = old_stack_bottom;
-            }
-            1 => {
-                let ret_val = self.pop_val();
-                self.stack.truncate(self.stack_bottom);
-                self.stack_bottom = old_stack_bottom;
-                self.stack.push(ret_val);
-            }
-            _ => {
-                panic!("Can't handle multiple return values");
-            }
-        }
+
+        // Collect return values from the top of the stack, then restore
+        // the frame base and push them back.
+        let n = num_vals_returned as usize;
+        let ret_start = self.stack.len() - n;
+        let ret_vals: Vec<Val> = self.stack[ret_start..].to_vec();
+        self.stack.truncate(self.stack_bottom);
+        self.stack_bottom = old_stack_bottom;
+        self.stack.extend(ret_vals);
         Ok(num_vals_returned)
     }
 
@@ -576,6 +570,32 @@ impl State {
             if let Some(uv) = self.open_upvalues.remove(&key) {
                 uv.close(&self.stack);
             }
+        }
+    }
+
+    /// Helper for `next()` and `pairs()` stdlib functions.
+    ///
+    /// `table_idx` is the 1-based stack index of the table.
+    /// If `has_key` is true, the key is at stack index 2; otherwise
+    /// iteration starts from the beginning (nil key).
+    pub fn next_table(&mut self, table_idx: isize, has_key: bool) -> Result<u8> {
+        let idx = self.convert_idx(table_idx);
+        let key = if has_key { self.at_index(2) } else { Val::Nil };
+        let mut tbl_val = self.stack[idx].clone();
+        let tbl_typ = tbl_val.typ();
+        let t = tbl_val
+            .as_table()
+            .ok_or_else(|| self.type_error(TypeError::TableIndex(tbl_typ)))?;
+        if let Some((next_key, next_val)) = t.next_pair(&key) {
+            // Clear existing stack args and push key, value
+            self.stack.truncate(self.stack_bottom);
+            self.stack.push(next_key);
+            self.stack.push(next_val);
+            Ok(2)
+        } else {
+            self.stack.truncate(self.stack_bottom);
+            self.push_nil();
+            Ok(1)
         }
     }
 
