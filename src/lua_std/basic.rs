@@ -178,6 +178,37 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(3)
     });
 
+    // select(index, ...)
+    //
+    // If index is a number, returns all arguments after argument number
+    // index. Otherwise, index must be the string "#", and select returns
+    // the total number of extra arguments it received.
+    add("select", |state| {
+        state.check_any(1)?;
+        let n = state.get_top();
+        if state.typ(1) == LuaType::String && state.to_string(1) == "#" {
+            state.set_top(0);
+            state.push_number((n - 1) as f64);
+            return Ok(1);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let mut i = state.to_number(1)? as isize;
+        if i < 0 {
+            i = n as isize + i;
+        } else if i as usize > n {
+            i = n as isize;
+        }
+        if i < 1 {
+            return Err(state.error(ErrorKind::WithMessage(
+                "bad argument #1 to 'select' (index out of range)".to_string(),
+            )));
+        }
+        // Return all values from index i onward (n - i values)
+        #[allow(clippy::cast_sign_loss)]
+        let count = n - i as usize;
+        Ok(count as u8)
+    });
+
     // unpack(list)
     //
     // Returns list[1], list[2], ... list[#list]. The Lua version can take

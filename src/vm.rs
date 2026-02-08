@@ -136,7 +136,11 @@ impl State {
         } else {
             return Err(self.type_error(TypeError::FunctionCall(func_val.typ())));
         };
-        self.balance_stack(num_ret_expected as usize, num_ret_actual as usize);
+        // 255 signals "variable return count" (multi-return): keep all
+        // returned values on the stack without balancing.
+        if num_ret_expected != 255 {
+            self.balance_stack(num_ret_expected as usize, num_ret_actual as usize);
+        }
         Ok(())
     }
 
@@ -467,6 +471,20 @@ impl State {
         let old_stack_bottom = self.stack_bottom;
         self.stack_bottom = self.stack.len() - num_args as usize;
 
+        // Capture varargs: excess arguments beyond named params
+        let varargs = if chunk.is_vararg && num_args > chunk.num_params {
+            let excess = (num_args - chunk.num_params) as usize;
+            let start = self.stack_bottom + chunk.num_params as usize;
+            let va = self.stack[start..start + excess].to_vec();
+            // Remove excess args from the stack (keep only named params)
+            for _ in 0..excess {
+                self.stack.remove(start);
+            }
+            va
+        } else {
+            Vec::new()
+        };
+
         match num_args.cmp(&chunk.num_params) {
             Ordering::Less => {
                 for _ in num_args..chunk.num_params {
@@ -474,7 +492,10 @@ impl State {
                 }
             }
             Ordering::Greater => {
-                self.pop((num_args - chunk.num_params) as isize);
+                // Already handled above for vararg; discard excess for non-vararg
+                if !chunk.is_vararg {
+                    self.pop((num_args - chunk.num_params) as isize);
+                }
             }
             Ordering::Equal => (),
         }
@@ -483,7 +504,8 @@ impl State {
             self.push_nil();
         }
 
-        let mut frame = self.initialize_frame(chunk, upvalues);
+        let frame_base_size = (chunk.num_params + chunk.num_locals) as usize;
+        let mut frame = self.initialize_frame(chunk, upvalues, varargs);
         let num_vals_returned = frame.eval(self)?;
         // Close any open upvalues that reference this frame's stack slots
         // before truncating the stack.
@@ -491,16 +513,28 @@ impl State {
 
         // Collect return values from the top of the stack, then restore
         // the frame base and push them back.
-        let n = num_vals_returned as usize;
+        // 255 signals "variable return count": everything above the
+        // frame's base (params + locals) is a return value.
+        let n = if num_vals_returned == 255 {
+            self.stack.len() - self.stack_bottom - frame_base_size
+        } else {
+            num_vals_returned as usize
+        };
         let ret_start = self.stack.len() - n;
         let ret_vals: Vec<Val> = self.stack[ret_start..].to_vec();
         self.stack.truncate(self.stack_bottom);
         self.stack_bottom = old_stack_bottom;
         self.stack.extend(ret_vals);
-        Ok(num_vals_returned)
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(n as u8)
     }
 
-    fn initialize_frame(&mut self, chunk: Chunk, upvalues: Vec<Rc<Upvalue>>) -> Frame {
+    fn initialize_frame(
+        &mut self,
+        chunk: Chunk,
+        upvalues: Vec<Rc<Upvalue>>,
+        varargs: Vec<Val>,
+    ) -> Frame {
         let string_literal_start = self.string_literals.len();
         for s in &chunk.string_literals {
             let string_ptr = {
@@ -518,7 +552,7 @@ impl State {
             };
             self.string_literals.push(Val::Str(string_ptr));
         }
-        Frame::new(chunk, string_literal_start, upvalues)
+        Frame::new(chunk, string_literal_start, upvalues, varargs)
     }
 
     /// Pop a value from the stack

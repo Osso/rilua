@@ -121,6 +121,14 @@ pub(super) enum Instr {
     /// Function call (number of arguments, number of needed return values).
     Call(u8, u8),
 
+    /// Variable-argument function call.
+    /// `param0` is the function's register (stack position relative to
+    /// `stack_bottom`), analogous to PUC-Rio's `OP_CALL A` operand.
+    /// `param1` is the number of expected return values (255 = multi-return).
+    /// The actual argument count is computed at runtime as everything between
+    /// the function and TOS.
+    CallVar(u8, u8),
+
     /// Add the two values on the top of the stack.
     Add,
 
@@ -193,4 +201,17 @@ pub(super) enum Instr {
     /// popped to `table[1]`, the second-to-last value to `table[2]`, etc.
     /// Push the table back afterwards.
     SetList(u8),
+
+    /// Like `SetList`, but the count of array values is variable (from a
+    /// multi-return call or vararg as the last table constructor entry).
+    /// The `u8` parameter is the table's register (stack position relative
+    /// to `stack_bottom`), analogous to PUC-Rio's `OP_SETLIST A` operand.
+    /// All values between the table and TOS are assigned as sequential
+    /// integer keys starting at 1.
+    SetListMulti(u8),
+
+    /// Push vararg values onto the stack.
+    /// If the parameter is 0, push all varargs (multi-return position).
+    /// Otherwise, push exactly that many values, padding with nil if needed.
+    VarArg(u8),
 }

@@ -4,6 +4,9 @@
 #[derive(Debug)]
 pub(super) enum ExpDesc {
     Prefix(PrefixExp),
+    /// A `...` expression (varargs). Like `FunctionCall`, it can expand to
+    /// multiple values when it is the last expression in certain contexts.
+    VarArg,
     Other,
 }
 
@@ -15,6 +18,10 @@ pub(super) enum PrefixExp {
     Place(PlaceExp),
     /// A function call, and the number of arguments
     FunctionCall(u8),
+    /// A variable-argument function call. The parameter is the function's
+    /// register (stack position relative to `stack_bottom`), used to emit
+    /// `CallVar` for correct arg-count computation at runtime.
+    FunctionCallVar(u8),
     /// An expression wrapped in parentheses
     Parenthesized,
 }

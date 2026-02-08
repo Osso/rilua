@@ -23,10 +23,11 @@ assert(x == 10)
 assert(y == 20)
 assert(z == 30)
 
--- Return in table constructor (single value only for now;
--- multi-return expansion in constructors requires the multi-return protocol)
+-- Return in table constructor (multi-return expansion)
 local t = {three()}
 assert(t[1] == 10)
+assert(t[2] == 20)
+assert(t[3] == 30)
 
 -- Phase 2: local function (recursion)
 local function factorial(n)

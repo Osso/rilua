@@ -28,6 +28,7 @@ pub(super) struct Chunk {
     pub(super) string_literals: Vec<Vec<u8>>,
     pub(super) num_params: u8,
     pub(super) num_locals: u8,
+    pub(super) is_vararg: bool,
     pub(super) nested: Vec<Self>,
     pub(super) upvalue_descs: Vec<UpvalueDesc>,
 }

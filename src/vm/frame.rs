@@ -32,6 +32,8 @@ pub(super) struct Frame {
     /// The upvalues captured by the closure that created this frame.
     /// Empty for top-level chunks.
     upvalues: Vec<Rc<Upvalue>>,
+    /// Extra arguments passed to a vararg function (beyond named params).
+    varargs: Vec<Val>,
 }
 
 impl Frame {
@@ -41,6 +43,7 @@ impl Frame {
         chunk: Chunk,
         string_literal_start: usize,
         upvalues: Vec<Rc<Upvalue>>,
+        varargs: Vec<Val>,
     ) -> Self {
         let ip = 0;
         Self {
@@ -48,6 +51,7 @@ impl Frame {
             ip,
             string_literal_start,
             upvalues,
+            varargs,
         }
     }
 
@@ -102,7 +106,18 @@ impl Frame {
                 // Functions
                 Instr::Self_(i) => state.instr_self(self, i)?,
                 Instr::Closure(i) => state.instr_closure(self, i),
-                Instr::Call(num_args, num_rets) => state.call(num_args, num_rets)?,
+                Instr::Call(num_args, num_rets) => {
+                    state.call(num_args, num_rets)?;
+                }
+                Instr::CallVar(func_reg, num_rets) => {
+                    // Variable argument count: func_reg identifies the
+                    // function's stack position (relative to stack_bottom).
+                    // Everything between it and TOS is an argument.
+                    let func_abs = state.stack_bottom + func_reg as usize;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let actual_args = (state.stack.len() - func_abs - 1) as u8;
+                    state.call(actual_args, num_rets)?;
+                }
                 Instr::Return(n) => {
                     return Ok(n);
                 }
@@ -124,7 +139,7 @@ impl Frame {
                 Instr::Subtract => state.eval_float_float(<f64 as ops::Sub>::sub)?,
                 Instr::Multiply => state.eval_float_float(<f64 as ops::Mul>::mul)?,
                 Instr::Divide => state.eval_float_float(<f64 as ops::Div>::div)?,
-                Instr::Mod => state.eval_float_float(<f64 as ops::Rem>::rem)?,
+                Instr::Mod => state.eval_float_float(lua_mod)?,
                 Instr::Pow => state.eval_float_float(f64::powf)?,
 
                 // Equality
@@ -181,6 +196,21 @@ impl Frame {
                     let abs_base = state.stack_bottom + base as usize;
                     state.close_upvalues(abs_base);
                 }
+
+                // Varargs
+                Instr::VarArg(n) => {
+                    let wanted = if n == 0 {
+                        self.varargs.len()
+                    } else {
+                        n as usize
+                    };
+                    for i in 0..wanted {
+                        let val = self.varargs.get(i).cloned().unwrap_or(Val::Nil);
+                        state.stack.push(val);
+                    }
+                }
+
+                Instr::SetListMulti(fixed) => state.instr_set_list_multi(fixed)?,
 
                 // Misc.
                 Instr::Concat => state.concat_helper(2)?,
@@ -448,6 +478,29 @@ impl State {
         self.globals.insert(name.to_string(), val);
     }
 
+    /// Like `instr_set_list`, but the value count is variable (from a
+    /// multi-return call or vararg as the last table constructor entry).
+    ///
+    /// `table_reg` is the table's stack position relative to `stack_bottom`,
+    /// computed at compile time from the parser's `freereg` counter (analogous
+    /// to PUC-Rio's `OP_SETLIST A` operand). All values between the table
+    /// and TOS are assigned as `table[1]`, `table[2]`, etc.
+    fn instr_set_list_multi(&mut self, table_reg: u8) -> Result<()> {
+        let table_idx = self.stack_bottom + table_reg as usize;
+        let values = self.stack.split_off(table_idx + 1);
+        let mut tbl_value = self.stack.pop().unwrap();
+        if let Some(tbl) = tbl_value.as_table() {
+            for (i, val) in values.into_iter().enumerate() {
+                let key = Val::Num((i + 1) as f64);
+                tbl.insert(key, val)?;
+            }
+            self.stack.push(tbl_value);
+            Ok(())
+        } else {
+            panic!("Used Instr::SetListMulti on a {}", tbl_value.typ())
+        }
+    }
+
     fn instr_set_list(&mut self, count: u8) -> Result<()> {
         assert!(count > 0, "Shouldn't use SetList with count 0");
         let values = self.stack.split_off(self.stack.len() - count as usize);
@@ -541,4 +594,10 @@ fn check_numeric_for_condition(var: f64, limit: f64, step: f64) -> bool {
     } else {
         false
     }
+}
+
+/// Lua's modulo: `a % b == a - floor(a/b)*b`.
+/// Matches PUC-Rio's `luai_nummod` in `luaconf.h`.
+fn lua_mod(a: f64, b: f64) -> f64 {
+    a - (a / b).floor() * b
 }

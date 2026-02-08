@@ -47,6 +47,7 @@ pub enum SyntaxError {
     UnfinishedLongComment,
     UnfinishedLongString,
     LParenLineStart,
+    VarargOutsideVarargFunc,
 }
 
 #[derive(Debug)]
@@ -173,6 +174,9 @@ impl fmt::Display for SyntaxError {
             UnfinishedLongComment => write!(f, "unfinished long comment"),
             UnfinishedLongString => write!(f, "unfinished long string"),
             LParenLineStart => write!(f, "ambiguous function call"),
+            VarargOutsideVarargFunc => {
+                write!(f, "cannot use '...' outside a vararg function")
+            }
         }
     }
 }

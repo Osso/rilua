@@ -91,8 +91,28 @@ and this project adheres to
   function` recursion, upvalue capture, and unparenthesized calls
 - Integration test `test18.lua` covering method calls, generic `for` with
   `pairs`/`ipairs`, table length operator, and `next()` function
+- Lua 5.1.1 "Expressions" (section 2.5) semantics:
+  - Varargs (`...`): variadic function parameters and expression position.
+    `is_vararg` flag on `Chunk`, `VarArg(u8)` instruction, vararg storage
+    in `Frame`. Top-level chunks are implicitly vararg (matches PUC-Rio).
+  - Multi-return expansion in table constructors: `{f()}` and `{1, 2, f()}`
+    correctly expand all return values of the last expression via
+    `SetListMulti` instruction
+  - Multi-return expansion in function call arguments: `g(a, f())` expands
+    all return values of the last argument via `CallVar` instruction with
+    variable argument count protocol (`num_args = 255`)
+  - `select('#', ...)` returns count of varargs; `select(n, ...)` returns
+    the n-th value onward
+- Integration test `test19.lua` covering modulo semantics, varargs,
+  multi-return expansion in table constructors and function calls, and
+  `select()`
 
 ### Fixed
+
+- Modulo operator uses floor division semantics per Lua 5.1.1 spec:
+  `a % b == a - math.floor(a/b)*b`. Previously used Rust's truncated
+  remainder, giving wrong results for negative operands (e.g. `-5 % 3`
+  returned `-2` instead of `1`).
 
 - `#` operator on strings with bytes 128-255 returned incorrect length
   (e.g. `#"\255"` returned 2 instead of 1) because Rust `String` encoded

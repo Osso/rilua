@@ -45,6 +45,22 @@ struct Parser<'a> {
     /// When entering a nested function, the current locals count is pushed here.
     /// This marks the boundary between the outer function's locals and the inner one's.
     outer_local_counts: Vec<usize>,
+    /// Stack tracking whether the current function is vararg. Pushed/popped
+    /// in tandem with `outer_chunks` (one entry per function nesting level).
+    is_vararg_stack: Vec<bool>,
+    /// Tracks the next free stack slot relative to `stack_bottom`, analogous to
+    /// PUC-Rio's `FuncState.freereg`. Equals params + locals_in_scope + temporaries.
+    /// Saved/restored across nested function definitions via `outer_freeregs`.
+    freereg: usize,
+    /// Saved `freereg` values for enclosing functions (pushed/popped in tandem
+    /// with `outer_chunks`).
+    outer_freeregs: Vec<usize>,
+    /// Tracks instructions whose register operand needs fixup at the end of
+    /// `parse_chunk` to account for the VM's local slot pre-allocation.
+    /// Each entry is `(instruction_index, num_locals_at_emission)`.
+    /// The register operand gets adjusted by `final_num_locals - num_locals_at_emission`.
+    /// Used for `SetListMulti` (table register) and `CallVar` (function register).
+    register_fixups: Vec<(usize, u8)>,
 }
 
 /// Parses Lua source code into a `Chunk`.
@@ -57,6 +73,10 @@ pub(super) fn parse_str(source: &str) -> Result<Chunk> {
         outer_chunks: Vec::new(),
         block_stack: Vec::new(),
         outer_local_counts: Vec::new(),
+        is_vararg_stack: Vec::new(),
+        freereg: 0,
+        outer_freeregs: Vec::new(),
+        register_fixups: Vec::new(),
     };
     parser.parse_all()
 }
@@ -76,6 +96,7 @@ impl<'a> Parser<'a> {
                 level: self.nest_level,
                 captured: false,
             });
+            self.freereg += 1;
             let locals_in_chunk = self.locals.len() - base;
             if locals_in_chunk > self.chunk.num_locals as usize {
                 self.chunk.num_locals += 1;
@@ -204,6 +225,7 @@ impl<'a> Parser<'a> {
                     close_base = self.locals.len() - 1;
                 }
                 self.locals.pop();
+                self.freereg -= 1;
             } else {
                 break;
             }
@@ -215,16 +237,139 @@ impl<'a> Parser<'a> {
         self.nest_level -= 1;
     }
 
-    /// Adds an instruction to the output.
+    /// Returns true if the current function being parsed is vararg.
+    fn current_chunk_is_vararg(&self) -> bool {
+        self.is_vararg_stack.last().copied().unwrap_or(false)
+    }
+
+    /// Adds an instruction to the output and updates `freereg` to reflect the
+    /// instruction's stack effect. Mirrors PUC-Rio's `freereg` maintenance.
     fn push(&mut self, instr: Instr) {
+        self.apply_freereg_effect(&instr);
         self.chunk.code.push(instr);
+    }
+
+    /// Removes the last instruction from the code and undoes its `freereg`
+    /// effect. Used when replacing a Call/VarArg instruction with a different
+    /// return count.
+    fn pop_instr(&mut self) -> Option<Instr> {
+        let instr = self.chunk.code.pop()?;
+        self.undo_freereg_effect(&instr);
+        Some(instr)
+    }
+
+    /// Applies the `freereg` stack effect for the given instruction (push).
+    fn apply_freereg_effect(&mut self, instr: &Instr) {
+        let (pushes, pops) = Self::stack_effect(instr);
+        self.freereg = self.freereg + pushes - pops;
+    }
+
+    /// Undoes the `freereg` stack effect for the given instruction (pop).
+    fn undo_freereg_effect(&mut self, instr: &Instr) {
+        let (pushes, pops) = Self::stack_effect(instr);
+        self.freereg = self.freereg + pops - pushes;
+    }
+
+    /// Returns (pushes, pops) for a given instruction.
+    fn stack_effect(instr: &Instr) -> (usize, usize) {
+        match *instr {
+            // Push +1
+            Instr::PushNil
+            | Instr::PushBool(_)
+            | Instr::PushNum(_)
+            | Instr::PushString(_)
+            | Instr::GetLocal(_)
+            | Instr::GetGlobal(_)
+            | Instr::GetUpval(_)
+            | Instr::NewTable
+            | Instr::Closure(_) => (1, 0),
+
+            // Pop 1, push 1: net 0
+            Instr::GetField(_) | Instr::Not | Instr::Negate | Instr::Length => (1, 1),
+
+            // Pop 2 (key + table), push 1: net -1
+            Instr::GetTable => (1, 2),
+
+            // Pop 1
+            Instr::Pop | Instr::SetLocal(_) | Instr::SetGlobal(_) | Instr::SetUpval(_) => (0, 1),
+
+            // Binary ops: pop 2, push 1
+            Instr::Add
+            | Instr::Subtract
+            | Instr::Multiply
+            | Instr::Divide
+            | Instr::Mod
+            | Instr::Pow
+            | Instr::Concat
+            | Instr::Less
+            | Instr::LessEqual
+            | Instr::Greater
+            | Instr::GreaterEqual
+            | Instr::Equal
+            | Instr::NotEqual => (1, 2),
+
+            // Table field init: pops value
+            Instr::InitField(_, _) => (0, 1),
+            // Table index init: pops key + value
+            Instr::InitIndex(_) => (0, 2),
+            // SetList: pops n values
+            Instr::SetList(n) => (0, n as usize),
+            // SetListMulti: dynamic, handled by caller
+            Instr::SetListMulti(_) => (0, 0),
+
+            // SetField: pops value + removes table
+            Instr::SetField(_, _) => (0, 2),
+            // SetTable: pops value + removes key + removes table
+            Instr::SetTable(_) => (0, 3),
+
+            // Self_: pops object, pushes method + object
+            Instr::Self_(_) => (2, 1),
+
+            // Call: pops func + args, pushes rets.
+            // 255 for rets = variable return count (multi-return, handled by caller).
+            Instr::Call(args, rets) => {
+                let pops = args as usize + 1;
+                let pushes = if rets == 255 { 0 } else { rets as usize };
+                (pushes, pops)
+            }
+
+            // CallVar: variable arg count. The function register is known but
+            // the arg count is dynamic. For freereg tracking, it pops everything
+            // above the function register (net: reset to func_reg) then pushes rets.
+            // Since freereg is already at the right position (from parse_funcargs),
+            // we just account for the function itself being consumed.
+            Instr::CallVar(_, rets) => {
+                let pushes = if rets == 255 { 0 } else { rets as usize };
+                // CallVar consumes everything from func_reg to TOS.
+                // freereg was not advanced for the multi-return args, so it's
+                // already at the right level. We just push the return values.
+                (pushes, 1)
+            }
+
+            // VarArg: pushes n values (0 = dynamic)
+            Instr::VarArg(n) => (n as usize, 0),
+
+            // No stack effect
+            Instr::Return(_)
+            | Instr::Jump(_)
+            | Instr::Close(_)
+            | Instr::BranchTrueKeep(_)
+            | Instr::BranchFalseKeep(_)
+            | Instr::ForPrep(_, _)
+            | Instr::ForLoop(_, _)
+            | Instr::TForLoop(_, _, _) => (0, 0),
+
+            // Branch: pops condition
+            Instr::BranchFalse(_) => (0, 1),
+        }
     }
 
     // Actual parsing
 
     /// The main entry point for the parser. This parses the entire input.
     fn parse_all(mut self) -> Result<Chunk> {
-        let c = self.parse_chunk(&[])?;
+        // Top-level chunk is always vararg (matches PUC-Rio behavior)
+        let c = self.parse_chunk(&[], true)?;
         let token = self.input.next()?;
         assert_eq!(self.nest_level, 0);
         if token.typ == TokenType::EndOfFile {
@@ -235,22 +380,46 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a `Chunk`.
-    fn parse_chunk(&mut self, params: &[&str]) -> Result<Chunk> {
+    fn parse_chunk(&mut self, params: &[&str], is_vararg: bool) -> Result<Chunk> {
         self.outer_chunks.push(self.chunk.clone());
         self.outer_local_counts.push(self.locals.len());
+        self.is_vararg_stack.push(is_vararg);
+        self.outer_freeregs.push(self.freereg);
+        self.freereg = 0;
         self.chunk = Chunk::default();
+        // Save and reset SetListMulti fixups for this chunk scope
+        let outer_fixups = std::mem::take(&mut self.register_fixups);
 
         self.chunk.num_params = params.len() as u8;
+        self.chunk.is_vararg = is_vararg;
         for &param in params {
             self.locals.push(LocalInfo {
                 name: param.into(),
                 level: self.nest_level,
                 captured: false,
             });
+            self.freereg += 1;
         }
 
         self.parse_statements()?;
         self.push(Instr::Return(0));
+
+        // Post-patch register-based instructions: adjust register operands to
+        // account for the VM's pre-allocation of `num_locals` nil slots at
+        // function entry. Each fixup records the instruction index and the value
+        // of num_locals at emission time. The delta (final - emission) is the
+        // number of not-yet-declared locals whose pre-allocated slots shift
+        // temporaries upward on the stack.
+        let final_num_locals = self.chunk.num_locals;
+        for &(idx, num_locals_at_emission) in &self.register_fixups {
+            let delta = final_num_locals - num_locals_at_emission;
+            match &mut self.chunk.code[idx] {
+                Instr::SetListMulti(reg) | Instr::CallVar(reg, _) => {
+                    *reg += delta;
+                }
+                _ => {}
+            }
+        }
 
         let tmp_chunk = self.chunk.clone();
         self.chunk = self.outer_chunks.pop().unwrap();
@@ -258,6 +427,9 @@ impl<'a> Parser<'a> {
         // Restore locals to the boundary of the enclosing function
         let boundary = self.outer_local_counts.pop().unwrap();
         self.locals.truncate(boundary);
+        self.is_vararg_stack.pop();
+        self.freereg = self.outer_freeregs.pop().unwrap();
+        self.register_fixups = outer_fixups;
 
         if option_env!("LUA_DEBUG_PARSER").is_some() {
             println!("Compiled chunk: {:#?}", &tmp_chunk);
@@ -393,7 +565,7 @@ impl<'a> Parser<'a> {
         }
 
         self.nest_level += 1;
-        let new_chunk = self.parse_chunk(&params)?;
+        let new_chunk = self.parse_chunk(&params, false)?;
         self.level_down();
 
         self.chunk.nested.push(new_chunk);
@@ -406,8 +578,15 @@ impl<'a> Parser<'a> {
     /// block.
     fn parse_return(&mut self) -> Result<()> {
         self.input.next()?; // 'return' keyword
-        let (n, _) = self.parse_explist()?;
-        self.push(Instr::Return(n));
+        let (n, last_exp) = self.parse_explist()?;
+        if is_multi_return(&last_exp) && n > 0 {
+            self.patch_last_for_multi_return(&last_exp);
+            // 255 signals "variable return count" to the VM: return
+            // everything on the stack above the frame's locals.
+            self.push(Instr::Return(255));
+        } else {
+            self.push(Instr::Return(n));
+        }
         self.input.try_pop(TokenType::Semi)?;
         Ok(())
     }
@@ -490,6 +669,16 @@ impl<'a> Parser<'a> {
                 self.push(Instr::Call(num_args, 0));
                 Ok(())
             }
+            PrefixExp::FunctionCallVar(func_reg) => {
+                // Variable-arg call used as a statement: discard all returns.
+                // Don't use push() — see eval_prefix_exp for rationale.
+                let instr_idx = self.chunk.code.len();
+                self.chunk.code.push(Instr::CallVar(func_reg, 0));
+                self.freereg = func_reg as usize;
+                self.register_fixups
+                    .push((instr_idx, self.chunk.num_locals));
+                Ok(())
+            }
             PrefixExp::Place(first_place) => self.parse_assign(first_place),
         }
     }
@@ -508,11 +697,21 @@ impl<'a> Parser<'a> {
         let diff = num_lvals - num_rvals;
         if diff > 0 {
             if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
-                let num_args = match self.chunk.code.pop() {
+                let num_args = match self.pop_instr() {
                     Some(Instr::Call(args, _)) => args,
                     i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
                 };
                 self.push(Instr::Call(num_args, 1 + diff as u8));
+            } else if let ExpDesc::Prefix(PrefixExp::FunctionCallVar(_)) = last_exp {
+                let func_reg = match self.pop_instr() {
+                    Some(Instr::CallVar(reg, _)) => reg,
+                    i => unreachable!("FunctionCallVar but last instruction was {:?}", i),
+                };
+                self.push(Instr::CallVar(func_reg, 1 + diff as u8));
+            } else if matches!(last_exp, ExpDesc::VarArg) {
+                // Patch VarArg(1) to VarArg(1 + diff) to return enough values
+                self.pop_instr();
+                self.push(Instr::VarArg(1 + diff as u8));
             } else {
                 for _ in 0..diff {
                     self.push(Instr::PushNil);
@@ -549,7 +748,9 @@ impl<'a> Parser<'a> {
     /// Parses an expression which can appear on the left side of an assignment.
     fn parse_place_exp(&mut self) -> Result<PlaceExp> {
         match self.parse_prefix_exp()? {
-            PrefixExp::Parenthesized | PrefixExp::FunctionCall(_) => {
+            PrefixExp::Parenthesized
+            | PrefixExp::FunctionCall(_)
+            | PrefixExp::FunctionCallVar(_) => {
                 let tok = self.input.next()?;
                 Err(self.err_unexpected(tok, TokenType::Assign))
             }
@@ -562,6 +763,16 @@ impl<'a> Parser<'a> {
         match exp {
             PrefixExp::FunctionCall(num_args) => {
                 self.push(Instr::Call(*num_args, 1));
+            }
+            PrefixExp::FunctionCallVar(func_reg) => {
+                // Don't use push() — CallVar's stack_effect can't account for
+                // the variable number of fixed args between the function and
+                // the multi-return expansion. Set freereg directly.
+                let instr_idx = self.chunk.code.len();
+                self.chunk.code.push(Instr::CallVar(*func_reg, 1));
+                self.freereg = *func_reg as usize + 1;
+                self.register_fixups
+                    .push((instr_idx, self.chunk.num_locals));
             }
             PrefixExp::Parenthesized => (),
             PrefixExp::Place(place) => {
@@ -721,8 +932,17 @@ impl<'a> Parser<'a> {
                 }
                 Ordering::Greater => {
                     if let ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) = last_exp {
-                        self.chunk.code.pop(); // Pop the old 'Call' instruction
+                        self.pop_instr(); // Remove the old 'Call' instruction
                         self.push(Instr::Call(num_args, 1 + num_names - num_rvalues));
+                    } else if let ExpDesc::Prefix(PrefixExp::FunctionCallVar(_)) = last_exp {
+                        let func_reg = match self.pop_instr() {
+                            Some(Instr::CallVar(reg, _)) => reg,
+                            i => unreachable!("FunctionCallVar but last instr was {:?}", i),
+                        };
+                        self.push(Instr::CallVar(func_reg, 1 + num_names - num_rvalues));
+                    } else if matches!(last_exp, ExpDesc::VarArg) {
+                        self.pop_instr(); // Remove the old VarArg instruction
+                        self.push(Instr::VarArg(1 + num_names - num_rvalues));
                     } else {
                         for _ in num_rvalues..num_names {
                             self.push(Instr::PushNil);
@@ -880,8 +1100,17 @@ impl<'a> Parser<'a> {
                 if num_exprs < 3 {
                     if let ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) = last_exp {
                         // Last expr is a function call — adjust to return enough
-                        self.chunk.code.pop(); // pop the old Call
+                        self.pop_instr(); // remove the old Call
                         self.push(Instr::Call(num_args, 3 - num_exprs + 1));
+                    } else if let ExpDesc::Prefix(PrefixExp::FunctionCallVar(_)) = last_exp {
+                        let func_reg = match self.pop_instr() {
+                            Some(Instr::CallVar(reg, _)) => reg,
+                            i => unreachable!("FunctionCallVar but last instr was {:?}", i),
+                        };
+                        self.push(Instr::CallVar(func_reg, 3 - num_exprs + 1));
+                    } else if matches!(last_exp, ExpDesc::VarArg) {
+                        self.pop_instr();
+                        self.push(Instr::VarArg(3 - num_exprs + 1));
                     } else {
                         for _ in num_exprs..3 {
                             self.push(Instr::PushNil);
@@ -1340,9 +1569,21 @@ impl<'a> Parser<'a> {
                 self.parse_prefix_extension(prefix)
             }
             TokenType::LParen | TokenType::LiteralString | TokenType::LCurly => {
+                // Capture the function's register before eval_prefix_exp pushes it.
+                #[allow(clippy::cast_possible_truncation)]
+                let func_reg = self.freereg as u8;
                 self.eval_prefix_exp(&base_expr);
-                let num_args = self.parse_funcargs()?;
-                let prefix = PrefixExp::FunctionCall(num_args);
+                let (num_args, last_exp) = self.parse_funcargs()?;
+                // If the last argument is a multi-return expression (function
+                // call or vararg), patch it to return all values and use
+                // CallVar with the function's register for correct runtime
+                // arg-count computation.
+                let prefix = if is_multi_return(&last_exp) && num_args > 0 {
+                    self.patch_last_for_multi_return(&last_exp);
+                    PrefixExp::FunctionCallVar(func_reg)
+                } else {
+                    PrefixExp::FunctionCall(num_args)
+                };
                 self.parse_prefix_extension(prefix)
             }
             TokenType::LParenLineStart => {
@@ -1354,9 +1595,18 @@ impl<'a> Parser<'a> {
                 self.input.next()?; // consume ':'
                 let method_name = self.expect_identifier()?;
                 let name_idx = self.find_or_add_string(method_name.as_bytes())?;
+                // Self_ pops object, pushes method then object.
+                // The method function is at freereg before Self_ is emitted.
+                #[allow(clippy::cast_possible_truncation)]
+                let func_reg = self.freereg as u8;
                 self.push(Instr::Self_(name_idx));
-                let num_args = self.parse_funcargs()?;
-                let prefix = PrefixExp::FunctionCall(num_args + 1); // +1 for self
+                let (num_args, last_exp) = self.parse_funcargs()?;
+                let prefix = if is_multi_return(&last_exp) && num_args > 0 {
+                    self.patch_last_for_multi_return(&last_exp);
+                    PrefixExp::FunctionCallVar(func_reg)
+                } else {
+                    PrefixExp::FunctionCall(num_args + 1) // +1 for self
+                };
                 self.parse_prefix_extension(prefix)
             }
             _ => Ok(base_expr),
@@ -1368,25 +1618,25 @@ impl<'a> Parser<'a> {
     /// - `"string"` — single string literal argument
     /// - `{fields}` — single table constructor argument
     ///
-    /// Returns the number of arguments.
-    fn parse_funcargs(&mut self) -> Result<u8> {
+    /// Returns `(num_args, last_exp)`: the argument count and the `ExpDesc`
+    /// of the last argument (used for multi-return expansion).
+    fn parse_funcargs(&mut self) -> Result<(u8, ExpDesc)> {
         match self.input.peek_type()? {
             TokenType::LParen => {
                 self.input.next()?;
-                let (num_args, _) = self.parse_call()?;
-                Ok(num_args)
+                self.parse_call()
             }
             TokenType::LiteralString => {
                 let tok = self.input.next()?;
                 let bytes = self.get_literal_string_contents(tok)?;
                 let idx = self.find_or_add_string(&bytes)?;
                 self.push(Instr::PushString(idx));
-                Ok(1)
+                Ok((1, ExpDesc::Other))
             }
             TokenType::LCurly => {
                 self.input.next()?; // consume '{'
                 self.parse_table()?;
-                Ok(1)
+                Ok((1, ExpDesc::Other))
             }
             _ => {
                 let tok = self.input.next()?;
@@ -1428,7 +1678,11 @@ impl<'a> Parser<'a> {
             TokenType::False => self.push(Instr::PushBool(false)),
             TokenType::True => self.push(Instr::PushBool(true)),
             TokenType::DotDotDot => {
-                return Err(self.error(ErrorKind::UnsupportedFeature));
+                if !self.current_chunk_is_vararg() {
+                    return Err(self.error(SyntaxError::VarargOutsideVarargFunc));
+                }
+                self.push(Instr::VarArg(1)); // default: single value
+                return Ok(ExpDesc::VarArg);
             }
             _ => {
                 return Err(self.err_unexpected(tok, TokenType::Nil));
@@ -1438,33 +1692,46 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses the parameters in a function definition.
-    fn parse_params(&mut self) -> Result<Vec<&'a str>> {
+    /// Returns the list of named parameters and whether the function is vararg.
+    fn parse_params(&mut self) -> Result<(Vec<&'a str>, bool)> {
         let lparen_tok = self.input.next()?;
         match lparen_tok.typ {
             TokenType::LParen | TokenType::LParenLineStart => (),
             _ => return Err(self.err_unexpected(lparen_tok, TokenType::LParen)),
         }
         let mut args = Vec::new();
+        let mut is_vararg = false;
         if self.input.try_pop(TokenType::RParen)?.is_some() {
-            return Ok(args);
+            return Ok((args, false));
         }
-        args.push(self.expect_identifier()?);
-        while self.input.try_pop(TokenType::Comma)?.is_some() {
+        // Check if first token is `...` (vararg-only function)
+        if self.input.check_type(TokenType::DotDotDot)? {
+            self.input.next()?;
+            is_vararg = true;
+        } else {
             args.push(self.expect_identifier()?);
+            while self.input.try_pop(TokenType::Comma)?.is_some() {
+                if self.input.check_type(TokenType::DotDotDot)? {
+                    self.input.next()?;
+                    is_vararg = true;
+                    break;
+                }
+                args.push(self.expect_identifier()?);
+            }
         }
         self.expect(TokenType::RParen)?;
-        Ok(args)
+        Ok((args, is_vararg))
     }
 
     /// Parses the parameters and body of a function definition.
     fn parse_fndef(&mut self) -> Result<()> {
-        let params = self.parse_params()?;
+        let (params, is_vararg) = self.parse_params()?;
         if self.chunk.nested.len() >= u8::MAX as usize {
             return Err(self.error(SyntaxError::Complexity));
         }
 
         self.nest_level += 1;
-        let new_chunk = self.parse_chunk(&params)?;
+        let new_chunk = self.parse_chunk(&params, is_vararg)?;
         self.level_down();
 
         self.chunk.nested.push(new_chunk);
@@ -1473,32 +1740,64 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Parses a table constructor.
+    /// Parses a table constructor. Uses `freereg` (analogous to PUC-Rio's
+    /// `FuncState.freereg`) to track the table's stack position for
+    /// `SetListMulti` when the last array entry is a multi-return expression.
     fn parse_table(&mut self) -> Result<()> {
+        // Record the table's stack position before NewTable pushes it.
+        // This is `freereg` before the push, i.e., the register/slot where
+        // the table will live. Mirrors PUC-Rio's `cc->t->u.s.info`.
+        let table_reg = self.freereg;
         self.push(Instr::NewTable);
         if self.input.try_pop(TokenType::RCurly)?.is_none() {
             // i is the number of array-style entries.
-            let mut i = 0;
-            i = self.parse_table_entry(i)?;
+            let mut i = 0u8;
+            let mut last_array_exp = ExpDesc::Other;
+            let (new_i, exp) = self.parse_table_entry(i)?;
+            if new_i > i {
+                last_array_exp = exp;
+            }
+            i = new_i;
             while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
                 self.input.next()?;
                 if self.input.check_type(TokenType::RCurly)? {
                     break;
-                } else {
-                    i = self.parse_table_entry(i)?;
                 }
+                let (new_i, exp) = self.parse_table_entry(i)?;
+                if new_i > i {
+                    last_array_exp = exp;
+                }
+                i = new_i;
             }
             self.expect(TokenType::RCurly)?;
 
             if i > 0 {
-                self.push(Instr::SetList(i));
+                if is_multi_return(&last_array_exp) {
+                    // The last array entry is a multi-return expression
+                    // (function call or `...`). Patch it to return all values,
+                    // then use SetListMulti so the VM collects everything
+                    // between the table and TOS as array entries.
+                    self.patch_last_for_multi_return(&last_array_exp);
+                    // table_reg is the table's compile-time freereg position.
+                    // Record a fixup so parse_chunk can adjust for the VM's
+                    // num_locals pre-allocation (which shifts temporaries).
+                    let instr_idx = self.chunk.code.len();
+                    self.push(Instr::SetListMulti(table_reg as u8));
+                    self.register_fixups
+                        .push((instr_idx, self.chunk.num_locals));
+                    // After SetListMulti, only the table remains at table_reg.
+                    self.freereg = table_reg + 1;
+                } else {
+                    self.push(Instr::SetList(i));
+                }
             }
         }
         Ok(())
     }
 
-    /// Parses a table entry.
-    fn parse_table_entry(&mut self, counter: u8) -> Result<u8> {
+    /// Parses a table entry. Returns the updated array-style counter and the
+    /// `ExpDesc` of the entry (meaningful only for array-style entries).
+    fn parse_table_entry(&mut self, counter: u8) -> Result<(u8, ExpDesc)> {
         match self.input.peek_type()? {
             TokenType::Identifier if self.input.peek_next_type()? == TokenType::Assign => {
                 // Field assignment: Name '=' expr
@@ -1506,7 +1805,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
                 self.push(Instr::InitField(counter, index));
-                Ok(counter)
+                Ok((counter, ExpDesc::Other))
             }
             TokenType::LSquare => {
                 self.input.next().unwrap();
@@ -1515,15 +1814,53 @@ impl<'a> Parser<'a> {
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
                 self.push(Instr::InitIndex(counter));
-                Ok(counter)
+                Ok((counter, ExpDesc::Other))
             }
             _ => {
                 if counter == u8::MAX {
                     return Err(self.error(SyntaxError::Complexity));
                 }
-                self.parse_expr()?;
-                Ok(counter + 1)
+                let exp = self.parse_expr()?;
+                Ok((counter + 1, exp))
             }
+        }
+    }
+
+    /// Patches the last emitted instruction so a multi-return expression
+    /// (`FunctionCall` or `VarArg`) returns all values instead of just one.
+    /// Also adjusts `freereg` to undo the +1 from the original instruction,
+    /// since the actual return count is now dynamic (unknown at compile time).
+    fn patch_last_for_multi_return(&mut self, exp: &ExpDesc) {
+        match exp {
+            ExpDesc::Prefix(PrefixExp::FunctionCall(_)) => {
+                // Replace the Call(args, 1) with Call(args, 255) to return all values.
+                // 255 signals "variable return count" (multi-return), distinct from
+                // Call(args, 0) which means "discard all returns" (expression statement).
+                if let Some(Instr::Call(args, old_rets)) = self.chunk.code.last().copied() {
+                    let last = self.chunk.code.len() - 1;
+                    self.chunk.code[last] = Instr::Call(args, 255);
+                    // Undo the freereg adjustment from the original rets count
+                    self.freereg -= old_rets as usize;
+                }
+            }
+            ExpDesc::Prefix(PrefixExp::FunctionCallVar(_)) => {
+                // Replace CallVar(reg, 1) with CallVar(reg, 255) for multi-return.
+                if let Some(Instr::CallVar(reg, old_rets)) = self.chunk.code.last().copied() {
+                    let last = self.chunk.code.len() - 1;
+                    self.chunk.code[last] = Instr::CallVar(reg, 255);
+                    self.freereg -= old_rets as usize;
+                }
+            }
+            ExpDesc::VarArg => {
+                // Replace VarArg(1) with VarArg(0) to push all varargs
+                if let Some(Instr::VarArg(old_n)) = self.chunk.code.last().copied() {
+                    let last = self.chunk.code.len() - 1;
+                    self.chunk.code[last] = Instr::VarArg(0);
+                    // Undo the freereg adjustment from the original count
+                    self.freereg -= old_n as usize;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1537,6 +1874,16 @@ impl<'a> Parser<'a> {
         self.expect(TokenType::RParen)?;
         Ok(tup)
     }
+}
+
+/// Returns true if the expression can expand to multiple values.
+fn is_multi_return(exp: &ExpDesc) -> bool {
+    matches!(
+        exp,
+        ExpDesc::VarArg
+            | ExpDesc::Prefix(PrefixExp::FunctionCall(_))
+            | ExpDesc::Prefix(PrefixExp::FunctionCallVar(_))
+    )
 }
 
 /// Processes escape sequences in a short string's raw content (after quote
@@ -1683,7 +2030,9 @@ mod tests {
     use super::Instr::{self, *};
     use super::parse_str;
 
-    fn check_it(input: &str, output: Chunk) {
+    fn check_it(input: &str, mut output: Chunk) {
+        // Top-level chunks are always vararg
+        output.is_vararg = true;
         assert_eq!(parse_str(input).unwrap(), output);
     }
 
@@ -2297,6 +2646,9 @@ mod tests {
 
     #[test]
     fn test32() {
+        // `print(type(nil))`: type(nil) is the last arg to print, so it
+        // triggers multi-return expansion: Call(1, 255) for type() and
+        // CallVar(2, 0) for print() (func_reg=2 because locals occupy 0,1).
         let text = "local type, print print(type(nil))";
         let code = vec![
             PushNil,
@@ -2306,8 +2658,8 @@ mod tests {
             GetLocal(1),
             GetLocal(0),
             PushNil,
-            Call(1, 1),
-            Call(1, 0),
+            Call(1, 255),
+            CallVar(2, 0),
             Return(0),
         ];
         let chunk = Chunk {
