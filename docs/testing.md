@@ -85,24 +85,24 @@ official Lua repository (tag `v5_1_1`).
 | Test File | Area |
 |-----------|------|
 | `all.lua` | Test runner |
-| `api.lua` | C API interactions |
-| `attrib.lua` | Attributes and metatables |
-| `big.lua` | Large programs |
+| `api.lua` | C API interactions (requires testC) |
+| `attrib.lua` | require/package system, assignments, operators |
+| `big.lua` | String overflow, large line counts, table constructs |
 | `calls.lua` | Function calls and returns |
-| `checktable.lua` | Table invariants |
+| `checktable.lua` | Table invariant checker (requires testC) |
 | `closure.lua` | Closures and upvalues |
-| `code.lua` | Code generation |
-| `constructs.lua` | Language constructs |
+| `code.lua` | Code generation, optimizations (requires testC) |
+| `constructs.lua` | Syntax, operator priority, language constructs |
 | `db.lua` | Debug library |
 | `errors.lua` | Error handling |
-| `events.lua` | Metamethods/events |
+| `events.lua` | Metatables and metamethods |
 | `files.lua` | I/O library |
 | `gc.lua` | Garbage collection |
-| `literals.lua` | Literal parsing |
+| `literals.lua` | Scanner/lexer and literal parsing |
 | `locals.lua` | Local variables |
-| `main.lua` | Main features |
+| `main.lua` | Standalone interpreter (lua.c) options |
 | `math.lua` | Math library |
-| `nextvar.lua` | next() and variables |
+| `nextvar.lua` | Tables, next(), size operator, for loops |
 | `pm.lua` | Pattern matching |
 | `sort.lua` | table.sort |
 | `strings.lua` | String library |
@@ -111,6 +111,18 @@ official Lua repository (tag `v5_1_1`).
 
 The goal is to pass all official tests. Progress is tracked by
 counting passing vs failing test files.
+
+**testC dependency**: Three test files (`api.lua`, `code.lua`,
+`checktable.lua`) require the `T` global (a C test library compiled
+into PUC-Rio's debug builds). These tests skip or degrade gracefully
+when `T` is nil. rilua will need a Rust equivalent of the testC
+infrastructure to fully exercise these tests.
+
+**Compatibility flags**: The PUC-Rio test suite was written with
+default compat options enabled (e.g., `LUA_COMPAT_VARARG` enables
+the `arg` table in vararg functions). WoW's Lua disables some of
+these. Tests that depend on compat options may need conditional
+handling.
 
 ### Layer 4: Behavioral Equivalence Tests
 
@@ -166,7 +178,7 @@ Test coverage is measured by:
 
 1. **Feature coverage** — which Lua 5.1.1 features are implemented
    and tested (tracked in CHANGELOG.md).
-2. **PUC-Rio test suite progress** — N of 26 official test files
+2. **PUC-Rio test suite progress** — N of 24 official test files
    passing (tracked in CI).
 3. **Code coverage** — `cargo-tarpaulin` or `llvm-cov` for line
    coverage metrics (informational, not a gate).

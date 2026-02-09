@@ -52,12 +52,32 @@ impl Lua {
     /// Create a new empty table.
     pub fn create_table(&mut self) -> Result<Table> { ... }
 
+    /// Create a Lua-callable function from a Rust closure.
+    pub fn create_function<F>(&mut self, func: F) -> Result<Function>
+    where
+        F: Fn(&mut Lua) -> Result<u32> + 'static,
+    { ... }
+
     /// Register a Rust function as a global.
-    pub fn register_function(
+    pub fn register_function<F>(
         &mut self,
         name: &str,
-        func: fn(&mut Lua) -> Result<u32>,
-    ) -> Result<()> { ... }
+        func: F,
+    ) -> Result<()>
+    where
+        F: Fn(&mut Lua) -> Result<u32> + 'static,
+    { ... }
+
+    /// Load and execute a file of Lua code.
+    pub fn exec_file(&mut self, path: &str) -> Result<()> { ... }
+
+    /// Load a file and return a callable function.
+    pub fn load_file(&mut self, path: &str) -> Result<Function> { ... }
+
+    /// Load a string with a chunk name (used in error messages).
+    pub fn load_named(
+        &mut self, source: &str, name: &str,
+    ) -> Result<Function> { ... }
 
     /// Call a Lua function with arguments and return results.
     pub fn call<A, R>(&mut self, func: Function, args: A) -> Result<R>
@@ -86,6 +106,18 @@ impl Lua {
 
     /// Restart automatic garbage collection.
     pub fn gc_restart(&mut self) { ... }
+
+    /// Perform an incremental GC step. Returns true if a cycle completed.
+    pub fn gc_step(&mut self) -> bool { ... }
+
+    /// Set GC pause parameter. Returns the previous value.
+    pub fn gc_set_pause(&mut self, pause: u32) -> u32 { ... }
+
+    /// Set GC step multiplier. Returns the previous value.
+    pub fn gc_set_step_multiplier(&mut self, mul: u32) -> u32 { ... }
+
+    /// Create a new coroutine (Lua thread) from a function.
+    pub fn create_thread(&mut self, func: Function) -> Result<Thread> { ... }
 }
 ```
 
@@ -163,6 +195,16 @@ impl Table {
 
     pub fn len(&self, lua: &Lua) -> Result<i64> { ... }
 
+    pub fn raw_len(&self, lua: &Lua) -> i64 { ... }
+
+    pub fn next<K: IntoLua, NK: FromLua, NV: FromLua>(
+        &self, lua: &Lua, key: K,
+    ) -> Result<Option<(NK, NV)>> { ... }
+
+    pub fn pairs<K: FromLua, V: FromLua>(
+        &self, lua: &Lua,
+    ) -> TablePairs<K, V> { ... }
+
     pub fn set_metatable(
         &self, lua: &mut Lua, mt: Option<Table>,
     ) -> Result<()> { ... }
@@ -195,6 +237,27 @@ pub trait UserData {
 This follows mlua's pattern. A Rust type implementing `UserData`
 gets a Lua-visible metatable with methods and fields.
 
+## Thread (Coroutine) API
+
+```rust
+pub struct Thread { /* GcRef<LuaThread> */ }
+
+impl Thread {
+    pub fn resume<A: IntoLuaMulti, R: FromLuaMulti>(
+        &self, lua: &mut Lua, args: A,
+    ) -> Result<R> { ... }
+
+    pub fn status(&self, lua: &Lua) -> ThreadStatus { ... }
+}
+
+pub enum ThreadStatus {
+    Running,
+    Suspended,
+    Normal,
+    Dead,
+}
+```
+
 ## Embedding Example
 
 ```rust
@@ -203,16 +266,16 @@ use rilua::Lua;
 fn main() -> rilua::Result<()> {
     let mut lua = Lua::new();
 
-    // Register a Rust function
+    // Register a Rust closure as a global
     lua.register_function("greet", |lua| {
-        let name: String = lua.arg(1)?;
-        lua.push(format!("Hello, {name}!"))?;
+        let name: String = lua.check_arg(1)?;
+        lua.push_string(&format!("Hello, {name}!"))?;
         Ok(1)
     })?;
 
     // Execute Lua code
     lua.exec(r#"
-        local msg = greet("World")
+        msg = greet("World")
         print(msg)
     "#)?;
 

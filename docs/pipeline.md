@@ -19,8 +19,7 @@ full pipeline. Adding optimizations means modifying the parser.
 
 Luau (Roblox's production Lua 5.1 fork) introduced an explicit AST
 phase. The parser produces `AstStatBlock` trees. A separate compiler
-walks the AST and emits bytecode. This design has been proven at
-scale in a production environment serving millions of users.
+walks the AST and emits bytecode. This design is used in Luau's production deployment.
 
 ## Phases
 
@@ -92,7 +91,7 @@ compiled, tracking:
 The compilation output is a `Proto` (function prototype) containing:
 
 - Bytecode instruction array
-- Constant pool (numbers, strings)
+- Constant pool (nil, booleans, numbers, strings)
 - Nested Proto array (for inner function definitions)
 - Upvalue descriptors
 - Debug information (line map, local variable names)

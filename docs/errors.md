@@ -28,6 +28,11 @@ pub enum Error {
     Runtime(RuntimeError),
     /// I/O error from file operations.
     Io(std::io::Error),
+    /// Memory allocation error (equivalent to LUA_ERRMEM).
+    Memory,
+    /// Error in error handler (equivalent to LUA_ERRERR).
+    /// Occurs when the xpcall error handler itself errors.
+    ErrorHandler,
 }
 
 pub struct SyntaxError {
@@ -38,7 +43,7 @@ pub struct SyntaxError {
 }
 
 pub struct RuntimeError {
-    pub message: String,
+    pub object: Val,  // The error value (often a string)
     pub level: u32,
     pub traceback: Vec<TraceEntry>,
 }
@@ -70,10 +75,13 @@ Examples:
 Lua's `pcall(f, ...)` calls function `f` and catches any error:
 
 - On success: returns `true` followed by the function's return values.
-- On error: returns `false` followed by the error message.
+- On error: returns `false` followed by the error object (which
+  may be any Lua value, not just a string).
 
-`xpcall(f, msgh, ...)` additionally runs an error handler `msgh`
-before unwinding.
+`xpcall(f, err)` additionally runs an error handler `err` before
+unwinding. Note: in Lua 5.1.1, `xpcall` takes exactly two arguments
+(the function and the error handler). Extra arguments passed to `f`
+were added in Lua 5.2.
 
 In rilua, protected calls are implemented by catching `Err` results:
 
@@ -125,6 +133,29 @@ pub struct RuntimeError {
     pub traceback: Vec<TraceEntry>,
 }
 ```
+
+## Error Recovery
+
+When a protected call catches an error, the VM must:
+
+1. Restore the stack to the pre-call state.
+2. Close any open upvalues above the restored stack level
+   (call `close_upvalues()` — equivalent to PUC-Rio's
+   `luaF_close`). This is critical for correct closure behavior.
+3. Set the error object on the stack.
+
+## Stack Overflow
+
+PUC-Rio limits the C call depth to `LUAI_MAXCCALLS` (200). rilua
+tracks call depth and raises a "stack overflow" runtime error when
+the limit is exceeded. If the overflow persists during error
+handling, an `Error::ErrorHandler` is returned.
+
+## Coroutine Errors
+
+A coroutine that errors becomes dead and cannot be resumed. The
+error propagates to `coroutine.resume()` which returns `false`
+plus the error object, similar to `pcall`.
 
 ## No Panics
 

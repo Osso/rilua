@@ -8,8 +8,8 @@ semantics.**
 
 ## Overview
 
-All GC-managed objects (strings, tables, closures, userdata, threads)
-are allocated in typed arenas — `Vec<Entry<T>>` containers where each
+All GC-managed objects (strings, tables, closures, upvalues, userdata,
+threads) are allocated in typed arenas — `Vec<Entry<T>>` containers where each
 slot has a generation counter. Objects are referenced by `GcRef<T>`
 indices that include both the slot index and the expected generation.
 
@@ -66,10 +66,17 @@ enum SlotState<T> {
 
 #[derive(Clone, Copy)]
 enum Color {
-    White,   // Not yet visited (candidate for collection)
+    White0,  // Current white (newly allocated this cycle)
+    White1,  // Other white (candidate for collection)
     Gray,    // Visited, children not yet traced
     Black,   // Fully traced
 }
+
+// PUC-Rio uses two white bits (WHITE0BIT, WHITE1BIT) to
+// distinguish objects allocated during sweep from dead objects.
+// At the end of the atomic phase, `current_white` flips.
+// During sweep, objects bearing the "other white" are dead;
+// objects bearing the "current white" survive.
 ```
 
 ### GcRef
@@ -94,17 +101,21 @@ pub struct GcHeap {
     strings: Arena<LuaString>,
     tables: Arena<Table>,
     closures: Arena<Closure>,
+    upvalues: Arena<Upvalue>,
     userdata: Arena<Userdata>,
     threads: Arena<LuaThread>,
 
     // GC state
-    gray_stack: Vec<GcObject>,  // Objects to trace
-    weak_tables: Vec<GcRef<Table>>,  // Tables with __mode
-    finalize_list: Vec<GcRef<Userdata>>,  // Dead userdata with __gc
+    current_white: Color,               // Alternates White0/White1
+    gray_stack: Vec<GcObject>,          // Objects to trace
+    gray_again: Vec<GcObject>,          // Re-trace in atomic phase
+    weak_tables: Vec<GcRef<Table>>,     // Tables with __mode
+    finalize_list: Vec<GcRef<Userdata>>,// Dead userdata with __gc
 
     // GC tuning
     state: GcState,
     total_bytes: usize,
+    estimate: usize,    // Memory at end of last cycle
     threshold: usize,
     gc_pause: u32,      // Default: 200
     gc_step_mul: u32,   // Default: 200
@@ -124,6 +135,7 @@ enum GcObject {
     String(GcRef<LuaString>),
     Table(GcRef<Table>),
     Closure(GcRef<Closure>),
+    Upvalue(GcRef<Upvalue>),
     Userdata(GcRef<Userdata>),
     Thread(GcRef<LuaThread>),
 }
@@ -169,8 +181,8 @@ impl Trace for Table {
 
 ### Mark Phase (Propagate)
 
-1. Mark roots gray: global table, registry, main thread, open
-   upvalues, string metatable.
+1. Mark roots gray: main thread, global table, registry, all type
+   metatables (not just string — one per type that supports it).
 2. Pop gray objects from gray stack.
 3. For each gray object, call `trace()` to mark children.
 4. Mark the object black.
@@ -178,15 +190,21 @@ impl Trace for Table {
 
 ### Atomic Phase
 
-After propagation completes:
+After propagation completes (runs without interleaving):
 
-1. Re-trace objects on the gray-again list (tables that were
+1. Re-mark open upvalues (they are not roots in `markroot` but
+   must be considered during the atomic phase).
+2. Re-trace objects on the gray-again list (tables and threads
    modified during marking via backward barriers).
-2. Process weak tables: collect tables with `__mode` into
+3. Re-mark the currently running thread.
+4. Re-mark all type metatables.
+5. Process weak tables: collect tables with `__mode` into
    `weak_tables` list.
-3. Separate finalizable userdata: dead userdata with `__gc`
+6. Separate finalizable userdata: dead userdata with `__gc`
    metamethods move to `finalize_list` and are re-marked alive.
-4. Clear dead weak entries.
+7. Clear dead weak entries.
+8. Flip `current_white` (White0 becomes White1 or vice versa).
+   New allocations from this point use the new current white.
 
 ### Sweep Phase
 
@@ -210,13 +228,18 @@ During the propagate phase, mutations can violate the tri-color
 invariant (a black object must not point to a white object). Write
 barriers restore the invariant:
 
-**Forward barrier** (most objects): When assigning a white value
-into a black object, mark the value gray.
+**Forward barrier** (closures, upvalues, userdata): When assigning
+a white value into a black object during the Propagate phase, mark
+the value gray. During other phases (Sweep, Finalize), the barrier
+instead marks the parent white to avoid unnecessary marking.
 
-**Backward barrier** (tables): When assigning a white value into
-a black table, mark the table gray-again. Tables use the backward
-barrier because they are mutated frequently — re-marking the table
-is cheaper than marking every assigned value.
+**Backward barrier** (tables, threads): When assigning a white value
+into a black table, mark the table gray-again (push onto the
+`gray_again` list for re-traversal in the atomic phase). Tables use
+the backward barrier because they are mutated frequently — re-marking
+the table is cheaper than marking every assigned value. Threads also
+use a backward-like mechanism because their stacks can be mutated at
+any time.
 
 ## Weak Tables
 
@@ -253,20 +276,31 @@ Defaults: `gc_pause = 200` (collect when memory doubles),
 The GC runs in small incremental steps interleaved with program
 execution, triggered when `total_bytes >= threshold`:
 
-1. After each allocation, check if threshold is exceeded.
-2. If so, perform a GC step proportional to the allocation size
-   multiplied by `gc_step_mul / 100`.
+1. After each allocation, check if `total_bytes >= threshold`.
+2. If so, perform a GC step with a fixed work limit of
+   `(GCSTEPSIZE / 100) * gc_step_mul` (where `GCSTEPSIZE = 1024`).
+   The step size is NOT proportional to the allocation size.
 3. After a full cycle completes, set the next threshold:
-   `threshold = (total_bytes / 100) * gc_pause`.
+   `threshold = (estimate / 100) * gc_pause`, where `estimate`
+   is the memory usage at the end of the cycle (which may differ
+   from `total_bytes` due to finalized userdata and freed memory).
 
 This matches PUC-Rio's debt-based scheduling model.
 
 ## Proto Ownership
 
-Function prototypes (`Proto`) are NOT managed by the GC. They are
-immutable after compilation and shared between closures via
-`Rc<Proto>`. This simplifies ownership — the GC only traces mutable,
-potentially cyclic objects.
+In PUC-Rio, `Proto` is a GC-managed object — it has `CommonHeader`,
+is linked into the root GC list via `luaC_link()`, traversed in
+`propagatemark()`, and freed in `freeobj()`.
+
+In rilua, function prototypes are managed via `Rc<Proto>` instead.
+This is a deliberate divergence because Proto is immutable after
+compilation and its ownership graph is a tree (parent protos own
+child protos), never cyclic. `Rc` provides automatic deallocation
+when the last closure referencing a proto is collected.
 
 The `Closure` type holds `Rc<Proto>` and the `Trace` implementation
-for `Closure` does not trace into the Proto (it is not a GC object).
+for `Closure` does not trace into the Proto. Proto references to
+interned strings (source name, local names, upvalue names) are stored
+as owned `String` values rather than `GcRef<LuaString>`, so the GC
+does not need to trace through protos to keep strings alive.

@@ -87,6 +87,7 @@ src/
   stdlib/
     mod.rs            Standard library registration
     base.rs           Base library (print, assert, type, etc.)
+    coroutine.rs      Coroutine library
     string.rs         String library
     table.rs          Table library
     math.rs           Math library

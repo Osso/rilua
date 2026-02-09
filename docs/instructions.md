@@ -35,11 +35,16 @@ The 38 opcodes from `lopcodes.h`, grouped by function:
 |--------|--------|-------------|
 | NEWTABLE | iABC | `R(A) := {} (size = B, C)` |
 
-### Arithmetic and Logic
+### Method Access
 
 | Opcode | Format | Description |
 |--------|--------|-------------|
 | SELF | iABC | `R(A+1) := R(B); R(A) := R(B)[RK(C)]` |
+
+### Arithmetic and Logic
+
+| Opcode | Format | Description |
+|--------|--------|-------------|
 | ADD | iABC | `R(A) := RK(B) + RK(C)` |
 | SUB | iABC | `R(A) := RK(B) - RK(C)` |
 | MUL | iABC | `R(A) := RK(B) * RK(C)` |
@@ -74,9 +79,9 @@ The 38 opcodes from `lopcodes.h`, grouped by function:
 
 | Opcode | Format | Description |
 |--------|--------|-------------|
-| FORLOOP | iAsBx | Numeric for loop step |
-| FORPREP | iAsBx | Numeric for loop init |
-| TFORLOOP | iABC | Generic for loop step |
+| FORLOOP | iAsBx | `R(A)+=R(A+2); if R(A) <?= R(A+1) then { pc+=sBx; R(A+3)=R(A) }` |
+| FORPREP | iAsBx | `R(A)-=R(A+2); pc+=sBx` |
+| TFORLOOP | iABC | Generic for loop step (followed by a JMP instruction) |
 
 ### Tables and Closures
 
@@ -123,15 +128,17 @@ pub enum Instruction {
     Not { a: u8, b: u16 },
     Len { a: u8, b: u16 },
     Concat { a: u8, b: u16, c: u16 },
-    Jmp { sbx: i32 },
+    Jmp { a: u8, sbx: i32 },
+    // Note: JMP has an A field (unused in 5.1.1, always 0).
     Eq { a: u8, b: u16, c: u16 },
     Lt { a: u8, b: u16, c: u16 },
     Le { a: u8, b: u16, c: u16 },
     Test { a: u8, c: u16 },
     TestSet { a: u8, b: u16, c: u16 },
     Call { a: u8, b: u16, c: u16 },
-    TailCall { a: u8, b: u16 },
+    TailCall { a: u8, b: u16, c: u16 },
     Return { a: u8, b: u16 },
+    // Note: TailCall includes c (always 0 = LUA_MULTRET in PUC-Rio).
     ForLoop { a: u8, sbx: i32 },
     ForPrep { a: u8, sbx: i32 },
     TForLoop { a: u8, c: u16 },
@@ -166,6 +173,37 @@ encoding. Bit 8 indicates:
 This allows arithmetic instructions to reference constants directly
 without a preceding LOADK instruction.
 
+## Implementation Notes
+
+### B=0 and C=0 Conventions
+
+Several instructions use B=0 or C=0 as sentinel values:
+
+- **CALL**: if B=0, arguments extend to top of stack. If C=0, return
+  values extend to top of stack (variable returns).
+- **TAILCALL**: C is always 0 (LUA_MULTRET). B follows CALL semantics.
+- **RETURN**: if B=0, return values extend from R(A) to top of stack.
+- **VARARG**: if B=0, copy all available varargs and set top.
+- **SETLIST**: if B=0, set top to stack top. If C=0, the real C value
+  is stored in the next instruction as a raw u32.
+
+### Instruction Pairing
+
+- **TFORLOOP** is always followed by a **JMP** instruction. TFORLOOP
+  does not contain a jump offset itself — it reads sBx from the next
+  instruction to branch back to the loop body.
+- **CLOSURE** is followed by pseudo-instructions: **MOVE** (capture
+  local from stack as open upvalue) or **GETUPVAL** (copy reference
+  to parent's upvalue). One pseudo-instruction per upvalue.
+
+### Special Encodings
+
+- **NEWTABLE** B and C use float-byte encoding (`luaO_int2fb` /
+  `luaO_fb2int`), not direct sizes. This allows compact representation
+  of large table sizes.
+- **SETLIST** uses `LFIELDS_PER_FLUSH = 50` as the batch size for
+  table initialization.
+
 ## Why Rust Enums
 
 PUC-Rio stores instructions as raw u32 values and extracts fields
@@ -175,8 +213,10 @@ with bit manipulation macros. We use a Rust enum because:
    Adding an opcode causes compile errors at every unhandled match.
 2. **Clarity** — `Instruction::Add { a, b, c }` is self-documenting.
    `GETARG_A(i)` is not.
-3. **No performance cost** — The enum representation is the same size
-   or smaller than u32 in practice. The compiler optimizes match
-   dispatch to jump tables.
+3. **Acceptable size tradeoff** — The enum is larger than u32
+   in-memory (likely 8-12 bytes per instruction vs 4 bytes packed),
+   but this is the in-memory working representation, not the
+   serialized format. The compiler optimizes match dispatch to jump
+   tables.
 4. **Serialization is separate** — The u32 packed format is only
    needed for bytecode files, not for in-memory execution.

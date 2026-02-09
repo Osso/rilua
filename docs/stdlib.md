@@ -7,7 +7,9 @@
 
 ## Overview
 
-Lua 5.1.1 ships with 8 standard libraries. Each library is a
+Lua 5.1.1 ships with 9 standard libraries (base, coroutine, string,
+table, math, io, os, debug, package). The coroutine library is
+registered as part of `luaopen_base()` but occupies its own namespace. Each library is a
 collection of functions registered in a table (or as globals for the
 base library). Libraries can be loaded selectively — an embedded Lua
 environment may omit `io` and `os` for sandboxing.
@@ -30,7 +32,7 @@ Global functions not in any table.
 | `load` | Required | Load chunk from function |
 | `loadfile` | Required | Load chunk from file |
 | `loadstring` | Required | Load chunk from string |
-| `module` | Required | Create module |
+| `gcinfo` | Required | Deprecated GC info (returns KB used) |
 | `next` | Required | Table traversal |
 | `pairs` | Required | Generic table iterator |
 | `pcall` | Required | Protected call |
@@ -38,7 +40,7 @@ Global functions not in any table.
 | `rawequal` | Required | Equality without metamethods |
 | `rawget` | Required | Table access without metamethods |
 | `rawset` | Required | Table assignment without metamethods |
-| `require` | Required | Module loader (see package library) |
+| `_G` | Required | Global table reference |
 | `select` | Required | `select(n, ...)` or `select('#', ...)` |
 | `setfenv` | Required | Set function environment |
 | `setmetatable` | Required | Set metatable (respects `__metatable`) |
@@ -49,6 +51,20 @@ Global functions not in any table.
 | `xpcall` | Required | Protected call with error handler |
 | `_VERSION` | Required | `"Lua 5.1"` |
 | `newproxy` | Optional | Undocumented, creates proxy userdata |
+
+### Coroutine Library (registered by `open_base`)
+
+The coroutine library is registered as the `coroutine` table by
+`luaopen_base()`. It provides cooperative multithreading.
+
+| Function | Notes |
+|----------|-------|
+| `coroutine.create` | Create coroutine from function |
+| `coroutine.resume` | Resume suspended coroutine |
+| `coroutine.running` | Return running coroutine (nil if main) |
+| `coroutine.status` | Return status string (running/suspended/normal/dead) |
+| `coroutine.wrap` | Create coroutine as iterator function |
+| `coroutine.yield` | Suspend execution, return values to resume |
 
 ### String Library (`stdlib/string.rs`)
 
@@ -71,11 +87,12 @@ Registered as the `string` table and as the string metatable's
 | `string.reverse` | String reversal |
 | `string.sub` | Substring extraction |
 | `string.upper` | Uppercase conversion |
+| `string.gfind` | Deprecated alias for gmatch (raises error if LUA_COMPAT_GFIND disabled) |
 
 Lua 5.1 patterns are NOT regular expressions. They support character
 classes (`%a`, `%d`, `%w`, etc.), anchors (`^`, `$`), quantifiers
-(`*`, `+`, `-`, `?`), and captures. They do not support alternation
-or backreferences.
+(`*`, `+`, `-`, `?`), captures, and backreferences (`%1` through
+`%9` to match a previous capture). They do not support alternation.
 
 ### Table Library (`stdlib/table.rs`)
 
@@ -86,6 +103,10 @@ or backreferences.
 | `table.maxn` | Maximum positive numeric key |
 | `table.remove` | Remove element at position |
 | `table.sort` | In-place sort |
+| `table.foreach` | Deprecated: iterate table (use pairs) |
+| `table.foreachi` | Deprecated: iterate array (use ipairs) |
+| `table.getn` | Deprecated: table length (use # operator) |
+| `table.setn` | Deprecated: raises error in 5.1.1 |
 
 ### Math Library (`stdlib/math.rs`)
 
@@ -138,6 +159,9 @@ or backreferences.
 | `io.type` | Check file handle type |
 | `io.write` | Write to default output |
 | File methods | `:close`, `:flush`, `:lines`, `:read`, `:seek`, `:setvbuf`, `:write` |
+| `io.stdin` | Standard input file handle |
+| `io.stdout` | Standard output file handle |
+| `io.stderr` | Standard error file handle |
 
 ### OS Library (`stdlib/os.rs`)
 
@@ -179,6 +203,8 @@ or backreferences.
 | Function/Field | Notes |
 |----------------|-------|
 | `require` | Module loader (registered as global) |
+| `module` | Create module (registered as global) |
+| `package.config` | Directory/path separator configuration string |
 | `package.cpath` | C module search path |
 | `package.loaded` | Cache of loaded modules |
 | `package.loaders` | Ordered list of module searchers |
@@ -203,7 +229,7 @@ lua.open_math()?;
 
 ## Implementation Priority
 
-1. **Base library** — required for any Lua program
+1. **Base library** (with coroutine) — required for any Lua program
 2. **String library** — heavily used, pattern matching is complex
 3. **Table library** — common operations
 4. **Math library** — straightforward wrappers around `f64` methods

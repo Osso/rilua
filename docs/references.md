@@ -25,8 +25,8 @@ management, and API surface.
 
 - **Local path**: `~/Repos/github.com/luau-lang/luau`
 - **Role**: Architecture reference. Production-proven Lua 5.1 evolution.
-- **Architecture**: Lexer -> Parser -> AST -> Compiler -> VM. 82
-  register-based opcodes. Incremental tri-color GC. CallInfo chain.
+- **Architecture**: Lexer -> Parser -> AST -> Compiler -> VM. ~83
+  register-based opcodes (count evolves with development). Incremental tri-color GC. CallInfo chain.
   Array+hash tables. String interning. No longjmp (C++ exceptions).
 - **What we take**: AST-based pipeline design, separation of compiler
   phases, Proto as non-GC value (owned by closures), CallInfo chain
@@ -43,9 +43,9 @@ management, and API surface.
 - **Role**: Proves Result-based error handling works for a Lua VM.
 - **Architecture**: c2rust translation of Lua 5.4. PUC-Rio file naming
   (llex.rs, lparser.rs, lcode.rs). 83 opcodes. Incremental GC via raw
-  pointers. 622+ unsafe blocks. Safe public API over unsafe internals.
+  pointers. Heavy use of unsafe code. Safe public API over unsafe internals.
 - **What we take**: Result-based error propagation pattern, safe public
-  API design (`Context<A>` pattern), packed u32 instruction format for
+  API design, packed u32 instruction format for
   serialization.
 - **What we avoid**: c2rust code style, heavy unsafe, wrong Lua version
   (5.4 vs 5.1.1).

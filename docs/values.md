@@ -100,8 +100,13 @@ Lua 5.1.1 equality rules (Section 2.5.2 of the reference manual):
 | userdata | By reference (same GcRef) |
 | thread | By reference (same GcRef) |
 
-Metatables can override equality via `__eq` metamethod for tables,
-userdata, and (in limited cases) functions.
+Metatables can override equality via `__eq` metamethod for tables
+and userdata only. In Lua 5.1.1, `__eq` is NOT checked for
+functions, strings, or threads — these always use raw reference
+comparison.
+
+Light userdata is compared by pointer value (not shown in the table
+above because it is a raw pointer, not a GcRef).
 
 ## Hashing
 

@@ -54,9 +54,10 @@ enabling O(1) equality comparison.
 
 ## Hashing
 
-PUC-Rio Lua 5.1.1 uses a sampling hash for long strings (>32
-characters) to avoid hashing the entire content. For short strings,
-all characters are included.
+PUC-Rio Lua 5.1.1 uses a sampling hash for long strings (>= 32
+characters) to avoid hashing the entire content. At length 32,
+`step = (32 >> 5) + 1 = 2`, so every other character is sampled.
+For strings shorter than 32 characters, all characters are hashed.
 
 We use Rust's standard `HashMap` hasher initially. The hash is
 computed once and cached in `LuaString.hash`. A future optimization
