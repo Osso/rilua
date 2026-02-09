@@ -118,6 +118,16 @@ impl Lua {
 
     /// Create a new coroutine (Lua thread) from a function.
     pub fn create_thread(&mut self, func: Function) -> Result<Thread> { ... }
+
+    // -- Native function helpers --
+    // Used inside closures passed to create_function / register_function.
+
+    /// Get argument at the given 1-based index, converting via FromLua.
+    /// Raises an argument error if the value is missing or the wrong type.
+    pub fn check_arg<V: FromLua>(&self, index: u32) -> Result<V> { ... }
+
+    /// Push a return value onto the stack, converting via IntoLua.
+    pub fn push<V: IntoLua>(&mut self, value: V) -> Result<()> { ... }
 }
 ```
 
@@ -269,7 +279,7 @@ fn main() -> rilua::Result<()> {
     // Register a Rust closure as a global
     lua.register_function("greet", |lua| {
         let name: String = lua.check_arg(1)?;
-        lua.push_string(&format!("Hello, {name}!"))?;
+        lua.push(format!("Hello, {name}!"))?;
         Ok(1)
     })?;
 

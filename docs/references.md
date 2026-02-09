@@ -25,13 +25,13 @@ management, and API surface.
 
 - **Local path**: `~/Repos/github.com/luau-lang/luau`
 - **Role**: Architecture reference. Lua 5.1-compatible scripting language.
-- **Architecture**: Lexer -> Parser -> AST -> Compiler -> VM. 82
+- **Architecture**: Lexer -> Parser -> AST -> Compiler -> VM. 83
   register-based opcodes (count evolves with development). Incremental tri-color GC. CallInfo chain.
   Array+hash tables. String interning. No longjmp (C++ exceptions).
 - **What we take**: AST-based pipeline design, separation of compiler
   phases, Proto as non-GC value (owned by closures), CallInfo chain
   pattern, incremental GC debt model.
-- **What we change**: Opcode count (we use PUC-Rio's 38, not Luau's 82),
+- **What we change**: Opcode count (we use PUC-Rio's 38, not Luau's 83),
   language extensions (we implement standard Lua 5.1.1 only), native
   codegen (out of scope).
 

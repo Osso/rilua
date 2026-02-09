@@ -52,7 +52,7 @@ Global functions not in any table.
 | `_VERSION` | Required | `"Lua 5.1"` |
 | `newproxy` | Optional | Undocumented, creates proxy userdata |
 
-### Coroutine Library (registered by `open_base`)
+### Coroutine Library (registered by `luaopen_base`)
 
 The coroutine library is registered as the `coroutine` table by
 `luaopen_base()`. It provides cooperative multithreading.

@@ -98,7 +98,7 @@ fn lua_pcall(&mut self, func: Val, args: &[Val]) -> Result<Vec<Val>> {
             // Push true + results
         }
         Err(e) => {
-            // Push false + error message
+            // Push false + error object
         }
     }
 }

@@ -93,7 +93,7 @@ official Lua repository (tag `v5_1_1`).
 | `big.lua` | String overflow, large line counts, table constructs |
 | `calls.lua` | Function calls and returns |
 | `checktable.lua` | Table invariant checker (requires testC) |
-| `closure.lua` | Closures and upvalues |
+| `closure.lua` | Closures, upvalues, and coroutines |
 | `code.lua` | Code generation, optimizations (requires testC) |
 | `constructs.lua` | Syntax, operator priority, language constructs |
 | `db.lua` | Debug library |
