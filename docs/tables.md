@@ -29,7 +29,7 @@ pub struct Table {
 ### Array Part
 
 The array part stores values for integer keys `1..=n` where `n` is
-chosen such that at least half the slots in `[1, n]` are non-nil.
+chosen such that more than half the slots in `[1, n]` are non-nil.
 This is the same heuristic PUC-Rio uses in `ltable.c`.
 
 Array access for integer keys in range is O(1) with no hashing.
@@ -73,7 +73,7 @@ are resized together:
 4. All other keys (including integers outside `[1, n]`) go to the
    hash part.
 
-This heuristic ensures the array part is always at least 50% full,
+This heuristic ensures the array part is always more than 50% full,
 avoiding waste on sparse tables.
 
 ## Length Operator (#)
