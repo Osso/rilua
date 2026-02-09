@@ -135,7 +135,7 @@ enum GcState {
 
 /// Type-erased reference for the gray stack.
 /// Note: strings are never pushed to the gray stack (they go
-/// white-to-black directly in reallymarkobject).
+/// white-to-gray directly in reallymarkobject — no children to trace).
 enum GcObject {
     Table(GcRef<Table>),
     Closure(GcRef<Closure>),
