@@ -1,19 +1,11 @@
-//! rilua: Lua 5.1.1 implemented in Rust.
-
-mod compiler;
-mod instr;
-mod lua_std;
-mod vm;
-mod vm_aux;
-
-pub mod error;
-
-pub use vm::LuaType;
-pub use vm::RustFunc;
-pub use vm::State;
-
-use compiler::Chunk;
-use instr::Instr;
-
-/// Custom result type for evaluating Lua.
-pub type Result<T> = std::result::Result<T, error::Error>;
+//! rilua — Lua 5.1.1 implemented in Rust.
+//!
+//! A from-scratch implementation targeting behavioral equivalence with
+//! the PUC-Rio reference interpreter. Designed for embedding in Rust
+//! applications, with a focus on the World of Warcraft addon variant.
+//!
+//! # Architecture
+//!
+//! Pipeline: Source → Lexer → Parser → AST → Compiler → Proto → VM
+//!
+//! See `docs/architecture.md` for design documentation.

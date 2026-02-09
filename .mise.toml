@@ -1,5 +1,8 @@
 [tools]
 node = "22"
 "npm:markdownlint-cli2" = "latest"
+
 actionlint = "latest"
+mdbook = "latest"
+
 rust = { version = "1.92.0", profile = "default" }

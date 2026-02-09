@@ -1,0 +1,120 @@
+# Architecture Overview
+
+rilua is a from-scratch implementation of Lua 5.1.1 in Rust. The goal is
+behavioral equivalence with the PUC-Rio reference interpreter — executed
+Lua code must produce identical results. Internal architecture is free to
+diverge where Rust idioms offer better safety, clarity, or modularity.
+
+## Design Principles
+
+1. **Behavioral equivalence** — Lua code produces the same results as
+   PUC-Rio Lua 5.1.1. Observable behavior (output, errors, GC API
+   returns, weak table clearing, finalizer execution) must match.
+2. **Idiomatic Rust** — Use Rust's type system, ownership, and error
+   handling. Minimize unsafe code. Prefer enums over tagged unions,
+   `Result` over longjmp, traits over function pointers.
+3. **Zero external dependencies** — Only Rust's standard library. All
+   data structures, algorithms, and patterns are self-contained.
+4. **Modular design** — Clear module boundaries. The compiler does not
+   depend on the VM. The GC does not depend on the compiler. Standard
+   library functions are isolated from core VM logic.
+5. **Spec-driven testing** — Test against the Lua 5.1.1 specification
+   and PUC-Rio's official test suite. Unit tests for internals,
+   integration tests for language semantics.
+
+## Pipeline
+
+```text
+Source Code
+    |
+    v
+ [Lexer]         src/compiler/lexer.rs
+    |  tokens
+    v
+ [Parser]        src/compiler/parser.rs
+    |  AST
+    v
+ [Compiler]      src/compiler/codegen.rs
+    |  Proto (bytecode + constants + nested protos)
+    v
+ [VM]            src/vm/
+    |  execution
+    v
+ Output / Side Effects
+```
+
+Unlike PUC-Rio's single-pass compiler that emits bytecode during
+parsing, rilua uses an explicit AST intermediate representation. This
+follows the approach proven by Luau (Roblox's production Lua 5.1 fork).
+
+Benefits of the AST phase:
+
+- Clean separation between parsing and code generation
+- Each phase is independently testable
+- Future optimizations (constant folding, dead code elimination) can
+  operate on the AST without modifying the parser
+- Easier to understand and debug than interleaved parse-and-emit
+
+## Module Structure
+
+```text
+src/
+  lib.rs              Public API (Lua struct, traits, types)
+  error.rs            Error types (syntax, runtime, argument)
+  compiler/
+    mod.rs            Compiler module root
+    lexer.rs          Tokenizer (source -> tokens)
+    token.rs          Token types
+    parser.rs         Parser (tokens -> AST)
+    ast.rs            AST node types
+    codegen.rs        Code generator (AST -> Proto)
+  vm/
+    mod.rs            VM module root
+    state.rs          Lua state (the main VM struct)
+    execute.rs        Instruction dispatch loop
+    instructions.rs   Opcode definitions (Rust enums)
+    proto.rs          Function prototype (bytecode container)
+    value.rs          Value representation (Val enum)
+    gc/
+      mod.rs          GC module root
+      arena.rs        Generational arena (typed Vec storage)
+      collector.rs    Mark-sweep collector
+      trace.rs        Trace trait for marking reachable objects
+    table.rs          Table implementation (array + hash parts)
+    string.rs         String interning
+    closure.rs        Closures and upvalues
+    callinfo.rs       Call stack (CallInfo chain)
+  stdlib/
+    mod.rs            Standard library registration
+    base.rs           Base library (print, assert, type, etc.)
+    string.rs         String library
+    table.rs          Table library
+    math.rs           Math library
+    io.rs             I/O library
+    os.rs             OS library
+    debug.rs          Debug library
+    package.rs        Package/module library
+```
+
+## Key Architectural Decisions
+
+Each decision is documented in detail in its own file:
+
+| Decision | Choice | Rationale | Detail |
+|----------|--------|-----------|--------|
+| Compilation pipeline | Lexer -> Parser -> AST -> Compiler | Separation of concerns, testability | [pipeline.md](pipeline.md) |
+| Instruction set | PUC-Rio's 38 opcodes as Rust enums | Behavioral equivalence, type safety | [instructions.md](instructions.md) |
+| Value representation | Rust enum (Val) | Type safety, pattern matching | [values.md](values.md) |
+| Garbage collection | Arena with generational indices | Zero unsafe, safe mark-sweep | [gc.md](gc.md) |
+| Tables | Array + hash dual representation | Performance, PUC-Rio compatibility | [tables.md](tables.md) |
+| Strings | Interned with cached hash | Pointer equality, O(1) comparison | [strings.md](strings.md) |
+| Closures and upvalues | Open/closed upvalue model | PUC-Rio semantics | [closures.md](closures.md) |
+| Error handling | Result-based | Idiomatic Rust, no longjmp | [errors.md](errors.md) |
+| Public API | Trait-based, Rust-idiomatic | Ergonomic embedding | [api.md](api.md) |
+| Standard library | Modular, per-library files | Independent testing, optional loading | [stdlib.md](stdlib.md) |
+| Testing strategy | Spec-driven, multi-layer | Correctness assurance | [testing.md](testing.md) |
+
+## Reference Implementations
+
+See [references.md](references.md) for a classification of all studied
+implementations and what we learned from each.
