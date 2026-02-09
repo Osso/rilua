@@ -28,6 +28,12 @@ pub enum Val {
 }
 ```
 
+Both `Function` and `RustFunction` correspond to Lua type `"function"`
+(`LUA_TFUNCTION`). PUC-Rio does not distinguish these at the type
+level — both are `Closure` objects with an `isC` flag. rilua splits
+them for performance (avoiding GC allocation for stateless native
+functions).
+
 ## Design Rationale
 
 ### Why an Enum (Not NaN-boxing)
@@ -38,7 +44,7 @@ the unused bits of `f64` NaN values, reducing size to 8 bytes.
 
 We use a plain Rust enum because:
 
-1. **Safety** — NaN-boxing requires reinterpreting bit patterns between
+1. **Memory soundness** — NaN-boxing requires reinterpreting bit patterns between
    `f64` and pointers, which is inherently unsafe. Rust enums provide
    exhaustive matching and no undefined behavior.
 2. **Clarity** — `match val { Val::Num(n) => ... }` is readable.
@@ -94,7 +100,7 @@ Lua 5.1.1 equality rules (Section 2.5.2 of the reference manual):
 | nil | Always equal to nil, nothing else |
 | boolean | By value |
 | number | By numeric value (with float semantics) |
-| string | By content (pointer equality due to interning) |
+| string | By reference (identity comparison, equivalent to content due to interning) |
 | table | By reference (same GcRef) |
 | function | By reference (same GcRef) |
 | userdata | By reference (same GcRef) |
@@ -107,6 +113,11 @@ comparison.
 
 Light userdata is compared by pointer value (not shown in the table
 above because it is a raw pointer, not a GcRef).
+
+`RustFunction` values are compared by function pointer value. In
+PUC-Rio, all functions (C and Lua) are closures compared by GC
+object identity. rilua stores stateless native functions inline to
+avoid GC allocation.
 
 ## Hashing
 

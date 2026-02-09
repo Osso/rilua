@@ -78,12 +78,15 @@ avoiding waste on sparse tables.
 
 ## Length Operator (#)
 
-The `#` operator returns the length of the "array part" of a table:
-any index `n` such that `t[n] ~= nil` and `t[n+1] == nil`. For
-tables with holes, the result is undefined (any such boundary is
+The `#` operator finds a boundary in a table: an integer index `n`
+such that `t[n] ~= nil` and `t[n+1] == nil` (or 0 if `t[1] == nil`).
+For tables with holes, the result is undefined (any boundary is
 valid). For contiguous arrays starting at 1, it returns the count.
 
-PUC-Rio implements this as a binary search on the array part.
+PUC-Rio implements this as a binary search on the array part first.
+If the array part is fully occupied (no nil at the end), it extends
+the search into the hash part via an exponential+binary search
+(`unbound_search` in `ltable.c`).
 
 ## Table Traversal
 

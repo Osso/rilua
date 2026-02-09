@@ -6,6 +6,9 @@
 integration tests for language semantics, PUC-Rio official test
 suite as the compatibility target.**
 
+Note: This document describes the planned testing strategy. The
+layers below are implemented incrementally as features are added.
+
 ## Test Layers
 
 ### Layer 1: Unit Tests

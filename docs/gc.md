@@ -26,8 +26,8 @@ Six approaches were evaluated:
 |----------|--------|------------|---------|
 | Rc + cycle detection | 0 | Poor | Different collection semantics |
 | Arena + gen. indices | 0 | Good | Selected |
-| Branded lifetimes | 5-10 | Excellent | Too complex, pervasive `'gc` |
-| Contained unsafe | 3-5 | Excellent | Soundness by convention |
+| Branded lifetimes | 5-10 | Full | Too complex, pervasive `'gc` |
+| Contained unsafe | 3-5 | Full | Soundness by convention |
 | Hybrid Rc + tracing | 3-5 | Partial | Two systems, semantic mismatch |
 
 The arena approach was chosen because:
@@ -66,8 +66,11 @@ enum SlotState<T> {
 
 #[derive(Clone, Copy)]
 enum Color {
-    White0,  // Current white (newly allocated this cycle)
-    White1,  // Other white (candidate for collection)
+    White0,  // White (generation 0)
+    White1,  // White (generation 1)
+    // Which white is "current" alternates each cycle via current_white.
+    // Newly allocated objects get the current white.
+    // Objects bearing the "other" white after marking are dead.
     Gray,    // Visited, children not yet traced
     Black,   // Fully traced
 }
@@ -130,9 +133,10 @@ enum GcState {
     Finalize,
 }
 
-/// Type-erased reference for the gray stack
+/// Type-erased reference for the gray stack.
+/// Note: strings are never pushed to the gray stack (they go
+/// white-to-black directly in reallymarkobject).
 enum GcObject {
-    String(GcRef<LuaString>),
     Table(GcRef<Table>),
     Closure(GcRef<Closure>),
     Upvalue(GcRef<Upvalue>),
@@ -160,7 +164,7 @@ impl Tracer<'_> {
 }
 ```
 
-The `Trace` trait is safe (no `unsafe` required). Each type
+The `Trace` trait requires no `unsafe` code. Each type
 implements it to enumerate its GC references:
 
 ```rust
@@ -169,9 +173,17 @@ impl Trace for Table {
         if let Some(mt) = self.metatable {
             tracer.mark(mt);
         }
+        // Check __mode for weak table behavior.
+        // Weak keys/values are NOT marked during normal traversal;
+        // they are processed separately in the atomic phase.
+        let mode = self.weak_mode(); // None, WeakKeys, WeakValues, WeakBoth
         for (k, v) in self.iter() {
-            k.trace(tracer);
-            v.trace(tracer);
+            if !mode.has_weak_keys() {
+                k.trace(tracer);
+            }
+            if !mode.has_weak_values() {
+                v.trace(tracer);
+            }
         }
     }
 }
@@ -190,21 +202,26 @@ impl Trace for Table {
 
 ### Atomic Phase
 
-After propagation completes (runs without interleaving):
+After propagation completes (runs without interleaving). The
+ordering below matches PUC-Rio's `atomic()` in `lgc.c`:
 
-1. Re-mark open upvalues (they are not roots in `markroot` but
-   must be considered during the atomic phase).
-2. Re-trace objects on the gray-again list (tables and threads
-   modified during marking via backward barriers).
-3. Re-mark the currently running thread.
-4. Re-mark all type metatables.
-5. Process weak tables: collect tables with `__mode` into
-   `weak_tables` list.
-6. Separate finalizable userdata: dead userdata with `__gc`
-   metamethods move to `finalize_list` and are re-marked alive.
-7. Clear dead weak entries.
-8. Flip `current_white` (White0 becomes White1 or vice versa).
-   New allocations from this point use the new current white.
+1. Re-mark open upvalues (`remarkupvals`). Upvalues of dead
+   threads are not roots in `markroot` but must be re-marked here.
+2. Propagate all objects marked from step 1 and from write
+   barriers that fired during the propagate phase.
+3. Set up weak tables for re-traversal (move weak list to gray).
+4. Re-mark the currently running thread.
+5. Re-mark all type metatables.
+6. Propagate all from steps 3-5.
+7. Re-trace the gray-again list (tables and threads modified
+   during marking via backward barriers). Propagate.
+8. Separate finalizable userdata: dead userdata with `__gc`
+   metamethods move to `finalize_list`.
+9. Mark preserved userdata alive (`marktmu`). Propagate.
+10. Clear dead weak entries (`cleartable`).
+11. Flip `current_white` (White0 becomes White1 or vice versa).
+    New allocations from this point use the new current white.
+12. Set state to `SweepString`.
 
 ### Sweep Phase
 
@@ -230,8 +247,10 @@ barriers restore the invariant:
 
 **Forward barrier** (closures, upvalues, userdata): When assigning
 a white value into a black object during the Propagate phase, mark
-the value gray. During other phases (Sweep, Finalize), the barrier
-instead marks the parent white to avoid unnecessary marking.
+the value gray. During SweepString and Sweep phases, the barrier
+instead marks the parent white to avoid unnecessary marking. (The
+forward barrier is never called during Finalize or Pause — PUC-Rio
+asserts this in `luaC_barrierf`.)
 
 **Backward barrier** (tables, threads): When assigning a white value
 into a black table, mark the table gray-again (push onto the
@@ -260,10 +279,10 @@ Lua 5.1.1 weak table semantics:
 
 | Option | Behavior |
 |--------|----------|
-| `"stop"` | Set `enabled = false`. Returns 0. |
-| `"restart"` | Set `enabled = true`, `threshold = total_bytes`. Returns 0. |
+| `"stop"` | Disable GC. PUC-Rio sets `GCthreshold = MAX_LUMEM`; rilua sets `enabled = false`. Returns 0. |
+| `"restart"` | Re-enable GC. PUC-Rio sets `GCthreshold = totalbytes`; rilua sets `enabled = true`. Returns 0. |
 | `"collect"` | Run a full mark-sweep cycle. Returns 0. |
-| `"count"` | Return `total_bytes / 1024.0` (floating point). |
+| `"count"` | Return memory in use in KB (float). PUC-Rio computes `(totalbytes >> 10) + (totalbytes & 0x3ff) / 1024.0`. |
 | `"step"` | Perform incremental work. Return true if cycle completed. |
 | `"setpause"` | Set `gc_pause`. Return previous value. |
 | `"setstepmul"` | Set `gc_step_mul`. Return previous value. |

@@ -45,11 +45,11 @@ Source Code
 
 Unlike PUC-Rio's single-pass compiler that emits bytecode during
 parsing, rilua uses an explicit AST intermediate representation. This
-follows the approach proven by Luau (Roblox's production Lua 5.1 fork).
+follows the approach used by Luau (Roblox's Lua 5.1-compatible scripting language).
 
 Benefits of the AST phase:
 
-- Clean separation between parsing and code generation
+- Separation between parsing and code generation
 - Each phase is independently testable
 - Future optimizations (constant folding, dead code elimination) can
   operate on the AST without modifying the parser
@@ -106,7 +106,7 @@ Each decision is documented in detail in its own file:
 | Compilation pipeline | Lexer -> Parser -> AST -> Compiler | Separation of concerns, testability | [pipeline.md](pipeline.md) |
 | Instruction set | PUC-Rio's 38 opcodes as Rust enums | Behavioral equivalence, type safety | [instructions.md](instructions.md) |
 | Value representation | Rust enum (Val) | Type safety, pattern matching | [values.md](values.md) |
-| Garbage collection | Arena with generational indices | Zero unsafe, safe mark-sweep | [gc.md](gc.md) |
+| Garbage collection | Arena with generational indices | Zero unsafe, mark-sweep | [gc.md](gc.md) |
 | Tables | Array + hash dual representation | Performance, PUC-Rio compatibility | [tables.md](tables.md) |
 | Strings | Interned with cached hash | Pointer equality, O(1) comparison | [strings.md](strings.md) |
 | Closures and upvalues | Open/closed upvalue model | PUC-Rio semantics | [closures.md](closures.md) |

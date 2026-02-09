@@ -73,17 +73,24 @@ they share the same `Upvalue` object (same `GcRef<Upvalue>`).
 Mutations through one closure are visible to all others.
 
 This is achieved by maintaining a list of open upvalues in the
-VM state, sorted by stack index. When creating a closure, the
-compiler emits instructions that either:
+VM state, sorted by stack index (descending). When creating a
+closure at runtime, the VM processes the pseudo-instructions
+following `CLOSURE` to either:
 
-- Reuse an existing open upvalue for that stack slot
-- Create a new open upvalue if none exists
+- Call `luaF_findupval` to reuse an existing open upvalue for
+  that stack slot, or create a new one if none exists (`MOVE`
+  pseudo-instruction)
+- Copy an upvalue reference from the enclosing closure
+  (`GETUPVAL` pseudo-instruction)
 
 ### Closing
 
-When a function returns (or a block exits with locals going out of
-scope), the CLOSE instruction closes all upvalues pointing at or
-above register A:
+When a block exits with locals going out of scope that are captured
+as upvalues, the compiler emits a `CLOSE` instruction. When a
+function returns, `OP_RETURN` (and `OP_TAILCALL`) call `luaF_close`
+directly — not via a separate `CLOSE` instruction. In both cases,
+all upvalues pointing at stack index >= the specified level are
+closed:
 
 1. Walk the open upvalue list.
 2. For each upvalue pointing at stack index >= A:
@@ -108,9 +115,9 @@ Protos are shared between closures via `Rc<Proto>`:
 - Protos are NOT managed by the GC — `Rc` handles their lifetime.
 
 This is a deliberate divergence from PUC-Rio, where Proto is a GC
-object. Since Proto is immutable and acyclic (it only references
-other Protos and constants, not tables or closures), `Rc` is
-sufficient and simpler.
+object. Since Proto is immutable after compilation and its constant pool
+only contains nil, booleans, numbers, and strings (not tables,
+closures, or other GC objects), `Rc` is sufficient and simpler.
 
 ## Compiler Support
 

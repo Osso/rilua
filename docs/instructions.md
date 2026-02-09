@@ -81,7 +81,7 @@ The 38 opcodes from `lopcodes.h`, grouped by function:
 |--------|--------|-------------|
 | FORLOOP | iAsBx | `R(A)+=R(A+2); if R(A) <?= R(A+1) then { pc+=sBx; R(A+3)=R(A) }` |
 | FORPREP | iAsBx | `R(A)-=R(A+2); pc+=sBx` |
-| TFORLOOP | iABC | Generic for loop step (followed by a JMP instruction) |
+| TFORLOOP | iABC | `R(A+3), ... ,R(A+2+C) := R(A)(R(A+1), R(A+2)); if R(A+3) ~= nil then R(A+2)=R(A+3) else pc++` |
 
 ### Tables and Closures
 
@@ -137,8 +137,8 @@ pub enum Instruction {
     TestSet { a: u8, b: u16, c: u16 },
     Call { a: u8, b: u16, c: u16 },
     TailCall { a: u8, b: u16, c: u16 },
+    // Note: TailCall C is always 0 in the encoding; semantically C-1 = LUA_MULTRET (-1).
     Return { a: u8, b: u16 },
-    // Note: TailCall includes c (always 0 = LUA_MULTRET in PUC-Rio).
     ForLoop { a: u8, sbx: i32 },
     ForPrep { a: u8, sbx: i32 },
     TForLoop { a: u8, c: u16 },
@@ -181,7 +181,7 @@ Several instructions use B=0 or C=0 as sentinel values:
 
 - **CALL**: if B=0, arguments extend to top of stack. If C=0, return
   values extend to top of stack (variable returns).
-- **TAILCALL**: C is always 0 (LUA_MULTRET). B follows CALL semantics.
+- **TAILCALL**: C is always 0 (encoding LUA_MULTRET via C-1 convention). B follows CALL semantics.
 - **RETURN**: if B=0, return values extend from R(A) to top of stack.
 - **VARARG**: if B=0, copy all available varargs and set top.
 - **SETLIST**: if B=0, set top to stack top. If C=0, the real C value

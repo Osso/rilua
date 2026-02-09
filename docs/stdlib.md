@@ -61,7 +61,7 @@ The coroutine library is registered as the `coroutine` table by
 |----------|-------|
 | `coroutine.create` | Create coroutine from function |
 | `coroutine.resume` | Resume suspended coroutine |
-| `coroutine.running` | Return running coroutine (nil if main) |
+| `coroutine.running` | Return running coroutine (returns nothing if main thread) |
 | `coroutine.status` | Return status string (running/suspended/normal/dead) |
 | `coroutine.wrap` | Create coroutine as iterator function |
 | `coroutine.yield` | Suspend execution, return values to resume |
@@ -87,7 +87,7 @@ Registered as the `string` table and as the string metatable's
 | `string.reverse` | String reversal |
 | `string.sub` | Substring extraction |
 | `string.upper` | Uppercase conversion |
-| `string.gfind` | Deprecated alias for gmatch (raises error if LUA_COMPAT_GFIND disabled) |
+| `string.gfind` | Deprecated alias for gmatch (works by default; raises error only if `LUA_COMPAT_GFIND` is undefined) |
 
 Lua 5.1 patterns are NOT regular expressions. They support character
 classes (`%a`, `%d`, `%w`, etc.), anchors (`^`, `$`), quantifiers
@@ -131,6 +131,7 @@ classes (`%a`, `%d`, `%w`, etc.), anchors (`^`, `$`), quantifiers
 | `math.log10` | Base-10 logarithm |
 | `math.max` | Maximum |
 | `math.min` | Minimum |
+| `math.mod` | Deprecated alias for fmod (enabled by default via `LUA_COMPAT_MOD`) |
 | `math.modf` | Integer and fractional parts |
 | `math.pi` | Pi constant |
 | `math.pow` | Power |

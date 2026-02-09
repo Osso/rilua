@@ -24,8 +24,8 @@ management, and API surface.
 ### Luau (C++)
 
 - **Local path**: `~/Repos/github.com/luau-lang/luau`
-- **Role**: Architecture reference. Production-proven Lua 5.1 evolution.
-- **Architecture**: Lexer -> Parser -> AST -> Compiler -> VM. ~83
+- **Role**: Architecture reference. Lua 5.1-compatible scripting language.
+- **Architecture**: Lexer -> Parser -> AST -> Compiler -> VM. 82
   register-based opcodes (count evolves with development). Incremental tri-color GC. CallInfo chain.
   Array+hash tables. String interning. No longjmp (C++ exceptions).
 - **What we take**: AST-based pipeline design, separation of compiler
@@ -43,9 +43,9 @@ management, and API surface.
 - **Role**: Proves Result-based error handling works for a Lua VM.
 - **Architecture**: c2rust translation of Lua 5.4. PUC-Rio file naming
   (llex.rs, lparser.rs, lcode.rs). 83 opcodes. Incremental GC via raw
-  pointers. Heavy use of unsafe code. Safe public API over unsafe internals.
-- **What we take**: Result-based error propagation pattern, safe public
-  API design, packed u32 instruction format for
+  pointers. Heavy use of unsafe code. Memory-safe public API over unsafe internals.
+- **What we take**: Result-based error propagation pattern, memory-safe
+  public API design, packed u32 instruction format for
   serialization.
 - **What we avoid**: c2rust code style, heavy unsafe, wrong Lua version
   (5.4 vs 5.1.1).
@@ -67,8 +67,8 @@ management, and API surface.
 
 - **Local path**: `~/Repos/github.com/mlua-rs/mlua`
 - **Role**: API design reference for embedding Lua in Rust.
-- **Architecture**: FFI wrapper around C Lua. Safe Rust API over unsafe
-  C bindings. Trait-based type conversions (`IntoLua`, `FromLua`).
+- **Architecture**: FFI wrapper around C Lua. Memory-safe Rust API over
+  unsafe C bindings. Trait-based type conversions (`IntoLua`, `FromLua`).
   Registry-based lifetime management. Scoped values. UserData trait.
 - **What we take**: Trait-based API design (`IntoLua`/`FromLua` pattern),
   UserData trait approach, scope-based lifetime management, error type

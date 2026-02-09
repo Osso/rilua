@@ -5,7 +5,7 @@
 Lexer -> Parser -> AST -> Compiler -> Proto (bytecode)
 
 A multi-phase compilation pipeline with an explicit AST intermediate
-representation, following the approach proven by Luau.
+representation, following the approach used by Luau.
 
 ## Context
 
@@ -15,11 +15,12 @@ and code generator are interleaved in `lparser.c` and `lcode.c`.
 
 This is efficient but tightly couples parsing and code generation.
 Bugs in one phase are hard to isolate. Testing requires running the
-full pipeline. Adding optimizations means modifying the parser.
+full pipeline. Adding optimizations beyond constant folding requires
+changes to the interleaved parse-and-emit code.
 
-Luau (Roblox's production Lua 5.1 fork) introduced an explicit AST
-phase. The parser produces `AstStatBlock` trees. A separate compiler
-walks the AST and emits bytecode. This design is used in Luau's production deployment.
+Luau (Roblox's Lua 5.1-compatible scripting language) uses an explicit
+AST phase. The parser produces `AstStatBlock` trees. A separate
+compiler walks the AST and emits bytecode.
 
 ## Phases
 

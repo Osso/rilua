@@ -42,7 +42,7 @@ understanding the pipeline.
 
 1. [api.md](api.md) -- Trait-based public API, IntoLua/FromLua,
    UserData, embedding example
-2. [stdlib.md](stdlib.md) -- All 8 standard libraries, function lists,
+2. [stdlib.md](stdlib.md) -- All 9 standard libraries, function lists,
    implementation priority
 
 ### 6. Quality
