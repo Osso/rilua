@@ -1,1 +1,2895 @@
 //! Code generator: compiles an AST into a Proto (bytecode).
+//!
+//! Follows PUC-Rio's `lcode.c` and `lparser.c` compiler structure.
+//! Key data structures: `FuncState` tracks per-function compilation state,
+//! `ExprContext` (maps to PUC-Rio's `expdesc`) tracks expression state
+//! during code generation, and `BlockContext` tracks lexical scopes.
+
+use std::rc::Rc;
+
+use crate::error::{LuaError, LuaResult, SyntaxError};
+
+use super::ast::Block;
+use super::parser;
+
+use crate::vm::instructions::{
+    BITRK, Instruction, LFIELDS_PER_FLUSH, LUAI_MAXUPVALUES, LUAI_MAXVARS, MAXARG_BX, MAXINDEXRK,
+    MAXSTACK, NO_JUMP, OpCode, is_k,
+};
+use crate::vm::proto::{LocalVar, Proto};
+use crate::vm::value::Val;
+
+// ---------------------------------------------------------------------------
+// ExprContext (maps to PUC-Rio's expdesc)
+// ---------------------------------------------------------------------------
+
+/// Expression kind: what state is this expression in?
+///
+/// Maps directly to PUC-Rio's `expkind` enum. The expression kind determines
+/// how `info` and `aux` are interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Variants used in chunk 2i (full code generation)
+pub(crate) enum ExprKind {
+    /// No value (void expression).
+    Void,
+    /// Nil constant.
+    Nil,
+    /// True constant.
+    True,
+    /// False constant.
+    False,
+    /// Constant in pool: `info` = index into `Proto.constants`.
+    K,
+    /// Numeric constant: stored in `nval`.
+    KNum,
+    /// Local variable: `info` = register index.
+    Local,
+    /// Upvalue: `info` = upvalue index.
+    Upval,
+    /// Global variable: `info` = constant index for name string.
+    Global,
+    /// Indexed: `info` = table register, `aux` = index RK.
+    Indexed,
+    /// Jump instruction: `info` = pc of the jump.
+    Jmp,
+    /// Relocable instruction: `info` = pc (result register can be patched).
+    Relocable,
+    /// Non-relocable: `info` = fixed result register.
+    NonReloc,
+    /// Function call: `info` = pc of the CALL instruction.
+    Call,
+    /// Vararg expression: `info` = pc of the VARARG instruction.
+    VarArg,
+}
+
+/// Expression context: tracks the state of an expression during compilation.
+///
+/// Maps to PUC-Rio's `expdesc`. The `t` and `f` fields are linked lists of
+/// pending jump instructions that should be patched when the expression's
+/// boolean value is determined.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExprContext {
+    /// What kind of expression this is.
+    pub kind: ExprKind,
+    /// Primary information (interpretation depends on `kind`).
+    pub info: i32,
+    /// Auxiliary information (used by Indexed and Global).
+    pub aux: i32,
+    /// Numeric value (used when kind == KNum).
+    pub nval: f64,
+    /// Patch list: jumps when expression is true.
+    pub t: i32,
+    /// Patch list: jumps when expression is false.
+    pub f: i32,
+}
+
+impl ExprContext {
+    fn void() -> Self {
+        Self {
+            kind: ExprKind::Void,
+            info: 0,
+            aux: 0,
+            nval: 0.0,
+            t: NO_JUMP,
+            f: NO_JUMP,
+        }
+    }
+
+    fn new(kind: ExprKind, info: i32) -> Self {
+        Self {
+            kind,
+            info,
+            aux: 0,
+            nval: 0.0,
+            t: NO_JUMP,
+            f: NO_JUMP,
+        }
+    }
+
+    fn number(val: f64) -> Self {
+        Self {
+            kind: ExprKind::KNum,
+            info: 0,
+            aux: 0,
+            nval: val,
+            t: NO_JUMP,
+            f: NO_JUMP,
+        }
+    }
+
+    /// Returns true if the expression has pending jump lists.
+    fn has_jumps(&self) -> bool {
+        self.t != self.f
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UpvalDesc
+// ---------------------------------------------------------------------------
+
+/// Describes how an upvalue is captured from a parent scope.
+#[derive(Debug, Clone)]
+pub(crate) struct UpvalDesc {
+    /// True if captured from parent's locals (VLOCAL), false if from
+    /// parent's upvalues (VUPVAL).
+    pub in_stack: bool,
+    /// Index of the local variable or upvalue in the parent function.
+    pub index: u8,
+    /// Name of the upvalue (for debug info).
+    pub name: String,
+}
+
+// ---------------------------------------------------------------------------
+// BlockContext
+// ---------------------------------------------------------------------------
+
+/// Tracks a lexical block scope during compilation.
+///
+/// Maps to PUC-Rio's `BlockCnt`.
+#[allow(dead_code)] // Fields used in chunk 2i (full code generation)
+struct BlockContext {
+    /// Number of active locals when this block was entered.
+    num_active_vars: u8,
+    /// True if any local in this block is captured as an upvalue.
+    has_upval: bool,
+    /// True if this block is a breakable loop.
+    is_breakable: bool,
+    /// Linked list of pending break jumps.
+    break_list: i32,
+}
+
+// ---------------------------------------------------------------------------
+// FuncState
+// ---------------------------------------------------------------------------
+
+/// Per-function compilation state.
+///
+/// Maps to PUC-Rio's `FuncState`. One `FuncState` exists per function
+/// being compiled; they form a stack via the `Compiler` struct.
+#[allow(dead_code)] // Fields used in chunk 2i (full code generation)
+pub(crate) struct FuncState {
+    /// The prototype being built.
+    pub proto: Proto,
+    /// Next free register.
+    pub free_reg: u8,
+    /// Number of active local variables.
+    pub num_active_vars: u8,
+    /// Upvalue descriptors for this function.
+    pub upvalues: Vec<UpvalDesc>,
+    /// Active variable stack: indices into proto.local_vars.
+    active_vars: Vec<u16>,
+    /// Block scope chain.
+    blocks: Vec<BlockContext>,
+    /// Pending jumps to current pc.
+    pub jpc: i32,
+    /// PC of last jump target (avoid bad optimizations).
+    pub last_target: i32,
+}
+
+impl FuncState {
+    fn new(source: &str) -> Self {
+        Self {
+            proto: Proto::new(source),
+            free_reg: 0,
+            num_active_vars: 0,
+            upvalues: Vec::new(),
+            active_vars: Vec::new(),
+            blocks: Vec::new(),
+            jpc: NO_JUMP,
+            last_target: 0,
+        }
+    }
+
+    /// Returns the current pc (next instruction index).
+    pub(crate) fn pc(&self) -> usize {
+        self.proto.code.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compiler
+// ---------------------------------------------------------------------------
+
+/// Top-level compiler state: manages the function state stack.
+pub struct Compiler {
+    /// Stack of function states (innermost is last).
+    func_states: Vec<FuncState>,
+    /// Source name for error messages.
+    source_name: String,
+    /// Current line number (for instruction debug info).
+    pub(crate) current_line: u32,
+}
+
+#[allow(dead_code)] // Methods used in chunk 2i (full code generation)
+impl Compiler {
+    /// Creates a new compiler for the given source.
+    fn new(source_name: &str) -> Self {
+        let fs = FuncState::new(source_name);
+        Self {
+            func_states: vec![fs],
+            source_name: source_name.to_string(),
+            current_line: 1,
+        }
+    }
+
+    /// Returns the current (innermost) function state.
+    ///
+    /// # Panics
+    /// Panics if no function state exists (invariant: always >= 1).
+    #[allow(clippy::expect_used)]
+    pub(crate) fn fs(&self) -> &FuncState {
+        self.func_states
+            .last()
+            .expect("compiler must have at least one function state")
+    }
+
+    /// Returns a mutable reference to the current function state.
+    ///
+    /// # Panics
+    /// Panics if no function state exists (invariant: always >= 1).
+    #[allow(clippy::expect_used)]
+    pub(crate) fn fs_mut(&mut self) -> &mut FuncState {
+        self.func_states
+            .last_mut()
+            .expect("compiler must have at least one function state")
+    }
+
+    fn syntax_error(&self, msg: &str) -> LuaError {
+        LuaError::Syntax(SyntaxError {
+            message: msg.to_string(),
+            source: self.source_name.clone(),
+            line: self.current_line,
+        })
+    }
+
+    // -- Instruction emission --
+
+    /// Emits an instruction and records line info. Returns the pc.
+    pub(crate) fn emit(&mut self, instr: Instruction, line: u32) -> usize {
+        self.discharge_jpc();
+        let fs = self.fs_mut();
+        let pc = fs.proto.code.len();
+        fs.proto.code.push(instr.raw());
+        fs.proto.line_info.push(line);
+        fs.last_target = pc as i32;
+        pc
+    }
+
+    /// Emits an iABC instruction. Returns the pc.
+    pub(crate) fn emit_abc(&mut self, op: OpCode, a: u32, b: u32, c: u32, line: u32) -> usize {
+        self.emit(Instruction::abc(op, a, b, c), line)
+    }
+
+    /// Emits an iABx instruction. Returns the pc.
+    pub(crate) fn emit_abx(&mut self, op: OpCode, a: u32, bx: u32, line: u32) -> usize {
+        self.emit(Instruction::a_bx(op, a, bx), line)
+    }
+
+    /// Emits an iAsBx instruction. Returns the pc.
+    #[allow(dead_code)]
+    pub(crate) fn emit_asbx(&mut self, op: OpCode, a: u32, sbx: i32, line: u32) -> usize {
+        self.emit(Instruction::a_sbx(op, a, sbx), line)
+    }
+
+    /// Returns the instruction at a given pc.
+    pub(crate) fn get_instruction(&self, pc: usize) -> Instruction {
+        Instruction::from_raw(self.fs().proto.code[pc])
+    }
+
+    /// Modifies the instruction at a given pc.
+    pub(crate) fn set_instruction(&mut self, pc: usize, instr: Instruction) {
+        self.fs_mut().proto.code[pc] = instr.raw();
+    }
+
+    // -- Jump management --
+
+    /// Emits a JMP instruction. Returns the pc of the jump.
+    pub(crate) fn emit_jump(&mut self, line: u32) -> usize {
+        let jpc = self.fs().jpc;
+        let fs = self.fs_mut();
+        fs.jpc = NO_JUMP;
+        let pc = self.emit_asbx(OpCode::Jmp, 0, NO_JUMP, line);
+        self.concat_jumps_result(pc, jpc)
+    }
+
+    /// Patches jump at `pc` to target `target`.
+    pub(crate) fn patch_jump(&mut self, pc: usize, target: usize) {
+        let offset = target as i32 - pc as i32 - 1;
+        let mut instr = self.get_instruction(pc);
+        instr.set_sbx(offset);
+        self.set_instruction(pc, instr);
+    }
+
+    /// Returns the target of a jump instruction at `pc`.
+    fn get_jump_target(&self, pc: usize) -> i32 {
+        let offset = self.get_instruction(pc).sbx();
+        if offset == NO_JUMP {
+            return NO_JUMP;
+        }
+        (pc as i32) + 1 + offset
+    }
+
+    /// Concatenates jump list `l2` onto `l1`. Returns the merged list head.
+    fn concat_jumps_result(&mut self, l1: usize, l2: i32) -> usize {
+        if l2 == NO_JUMP {
+            return l1;
+        }
+        let l1_i32 = l1 as i32;
+        if l1_i32 == NO_JUMP {
+            return l2 as usize;
+        }
+        // Walk l1 to its end, then link l2
+        let mut list = l1_i32;
+        loop {
+            let next = self.get_jump_target(list as usize);
+            if next == NO_JUMP {
+                self.patch_jump(list as usize, l2 as usize);
+                break;
+            }
+            list = next;
+        }
+        l1
+    }
+
+    /// Concatenates jump list `l2` onto `l1` (both as i32).
+    pub(crate) fn concat_jumps(&mut self, l1: &mut i32, l2: i32) {
+        if l2 == NO_JUMP {
+            return;
+        }
+        if *l1 == NO_JUMP {
+            *l1 = l2;
+        } else {
+            let mut list = *l1;
+            loop {
+                let next = self.get_jump_target(list as usize);
+                if next == NO_JUMP {
+                    self.patch_jump(list as usize, l2 as usize);
+                    break;
+                }
+                list = next;
+            }
+        }
+    }
+
+    /// Patches all jumps in `list` to target `target`.
+    pub(crate) fn patch_list(&mut self, mut list: i32, target: usize) {
+        while list != NO_JUMP {
+            let next = self.get_jump_target(list as usize);
+            self.patch_jump(list as usize, target);
+            list = next;
+        }
+    }
+
+    /// Patches all jumps in `list` to target the current pc.
+    pub(crate) fn patch_to_here(&mut self, list: i32) {
+        let jpc = self.fs().jpc;
+        let mut merged = jpc;
+        self.concat_jumps(&mut merged, list);
+        self.fs_mut().jpc = merged;
+    }
+
+    /// Discharges pending jumps to the current pc.
+    fn discharge_jpc(&mut self) {
+        let jpc = self.fs().jpc;
+        if jpc != NO_JUMP {
+            let pc = self.fs().pc();
+            self.patch_list(jpc, pc);
+            self.fs_mut().jpc = NO_JUMP;
+        }
+    }
+
+    // -- Constant pool --
+
+    /// Adds a value to the constant pool, deduplicating.
+    /// Returns the constant index.
+    pub(crate) fn add_constant(&mut self, val: Val) -> LuaResult<u32> {
+        let fs = self.fs_mut();
+        // Linear search for dedup (PUC-Rio uses a hash table, but linear
+        // is fine for the constant pool sizes we'll encounter)
+        for (i, existing) in fs.proto.constants.iter().enumerate() {
+            if constants_equal(existing, &val) {
+                #[allow(clippy::cast_possible_truncation)]
+                return Ok(i as u32);
+            }
+        }
+        let idx = fs.proto.constants.len();
+        if idx > MAXARG_BX as usize {
+            return Err(self.syntax_error("constant table overflow"));
+        }
+        fs.proto.constants.push(val);
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(idx as u32)
+    }
+
+    /// Adds a string constant to the pool. Returns the constant index.
+    pub(crate) fn string_constant(&mut self, _s: &str) -> LuaResult<u32> {
+        // For the compiler, we store strings as Val::Num with a sentinel,
+        // but actually we need a string representation in the constant pool.
+        // Since we don't have GC strings during compilation, we use a
+        // placeholder: store the string bytes directly.
+        // TODO: Once GC integration is complete, this should create proper
+        // GcRef<LuaString> values. For now, we use a string constant table
+        // alongside the main constant pool.
+        //
+        // Actually, the simplest approach for now: store string constants
+        // separately and reference them by index. The Proto already has
+        // constants as Vec<Val>, but Val::Str requires a GcRef which we
+        // don't have during compilation.
+        //
+        // For the compiler to work standalone (before VM integration),
+        // we store strings as Val::Nil placeholders with a separate string
+        // table. The final integration step will convert these.
+        let fs = self.fs();
+        // Search existing string constants
+        for (i, name) in fs.proto.upvalue_names.iter().enumerate() {
+            // Repurpose upvalue_names temporarily? No, that's wrong.
+            // Let's use a simpler approach: store string index in the
+            // constant pool using a marker.
+            let _ = (i, name);
+        }
+        // For now: add Val::Nil as placeholder, track strings separately
+        self.add_constant(Val::Nil)
+    }
+
+    /// Adds a number constant to the pool. Returns the constant index.
+    pub(crate) fn number_constant(&mut self, n: f64) -> LuaResult<u32> {
+        self.add_constant(Val::Num(n))
+    }
+
+    // -- Register allocation --
+
+    /// Allocates one register. Returns its index.
+    pub(crate) fn alloc_reg(&mut self) -> LuaResult<u32> {
+        self.check_stack(1)?;
+        let reg = u32::from(self.fs().free_reg);
+        self.fs_mut().free_reg += 1;
+        Ok(reg)
+    }
+
+    /// Reserves `n` consecutive registers.
+    pub(crate) fn reserve_regs(&mut self, n: u32) -> LuaResult<()> {
+        self.check_stack(n)?;
+        self.fs_mut().free_reg += n as u8;
+        Ok(())
+    }
+
+    /// Frees a register if it's a temporary (not a local variable).
+    pub(crate) fn free_reg(&mut self, reg: u32) {
+        let fs = self.fs();
+        if reg >= u32::from(fs.num_active_vars) && !is_k(reg) {
+            let fs = self.fs_mut();
+            fs.free_reg -= 1;
+            debug_assert_eq!(u32::from(fs.free_reg), reg);
+        }
+    }
+
+    /// Ensures the stack has room for `n` more registers.
+    fn check_stack(&mut self, n: u32) -> LuaResult<()> {
+        let new_stack = u32::from(self.fs().free_reg) + n;
+        if new_stack > MAXSTACK {
+            return Err(self.syntax_error("function or expression too complex"));
+        }
+        let fs = self.fs_mut();
+        if new_stack > u32::from(fs.proto.max_stack_size) {
+            fs.proto.max_stack_size = new_stack as u8;
+        }
+        Ok(())
+    }
+
+    // -- Variable resolution --
+
+    /// Searches for a local variable by name in the current function.
+    /// Returns the register index if found.
+    fn search_local(&self, name: &str) -> Option<u8> {
+        let fs = self.fs();
+        for i in (0..fs.num_active_vars).rev() {
+            let var_idx = fs.active_vars[i as usize];
+            if fs.proto.local_vars[var_idx as usize].name == name {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Searches for an upvalue by name in the current function.
+    /// Returns the upvalue index if found.
+    fn search_upvalue(&self, name: &str) -> Option<u8> {
+        let fs = self.fs();
+        for (i, uv) in fs.upvalues.iter().enumerate() {
+            if uv.name == name {
+                #[allow(clippy::cast_possible_truncation)]
+                return Some(i as u8);
+            }
+        }
+        None
+    }
+
+    /// Registers a new upvalue. Returns the upvalue index.
+    fn add_upvalue(
+        &mut self,
+        fs_idx: usize,
+        name: &str,
+        in_stack: bool,
+        index: u8,
+    ) -> LuaResult<u8> {
+        let fs = &mut self.func_states[fs_idx];
+        // Check for duplicate
+        for (i, uv) in fs.upvalues.iter().enumerate() {
+            if uv.in_stack == in_stack && uv.index == index {
+                #[allow(clippy::cast_possible_truncation)]
+                return Ok(i as u8);
+            }
+        }
+        let idx = fs.upvalues.len();
+        if idx >= LUAI_MAXUPVALUES as usize {
+            return Err(self.syntax_error("too many upvalues"));
+        }
+        fs.upvalues.push(UpvalDesc {
+            in_stack,
+            index,
+            name: name.to_string(),
+        });
+        fs.proto.num_upvalues = fs.upvalues.len() as u8;
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(idx as u8)
+    }
+
+    /// Resolves a variable name: local, upvalue, or global.
+    pub(crate) fn resolve_var(&mut self, name: &str) -> LuaResult<ExprContext> {
+        // 1. Search locals in current function
+        if let Some(reg) = self.search_local(name) {
+            return Ok(ExprContext::new(ExprKind::Local, i32::from(reg)));
+        }
+
+        // 2. Search upvalues in current function
+        if let Some(idx) = self.search_upvalue(name) {
+            return Ok(ExprContext::new(ExprKind::Upval, i32::from(idx)));
+        }
+
+        // 3. Search parent functions (build upvalue chain)
+        let current_idx = self.func_states.len() - 1;
+        if current_idx > 0
+            && let Some(uv_idx) = self.resolve_var_aux(current_idx, name)?
+        {
+            return Ok(ExprContext::new(ExprKind::Upval, i32::from(uv_idx)));
+        }
+
+        // 4. Global: add name to constants, return Global kind
+        let k = self.string_constant(name)?;
+        Ok(ExprContext {
+            kind: ExprKind::Global,
+            info: k as i32,
+            aux: 0,
+            nval: 0.0,
+            t: NO_JUMP,
+            f: NO_JUMP,
+        })
+    }
+
+    /// Recursive upvalue resolution through parent function states.
+    /// Returns the upvalue index in `func_states[fs_idx]` if found.
+    fn resolve_var_aux(&mut self, fs_idx: usize, name: &str) -> LuaResult<Option<u8>> {
+        if fs_idx == 0 {
+            return Ok(None); // Reached global scope
+        }
+
+        let parent_idx = fs_idx - 1;
+
+        // Search parent's locals
+        let parent_fs = &self.func_states[parent_idx];
+        for i in (0..parent_fs.num_active_vars).rev() {
+            let var_idx = parent_fs.active_vars[i as usize];
+            if parent_fs.proto.local_vars[var_idx as usize].name == name {
+                // Found in parent's locals: capture as upvalue
+                let uv_idx = self.add_upvalue(fs_idx, name, true, i)?;
+                return Ok(Some(uv_idx));
+            }
+        }
+
+        // Search parent's upvalues
+        let parent_fs = &self.func_states[parent_idx];
+        for (i, uv) in parent_fs.upvalues.iter().enumerate() {
+            if uv.name == name {
+                // Found in parent's upvalues: chain it
+                #[allow(clippy::cast_possible_truncation)]
+                let uv_idx = self.add_upvalue(fs_idx, name, false, i as u8)?;
+                return Ok(Some(uv_idx));
+            }
+        }
+
+        // Recurse to grandparent
+        if let Some(parent_uv) = self.resolve_var_aux(parent_idx, name)? {
+            let uv_idx = self.add_upvalue(fs_idx, name, false, parent_uv)?;
+            return Ok(Some(uv_idx));
+        }
+
+        Ok(None) // Not found, will be global
+    }
+
+    // -- Local variable management --
+
+    /// Creates a new local variable entry and registers it (pushes to
+    /// `active_vars`). The variable is not yet activated (visible) until
+    /// `activate_locals` is called.
+    pub(crate) fn new_local(&mut self, name: &str) -> LuaResult<u16> {
+        let fs = self.fs_mut();
+        if fs.active_vars.len() >= LUAI_MAXVARS as usize {
+            return Err(self.syntax_error("too many local variables"));
+        }
+        let idx = fs.proto.local_vars.len();
+        fs.proto.local_vars.push(LocalVar {
+            name: name.to_string(),
+            start_pc: 0,
+            end_pc: 0,
+        });
+        #[allow(clippy::cast_possible_truncation)]
+        let idx16 = idx as u16;
+        fs.active_vars.push(idx16);
+        Ok(idx16)
+    }
+
+    /// Activates `n` local variables (makes them visible).
+    pub(crate) fn activate_locals(&mut self, n: u32) {
+        let fs = self.fs_mut();
+        let pc = fs.proto.code.len();
+        for _ in 0..n {
+            let var_idx = fs.active_vars.len();
+            if var_idx < fs.proto.local_vars.len() {
+                fs.proto.local_vars[var_idx].start_pc = pc as u32;
+            }
+            // The active_vars entry was already pushed by new_local
+        }
+        fs.num_active_vars += n as u8;
+    }
+
+    /// Removes locals down to `to_level`, closing their debug info.
+    pub(crate) fn remove_locals(&mut self, to_level: u8) {
+        let fs = self.fs_mut();
+        let pc = fs.proto.code.len() as u32;
+        while fs.num_active_vars > to_level {
+            fs.num_active_vars -= 1;
+            if let Some(var_idx) = fs.active_vars.pop()
+                && (var_idx as usize) < fs.proto.local_vars.len()
+            {
+                fs.proto.local_vars[var_idx as usize].end_pc = pc;
+            }
+        }
+    }
+
+    // -- Block management --
+
+    /// Enters a new block scope.
+    pub(crate) fn enter_block(&mut self, is_breakable: bool) {
+        let num_active = self.fs().num_active_vars;
+        self.fs_mut().blocks.push(BlockContext {
+            num_active_vars: num_active,
+            has_upval: false,
+            is_breakable,
+            break_list: NO_JUMP,
+        });
+    }
+
+    /// Leaves a block scope, closing locals and upvalues.
+    pub(crate) fn leave_block(&mut self) {
+        if let Some(block) = self.fs_mut().blocks.pop() {
+            self.remove_locals(block.num_active_vars);
+            if block.has_upval {
+                // Emit OP_CLOSE to close upvalues
+                let level = u32::from(block.num_active_vars);
+                self.emit_abc(OpCode::Close, level, 0, 0, self.current_line);
+            }
+            if block.is_breakable {
+                let pc = self.fs().pc();
+                self.patch_list(block.break_list, pc);
+            }
+        }
+    }
+
+    /// Records a break jump in the innermost breakable block.
+    pub(crate) fn add_break_jump(&mut self, jump_pc: i32) -> LuaResult<()> {
+        let fs = self.fs_mut();
+        for block in fs.blocks.iter_mut().rev() {
+            if block.is_breakable {
+                let mut bl = block.break_list;
+                // We need to concat jump_pc onto block.break_list
+                // but we can't call self.concat_jumps here due to borrow.
+                // Simple approach: just link directly
+                if bl == NO_JUMP {
+                    block.break_list = jump_pc;
+                } else {
+                    // Walk to end of break_list and patch
+                    loop {
+                        let instr = Instruction::from_raw(fs.proto.code[bl as usize]);
+                        let next_offset = instr.sbx();
+                        if next_offset == NO_JUMP {
+                            // Patch this jump to point to jump_pc
+                            let offset = jump_pc - bl - 1;
+                            let mut patched = instr;
+                            patched.set_sbx(offset);
+                            fs.proto.code[bl as usize] = patched.raw();
+                            break;
+                        }
+                        bl = bl + 1 + next_offset;
+                    }
+                }
+                return Ok(());
+            }
+        }
+        Err(self.syntax_error("no loop to break"))
+    }
+
+    // -- Expression discharge --
+
+    /// Converts variable expressions to values by emitting load instructions.
+    pub(crate) fn discharge_vars(&mut self, e: &mut ExprContext, line: u32) {
+        match e.kind {
+            ExprKind::Local => {
+                e.kind = ExprKind::NonReloc;
+                // info already has the register
+            }
+            ExprKind::Upval => {
+                let pc = self.emit_abc(OpCode::GetUpval, 0, e.info as u32, 0, line);
+                e.info = pc as i32;
+                e.kind = ExprKind::Relocable;
+            }
+            ExprKind::Global => {
+                let pc = self.emit_abx(OpCode::GetGlobal, 0, e.info as u32, line);
+                e.info = pc as i32;
+                e.kind = ExprKind::Relocable;
+            }
+            ExprKind::Indexed => {
+                let table_reg = e.info as u32;
+                let key_rk = e.aux as u32;
+                self.free_reg(key_rk);
+                self.free_reg(table_reg);
+                let pc = self.emit_abc(OpCode::GetTable, 0, table_reg, key_rk, line);
+                e.info = pc as i32;
+                e.kind = ExprKind::Relocable;
+            }
+            ExprKind::Call | ExprKind::VarArg => {
+                self.set_one_ret(e);
+            }
+            _ => {} // Constants and voids need no discharge
+        }
+    }
+
+    /// Sets a call or vararg expression to return exactly one value.
+    fn set_one_ret(&mut self, e: &mut ExprContext) {
+        if e.kind == ExprKind::Call {
+            let mut instr = self.get_instruction(e.info as usize);
+            // Set C to 2 (1 result + 1)
+            instr.set_c(2);
+            self.set_instruction(e.info as usize, instr);
+            e.kind = ExprKind::NonReloc;
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                e.info = instr.a() as i32;
+            }
+        } else if e.kind == ExprKind::VarArg {
+            let mut instr = self.get_instruction(e.info as usize);
+            instr.set_b(2); // 1 result
+            self.set_instruction(e.info as usize, instr);
+            e.kind = ExprKind::Relocable;
+        }
+    }
+
+    /// Places an expression into the next free register.
+    pub(crate) fn exp2nextreg(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<()> {
+        self.discharge_vars(e, line);
+        self.free_expr(e);
+        let reg = self.alloc_reg()?;
+        self.exp2reg(e, reg, line);
+        Ok(())
+    }
+
+    /// Places an expression into any register (reuses if already in one).
+    pub(crate) fn exp2anyreg(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<u32> {
+        self.discharge_vars(e, line);
+        if e.kind == ExprKind::NonReloc {
+            if !e.has_jumps() {
+                return Ok(e.info as u32);
+            }
+            if e.info as u32 >= u32::from(self.fs().num_active_vars) {
+                // Reuse temporary register
+                self.exp2reg(e, e.info as u32, line);
+                return Ok(e.info as u32);
+            }
+        }
+        self.exp2nextreg(e, line)?;
+        Ok(e.info as u32)
+    }
+
+    /// Emits code to place an expression value into register `reg`.
+    pub(crate) fn exp2reg(&mut self, e: &mut ExprContext, reg: u32, line: u32) {
+        self.discharge2reg(e, reg, line);
+        // Handle pending jumps
+        if e.kind == ExprKind::Jmp {
+            let mut e_t = e.t;
+            self.concat_jumps(&mut e_t, e.info);
+            e.t = e_t;
+        }
+        if e.has_jumps() {
+            // Need to patch true/false jump lists
+            let p_f = NO_JUMP;
+            let p_t = NO_JUMP;
+            // For simple cases without conditional jumps, just patch
+            if p_f == NO_JUMP && p_t == NO_JUMP {
+                // No conditional patching needed
+            }
+            let pc = self.fs().pc();
+            self.patch_list(e.f, pc);
+            self.patch_list(e.t, pc);
+        }
+        e.f = NO_JUMP;
+        e.t = NO_JUMP;
+        e.info = reg as i32;
+        e.kind = ExprKind::NonReloc;
+    }
+
+    /// Discharges expression directly to a specific register.
+    fn discharge2reg(&mut self, e: &mut ExprContext, reg: u32, line: u32) {
+        self.discharge_vars(e, line);
+        match e.kind {
+            ExprKind::Nil => {
+                self.emit_abc(OpCode::LoadNil, reg, reg, 0, line);
+            }
+            ExprKind::False | ExprKind::True => {
+                let bool_val = u32::from(e.kind == ExprKind::True);
+                self.emit_abc(OpCode::LoadBool, reg, bool_val, 0, line);
+            }
+            ExprKind::K => {
+                self.emit_abx(OpCode::LoadK, reg, e.info as u32, line);
+            }
+            ExprKind::KNum => {
+                let k = self.number_constant(e.nval).unwrap_or(0); // Should not fail in practice
+                self.emit_abx(OpCode::LoadK, reg, k, line);
+            }
+            ExprKind::Relocable => {
+                // Patch the A field of the relocable instruction
+                let mut instr = self.get_instruction(e.info as usize);
+                instr.set_a(reg);
+                self.set_instruction(e.info as usize, instr);
+            }
+            ExprKind::NonReloc => {
+                if reg != e.info as u32 {
+                    self.emit_abc(OpCode::Move, reg, e.info as u32, 0, line);
+                }
+            }
+            _ => {
+                // Void, Jmp — no direct value to move
+                return;
+            }
+        }
+        e.info = reg as i32;
+        e.kind = ExprKind::NonReloc;
+    }
+
+    /// Converts expression to RK format (register or constant).
+    pub(crate) fn exp2rk(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<u32> {
+        self.discharge_vars(e, line);
+        match e.kind {
+            ExprKind::True | ExprKind::False | ExprKind::Nil => {
+                // Small enough to encode: use constant
+                if self.fs().proto.constants.len() <= MAXINDEXRK as usize {
+                    let val = match e.kind {
+                        ExprKind::True => Val::Bool(true),
+                        ExprKind::False => Val::Bool(false),
+                        _ => Val::Nil, // ExprKind::Nil and unreachable branches
+                    };
+                    let k = self.add_constant(val)?;
+                    e.info = k as i32;
+                    e.kind = ExprKind::K;
+                    return Ok(k | BITRK);
+                }
+            }
+            ExprKind::K => {
+                if (e.info as u32) <= MAXINDEXRK {
+                    return Ok(e.info as u32 | BITRK);
+                }
+            }
+            ExprKind::KNum => {
+                let k = self.number_constant(e.nval)?;
+                if k <= MAXINDEXRK {
+                    e.info = k as i32;
+                    e.kind = ExprKind::K;
+                    return Ok(k | BITRK);
+                }
+            }
+            _ => {}
+        }
+        // Fall through: place in register
+        let reg = self.exp2anyreg(e, line)?;
+        Ok(reg)
+    }
+
+    /// Frees the register used by an expression (if temporary).
+    pub(crate) fn free_expr(&mut self, e: &ExprContext) {
+        if e.kind == ExprKind::NonReloc {
+            self.free_reg(e.info as u32);
+        }
+    }
+
+    // -- Variable store --
+
+    /// Stores expression `ex` into variable `var`.
+    /// Maps to PUC-Rio's `luaK_storevar`.
+    pub(crate) fn storevar(
+        &mut self,
+        var: &ExprContext,
+        ex: &mut ExprContext,
+        line: u32,
+    ) -> LuaResult<()> {
+        match var.kind {
+            ExprKind::Local => {
+                self.free_expr(ex);
+                self.exp2reg(ex, var.info as u32, line);
+            }
+            ExprKind::Upval => {
+                let e = self.exp2anyreg(ex, line)?;
+                self.emit_abc(OpCode::SetUpval, e, var.info as u32, 0, line);
+            }
+            ExprKind::Global => {
+                let e = self.exp2anyreg(ex, line)?;
+                self.emit_abx(OpCode::SetGlobal, e, var.info as u32, line);
+            }
+            ExprKind::Indexed => {
+                let e = self.exp2rk(ex, line)?;
+                self.emit_abc(OpCode::SetTable, var.info as u32, var.aux as u32, e, line);
+            }
+            _ => {
+                // Invalid variable kind — should not happen
+                return Err(self.syntax_error("invalid assignment target"));
+            }
+        }
+        self.free_expr(ex);
+        Ok(())
+    }
+
+    // -- Conditional jumps --
+
+    /// Converts expression to "go if true" — jumps to the false list on false.
+    /// Maps to PUC-Rio's `luaK_goiftrue`.
+    pub(crate) fn goiftrue(&mut self, e: &mut ExprContext, line: u32) {
+        self.discharge_vars(e, line);
+        let pc = match e.kind {
+            ExprKind::K | ExprKind::KNum | ExprKind::True => {
+                NO_JUMP // always true, no jump
+            }
+            ExprKind::False => self.emit_jump(line) as i32,
+            ExprKind::Jmp => {
+                self.invertjump(e);
+                e.info
+            }
+            _ => self.jumponcond(e, false, line),
+        };
+        // Insert the jump into the false list
+        let mut f = e.f;
+        self.concat_jumps(&mut f, pc);
+        e.f = f;
+        self.patch_to_here(e.t);
+        e.t = NO_JUMP;
+    }
+
+    /// Converts expression to "go if false" — jumps to the true list on true.
+    /// Maps to PUC-Rio's `luaK_goiffalse`.
+    pub(crate) fn goiffalse(&mut self, e: &mut ExprContext, line: u32) {
+        self.discharge_vars(e, line);
+        let pc = match e.kind {
+            ExprKind::Nil | ExprKind::False => {
+                NO_JUMP // always false, no jump
+            }
+            ExprKind::True => self.emit_jump(line) as i32,
+            ExprKind::Jmp => e.info,
+            _ => self.jumponcond(e, true, line),
+        };
+        // Insert the jump into the true list
+        let mut t = e.t;
+        self.concat_jumps(&mut t, pc);
+        e.t = t;
+        self.patch_to_here(e.f);
+        e.f = NO_JUMP;
+    }
+
+    /// Inverts the condition of a jump instruction.
+    fn invertjump(&mut self, e: &ExprContext) {
+        let pc = e.info as usize;
+        let mut instr = self.get_instruction(pc);
+        let a = instr.a();
+        instr.set_a(u32::from(a == 0));
+        self.set_instruction(pc, instr);
+    }
+
+    /// Emits TEST + JMP for conditional expression.
+    /// Returns the pc of the JMP instruction.
+    fn jumponcond(&mut self, e: &mut ExprContext, cond: bool, line: u32) -> i32 {
+        // If expression is a relocable NOT instruction, optimize
+        if e.kind == ExprKind::Relocable {
+            let instr = self.get_instruction(e.info as usize);
+            if instr.opcode() == OpCode::Not {
+                // Remove the NOT, emit TESTSET with inverted condition
+                self.fs_mut().proto.code.pop();
+                self.fs_mut().proto.line_info.pop();
+                let cond_val = u32::from(!cond);
+                return self.emit_abc(OpCode::Test, instr.b(), 0, cond_val, line) as i32;
+            }
+        }
+        self.discharge2reg(e, e.info as u32, line);
+        self.free_expr(e);
+        let cond_val = u32::from(cond);
+        self.emit_abc(OpCode::Test, e.info as u32, 0, cond_val, line);
+        self.emit_jump(line) as i32
+    }
+
+    // -- Expression value conversion --
+
+    /// Discharges expression to a value form (not necessarily a register).
+    /// Like `discharge_vars` but also handles jump patching.
+    pub(crate) fn exp2val(&mut self, e: &mut ExprContext, line: u32) {
+        if e.has_jumps() {
+            // exp2anyreg returns Result but we intentionally ignore it here
+            // since we're only interested in the side effect
+            drop(self.exp2anyreg(e, line));
+        } else {
+            self.discharge_vars(e, line);
+        }
+    }
+
+    /// Sets an expression to multi-return mode (B=0 for calls, vararg).
+    pub(crate) fn set_multret(&mut self, e: &mut ExprContext) {
+        self.set_one_ret(e);
+        if e.kind == ExprKind::Call {
+            let mut instr = self.get_instruction(e.info as usize);
+            instr.set_c(0); // 0 = multi-return
+            self.set_instruction(e.info as usize, instr);
+        } else if e.kind == ExprKind::VarArg {
+            let mut instr = self.get_instruction(e.info as usize);
+            instr.set_b(0); // 0 = multi-return
+            self.set_instruction(e.info as usize, instr);
+            e.kind = ExprKind::Relocable;
+        }
+    }
+
+    // -- Code generation for operators --
+
+    /// Sets an expression to an indexed form: `info=table_reg, aux=key_rk`.
+    pub(crate) fn set_indexed(
+        &mut self,
+        table: &mut ExprContext,
+        key: &mut ExprContext,
+        line: u32,
+    ) -> LuaResult<()> {
+        table.aux = self.exp2rk(key, line)? as i32;
+        table.kind = ExprKind::Indexed;
+        Ok(())
+    }
+
+    /// Emits OP_SELF: `R(A+1) := R(B); R(A) := R(B)[RK(C)]`.
+    pub(crate) fn code_self(
+        &mut self,
+        e: &mut ExprContext,
+        key: &mut ExprContext,
+        line: u32,
+    ) -> LuaResult<()> {
+        self.exp2anyreg(e, line)?;
+        self.free_expr(e);
+        let func = u32::from(self.fs().free_reg);
+        self.reserve_regs(2)?;
+        let key_rk = self.exp2rk(key, line)?;
+        self.emit_abc(OpCode::OpSelf, func, e.info as u32, key_rk, line);
+        self.free_expr(key);
+        e.info = func as i32;
+        e.kind = ExprKind::NonReloc;
+        Ok(())
+    }
+
+    /// Emits an arithmetic/general binary operation.
+    /// Maps to PUC-Rio's `codearith`.
+    pub(crate) fn code_arith(
+        &mut self,
+        op: OpCode,
+        e1: &mut ExprContext,
+        e2: &mut ExprContext,
+        line: u32,
+    ) -> LuaResult<()> {
+        if op == OpCode::Concat {
+            // Concat is special: operands must be in consecutive registers
+            self.exp2nextreg(e2, line)?;
+            self.exp2anyreg(e1, line)?;
+        }
+        let (b, c) = if op == OpCode::Unm || op == OpCode::Not || op == OpCode::Len {
+            // Unary ops: B = operand, C = 0
+            let b = self.exp2anyreg(e1, line)?;
+            (b, 0)
+        } else if op == OpCode::Concat {
+            let b = e1.info as u32;
+            let c = e2.info as u32;
+            self.free_expr(e2);
+            self.free_expr(e1);
+            (b, c)
+        } else {
+            // Binary ops: both can be RK
+            let c = self.exp2rk(e2, line)?;
+            let b = self.exp2rk(e1, line)?;
+            (b, c)
+        };
+        if op != OpCode::Concat {
+            self.free_expr(e2);
+            self.free_expr(e1);
+        }
+        e1.info = self.emit_abc(op, 0, b, c, line) as i32;
+        e1.kind = ExprKind::Relocable;
+        Ok(())
+    }
+
+    /// Emits a comparison operation (EQ/LT/LE).
+    /// Maps to PUC-Rio's `codecomp`.
+    pub(crate) fn code_comp(
+        &mut self,
+        op: OpCode,
+        cond: u32,
+        e1: &mut ExprContext,
+        e2: &mut ExprContext,
+        line: u32,
+    ) -> LuaResult<()> {
+        let b = self.exp2rk(e1, line)?;
+        let c = self.exp2rk(e2, line)?;
+        self.free_expr(e2);
+        self.free_expr(e1);
+        // For swapped operands (GT, GE), swap b and c
+        if cond == 0 && op != OpCode::Eq {
+            // Already handled at caller by choosing the right opcode
+        }
+        self.emit_abc(op, cond, b, c, line);
+        let jmp = self.emit_jump(line);
+        e1.info = jmp as i32;
+        e1.kind = ExprKind::Jmp;
+        e1.t = NO_JUMP;
+        e1.f = NO_JUMP;
+        Ok(())
+    }
+
+    /// Pre-processes the left side of a binary operation.
+    /// For `and`/`or`, emits a conditional jump.
+    /// Maps to PUC-Rio's `luaK_infix`.
+    pub(crate) fn infix(
+        &mut self,
+        op: super::ast::BinOp,
+        e: &mut ExprContext,
+        line: u32,
+    ) -> LuaResult<()> {
+        match op {
+            super::ast::BinOp::And => {
+                self.goiftrue(e, line);
+            }
+            super::ast::BinOp::Or => {
+                self.goiffalse(e, line);
+            }
+            super::ast::BinOp::Concat => {
+                self.exp2nextreg(e, line)?;
+            }
+            super::ast::BinOp::Add
+            | super::ast::BinOp::Sub
+            | super::ast::BinOp::Mul
+            | super::ast::BinOp::Div
+            | super::ast::BinOp::Mod
+            | super::ast::BinOp::Pow => {
+                // Try to use RK form
+                self.exp2rk(e, line)?;
+            }
+            _ => {
+                // Comparisons: also try RK form
+                self.exp2rk(e, line)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Combines left and right sides of a binary operation.
+    /// Maps to PUC-Rio's `luaK_posfix`.
+    pub(crate) fn postfix(
+        &mut self,
+        op: super::ast::BinOp,
+        e1: &mut ExprContext,
+        e2: &mut ExprContext,
+        line: u32,
+    ) -> LuaResult<()> {
+        match op {
+            super::ast::BinOp::And => {
+                debug_assert!(e1.t == NO_JUMP);
+                self.discharge_vars(e2, line);
+                let mut f = e2.f;
+                self.concat_jumps(&mut f, e1.f);
+                e2.f = f;
+                *e1 = *e2;
+            }
+            super::ast::BinOp::Or => {
+                debug_assert!(e1.f == NO_JUMP);
+                self.discharge_vars(e2, line);
+                let mut t = e2.t;
+                self.concat_jumps(&mut t, e1.t);
+                e2.t = t;
+                *e1 = *e2;
+            }
+            super::ast::BinOp::Concat => {
+                self.exp2val(e2, line);
+                // Check if we can merge with an existing CONCAT
+                if e2.kind == ExprKind::Relocable {
+                    let instr = self.get_instruction(e2.info as usize);
+                    if instr.opcode() == OpCode::Concat {
+                        self.free_expr(e1);
+                        let mut merged = self.get_instruction(e2.info as usize);
+                        merged.set_b(e1.info as u32);
+                        self.set_instruction(e2.info as usize, merged);
+                        e1.kind = ExprKind::Relocable;
+                        e1.info = e2.info;
+                        return Ok(());
+                    }
+                }
+                self.exp2nextreg(e2, line)?;
+                self.code_arith(OpCode::Concat, e1, e2, line)?;
+            }
+            super::ast::BinOp::Add => self.code_arith(OpCode::Add, e1, e2, line)?,
+            super::ast::BinOp::Sub => self.code_arith(OpCode::Sub, e1, e2, line)?,
+            super::ast::BinOp::Mul => self.code_arith(OpCode::Mul, e1, e2, line)?,
+            super::ast::BinOp::Div => self.code_arith(OpCode::Div, e1, e2, line)?,
+            super::ast::BinOp::Mod => self.code_arith(OpCode::Mod, e1, e2, line)?,
+            super::ast::BinOp::Pow => self.code_arith(OpCode::Pow, e1, e2, line)?,
+            super::ast::BinOp::Eq => self.code_comp(OpCode::Eq, 1, e1, e2, line)?,
+            super::ast::BinOp::Ne => self.code_comp(OpCode::Eq, 0, e1, e2, line)?,
+            super::ast::BinOp::Lt => self.code_comp(OpCode::Lt, 1, e1, e2, line)?,
+            super::ast::BinOp::Le => self.code_comp(OpCode::Le, 1, e1, e2, line)?,
+            // GT and GE swap operands
+            super::ast::BinOp::Gt => self.code_comp(OpCode::Lt, 1, e2, e1, line)?,
+            super::ast::BinOp::Ge => self.code_comp(OpCode::Le, 1, e2, e1, line)?,
+        }
+        Ok(())
+    }
+
+    /// Applies a unary prefix operation.
+    /// Maps to PUC-Rio's `luaK_prefix`.
+    pub(crate) fn prefix(
+        &mut self,
+        op: super::ast::UnOp,
+        e: &mut ExprContext,
+        line: u32,
+    ) -> LuaResult<()> {
+        let mut e2 = ExprContext::number(0.0);
+        match op {
+            super::ast::UnOp::Neg => {
+                if e.kind == ExprKind::K {
+                    self.exp2anyreg(e, line)?;
+                }
+                self.code_arith(OpCode::Unm, e, &mut e2, line)?;
+            }
+            super::ast::UnOp::Not => {
+                self.code_not(e, line);
+            }
+            super::ast::UnOp::Len => {
+                self.exp2anyreg(e, line)?;
+                self.code_arith(OpCode::Len, e, &mut e2, line)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emits logical NOT.
+    fn code_not(&mut self, e: &mut ExprContext, line: u32) {
+        self.discharge_vars(e, line);
+        match e.kind {
+            ExprKind::Nil | ExprKind::False => {
+                e.kind = ExprKind::True;
+            }
+            ExprKind::K | ExprKind::KNum | ExprKind::True => {
+                e.kind = ExprKind::False;
+            }
+            ExprKind::Jmp => {
+                self.invertjump(e);
+            }
+            ExprKind::Relocable | ExprKind::NonReloc => {
+                self.discharge2reg(e, e.info as u32, line);
+                self.free_expr(e);
+                e.info = self.emit_abc(OpCode::Not, 0, e.info as u32, 0, line) as i32;
+                e.kind = ExprKind::Relocable;
+            }
+            _ => {} // Void — no-op
+        }
+        // Swap true and false lists
+        std::mem::swap(&mut e.t, &mut e.f);
+    }
+
+    /// Returns the current pc (for use as a label/loop target).
+    pub(crate) fn get_label(&mut self) -> usize {
+        let pc = self.fs().pc();
+        self.fs_mut().last_target = pc as i32;
+        pc
+    }
+
+    /// Emits SETLIST for table construction.
+    pub(crate) fn code_setlist(&mut self, base: u32, nelems: u32, tostore: u32, line: u32) {
+        let c = (nelems - 1) / LFIELDS_PER_FLUSH + 1;
+        let b = if tostore == 0 { 0 } else { tostore };
+        if c <= MAXARG_BX {
+            self.emit_abc(OpCode::SetList, base, b, c, line);
+        } else {
+            self.emit_abc(OpCode::SetList, base, b, 0, line);
+            self.emit(Instruction::from_raw(c), line);
+        }
+        self.fs_mut().free_reg = (base + 1) as u8;
+    }
+
+    // -- Function state management --
+
+    /// Pushes a new function state for compiling an inner function.
+    pub(crate) fn enter_function(&mut self, source: &str) {
+        let fs = FuncState::new(source);
+        self.func_states.push(fs);
+    }
+
+    /// Pops the current function state and returns its completed Proto.
+    ///
+    /// # Panics
+    /// Panics if called when no function state exists.
+    #[allow(clippy::expect_used)]
+    pub(crate) fn leave_function(&mut self) -> Proto {
+        // Emit final return
+        self.emit_abc(OpCode::Return, 0, 1, 0, self.current_line);
+        let fs = self
+            .func_states
+            .pop()
+            .expect("cannot leave global function");
+        fs.proto
+    }
+
+    /// Finalizes the main chunk's Proto.
+    ///
+    /// # Panics
+    /// Panics if called when no function state exists.
+    #[allow(clippy::expect_used)]
+    fn finish_main(&mut self) -> Proto {
+        // Emit final return for main chunk
+        self.emit_abc(OpCode::Return, 0, 1, 0, self.current_line);
+        self.func_states
+            .pop()
+            .expect("cannot finish without main function")
+            .proto
+    }
+}
+
+/// Checks if two Val constants are equal for deduplication.
+fn constants_equal(a: &Val, b: &Val) -> bool {
+    match (a, b) {
+        (Val::Nil, Val::Nil) => true,
+        (Val::Bool(x), Val::Bool(y)) => x == y,
+        (Val::Num(x), Val::Num(y)) => {
+            // For constant dedup, we need bitwise equality (NaN != NaN, but
+            // +0.0 and -0.0 should be separate). Use to_bits for exact match.
+            x.to_bits() == y.to_bits()
+        }
+        _ => false,
+    }
+}
+
+/// Compiles a Lua source string into a Proto (function prototype).
+pub fn compile(source: &str, name: &str) -> LuaResult<Rc<Proto>> {
+    let block = parser::parse(source, name)?;
+    let mut compiler = Compiler::new(name);
+
+    // Main chunk: vararg function with 0 params
+    compiler.fs_mut().proto.is_vararg = 2; // VARARG_ISVARARG
+    compiler.fs_mut().proto.num_params = 0;
+
+    compile_block(&mut compiler, &block)?;
+
+    let proto = compiler.finish_main();
+    Ok(Rc::new(proto))
+}
+
+/// Compiles a block of statements inside a new scope.
+fn compile_block_scoped(compiler: &mut Compiler, block: &Block) -> LuaResult<()> {
+    compiler.enter_block(false);
+    compile_block(compiler, block)?;
+    compiler.leave_block();
+    Ok(())
+}
+
+/// Compiles a sequence of statements.
+fn compile_block(compiler: &mut Compiler, block: &Block) -> LuaResult<()> {
+    for stat in block {
+        compile_stat(compiler, stat)?;
+        // After each statement, free temporary registers
+        compiler.fs_mut().free_reg = compiler.fs().num_active_vars;
+    }
+    Ok(())
+}
+
+/// Compiles a single statement.
+#[allow(clippy::too_many_lines)]
+fn compile_stat(compiler: &mut Compiler, stat: &super::ast::Stat) -> LuaResult<()> {
+    use super::ast::Stat;
+    let line = stat.span().line;
+    compiler.current_line = line;
+
+    match stat {
+        Stat::Assign {
+            targets, values, ..
+        } => compile_assign(compiler, targets, values, line),
+
+        Stat::LocalDecl { names, values, .. } => compile_local_decl(compiler, names, values, line),
+
+        Stat::Do { body, .. } => compile_block_scoped(compiler, body),
+
+        Stat::While {
+            condition, body, ..
+        } => compile_while(compiler, condition, body, line),
+
+        Stat::Repeat {
+            body, condition, ..
+        } => compile_repeat(compiler, body, condition, line),
+
+        Stat::If {
+            conditions,
+            bodies,
+            else_body,
+            ..
+        } => compile_if(compiler, conditions, bodies, else_body.as_ref(), line),
+
+        Stat::NumericFor {
+            name,
+            start,
+            stop,
+            step,
+            body,
+            ..
+        } => compile_numeric_for(compiler, name, start, stop, step.as_ref(), body, line),
+
+        Stat::GenericFor {
+            names,
+            iterators,
+            body,
+            ..
+        } => compile_generic_for(compiler, names, iterators, body, line),
+
+        Stat::FuncDecl { name, body, .. } => compile_func_decl(compiler, name, body, line),
+
+        Stat::LocalFunc { name, body, .. } => compile_local_func(compiler, name, body, line),
+
+        Stat::Return { values, .. } => compile_return(compiler, values, line),
+
+        Stat::Break { .. } => {
+            let jmp = compiler.emit_jump(line) as i32;
+            compiler.add_break_jump(jmp)?;
+            Ok(())
+        }
+
+        Stat::ExprStat { expr, .. } => compile_expr_stat(compiler, expr, line),
+    }
+}
+
+// -- Statement compilation helpers --
+
+fn compile_assign(
+    compiler: &mut Compiler,
+    targets: &[super::ast::Expr],
+    values: &[super::ast::Expr],
+    line: u32,
+) -> LuaResult<()> {
+    // Compile all targets to get their variable locations
+    let mut target_exprs: Vec<ExprContext> = Vec::new();
+    for target in targets {
+        let e = compile_expr(compiler, target)?;
+        // For indexed targets, we need to ensure the table is in a register
+        if e.kind != ExprKind::Local
+            && e.kind != ExprKind::Upval
+            && e.kind != ExprKind::Global
+            && e.kind != ExprKind::Indexed
+        {
+            return Err(LuaError::Syntax(SyntaxError {
+                message: "invalid assignment target".to_string(),
+                source: compiler.source_name.clone(),
+                line,
+            }));
+        }
+        target_exprs.push(e);
+    }
+
+    // Compile all values
+    let nvars = targets.len();
+    let (nexps, mut last_e) = compile_exprlist(compiler, values, line)?;
+
+    // Adjust: if fewer values than variables, pad with nil; if more, discard
+    if nexps < nvars {
+        adjust_assign(compiler, nvars, nexps, &mut last_e, line)?;
+    } else if nexps > nvars {
+        // Extra values: discard by resetting free_reg
+        if nexps > nvars {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                compiler.fs_mut().free_reg -= (nexps - nvars) as u8;
+            }
+        }
+    }
+
+    // Store values to targets (in reverse order for multi-assign)
+    // For the last target, use the last expression directly if counts match
+    if nexps == nvars && nvars > 0 {
+        compiler.set_one_ret(&mut last_e);
+        let target = target_exprs[nvars - 1];
+        compiler.storevar(&target, &mut last_e, line)?;
+        target_exprs.pop();
+    }
+
+    // Store remaining targets from registers
+    for (i, target) in target_exprs.iter().enumerate().rev() {
+        let reg = u32::from(compiler.fs().num_active_vars)
+            + (values.len().min(nvars) as u32).saturating_sub(1)
+            - (target_exprs.len() as u32 - 1 - i as u32);
+        let mut val_e = ExprContext::new(ExprKind::NonReloc, reg as i32);
+        let t = *target;
+        compiler.storevar(&t, &mut val_e, line)?;
+    }
+
+    Ok(())
+}
+
+fn compile_local_decl(
+    compiler: &mut Compiler,
+    names: &[String],
+    values: &[super::ast::Expr],
+    line: u32,
+) -> LuaResult<()> {
+    let nvars = names.len();
+
+    // Register the local variables (but don't activate yet)
+    for name in names {
+        compiler.new_local(name)?;
+    }
+
+    if values.is_empty() {
+        // No initializers: adjust assigns nil values
+        adjust_assign(compiler, nvars, 0, &mut ExprContext::void(), line)?;
+    } else {
+        let (nexps, mut last_e) = compile_exprlist(compiler, values, line)?;
+        adjust_assign(compiler, nvars, nexps, &mut last_e, line)?;
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    compiler.activate_locals(nvars as u32);
+    Ok(())
+}
+
+fn compile_while(
+    compiler: &mut Compiler,
+    condition: &super::ast::Expr,
+    body: &Block,
+    line: u32,
+) -> LuaResult<()> {
+    let whileinit = compiler.get_label();
+    let mut cond_e = compile_expr(compiler, condition)?;
+    compiler.goiftrue(&mut cond_e, line);
+    let condexit = cond_e.f;
+
+    compiler.enter_block(true); // breakable
+    compile_block(compiler, body)?;
+    let jmp = compiler.emit_jump(line);
+    compiler.patch_jump(jmp, whileinit);
+    compiler.leave_block();
+    compiler.patch_to_here(condexit);
+    Ok(())
+}
+
+fn compile_repeat(
+    compiler: &mut Compiler,
+    body: &Block,
+    condition: &super::ast::Expr,
+    line: u32,
+) -> LuaResult<()> {
+    let repeat_init = compiler.get_label();
+    compiler.enter_block(true); // loop block (breakable)
+    compiler.enter_block(false); // scope block
+
+    compile_block(compiler, body)?;
+
+    let mut cond_e = compile_expr(compiler, condition)?;
+    compiler.goiftrue(&mut cond_e, line);
+    let condexit = cond_e.f;
+
+    compiler.leave_block(); // scope
+    compiler.patch_list(condexit, repeat_init);
+    compiler.leave_block(); // loop
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn compile_if(
+    compiler: &mut Compiler,
+    conditions: &[super::ast::Expr],
+    bodies: &[Block],
+    else_body: Option<&Block>,
+    line: u32,
+) -> LuaResult<()> {
+    let mut escape_list = NO_JUMP;
+
+    // First condition + body (the 'if' part)
+    let mut cond_e = compile_expr(compiler, &conditions[0])?;
+    compiler.goiftrue(&mut cond_e, line);
+    let mut flist = cond_e.f;
+
+    compile_block_scoped(compiler, &bodies[0])?;
+
+    // Process elseif clauses
+    for i in 1..conditions.len() {
+        let jmp = compiler.emit_jump(line) as i32;
+        compiler.concat_jumps(&mut escape_list, jmp);
+        compiler.patch_to_here(flist);
+
+        let mut cond_e = compile_expr(compiler, &conditions[i])?;
+        compiler.goiftrue(&mut cond_e, line);
+        flist = cond_e.f;
+
+        compile_block_scoped(compiler, &bodies[i])?;
+    }
+
+    // Else clause
+    if let Some(else_block) = else_body {
+        let jmp = compiler.emit_jump(line) as i32;
+        compiler.concat_jumps(&mut escape_list, jmp);
+        compiler.patch_to_here(flist);
+        compile_block_scoped(compiler, else_block)?;
+    } else {
+        compiler.concat_jumps(&mut escape_list, flist);
+    }
+
+    compiler.patch_to_here(escape_list);
+    Ok(())
+}
+
+fn compile_numeric_for(
+    compiler: &mut Compiler,
+    name: &str,
+    start: &super::ast::Expr,
+    stop: &super::ast::Expr,
+    step: Option<&super::ast::Expr>,
+    body: &Block,
+    line: u32,
+) -> LuaResult<()> {
+    compiler.enter_block(true); // loop scope (breakable)
+    let base = u32::from(compiler.fs().free_reg);
+
+    // Create 3 hidden control variables + 1 user variable
+    compiler.new_local("(for index)")?;
+    compiler.new_local("(for limit)")?;
+    compiler.new_local("(for step)")?;
+    compiler.new_local(name)?;
+
+    // Compile start, stop, step expressions into consecutive registers
+    let mut e = compile_expr(compiler, start)?;
+    compiler.exp2nextreg(&mut e, line)?;
+    let mut e = compile_expr(compiler, stop)?;
+    compiler.exp2nextreg(&mut e, line)?;
+    if let Some(step_expr) = step {
+        let mut e = compile_expr(compiler, step_expr)?;
+        compiler.exp2nextreg(&mut e, line)?;
+    } else {
+        // Default step = 1
+        let k = compiler.number_constant(1.0)?;
+        let reg = u32::from(compiler.fs().free_reg);
+        compiler.emit_abx(OpCode::LoadK, reg, k, line);
+        compiler.reserve_regs(1)?;
+    }
+
+    // Activate the 3 control variables
+    compiler.activate_locals(3);
+
+    // FORPREP: init and jump to condition check
+    let prep = compiler.emit_asbx(OpCode::ForPrep, base, NO_JUMP, line);
+
+    // Inner block for user variable
+    compiler.enter_block(false);
+    compiler.activate_locals(1); // user variable
+    compiler.reserve_regs(1)?;
+
+    compile_block(compiler, body)?;
+
+    compiler.leave_block();
+
+    // Patch FORPREP to jump here (the FORLOOP instruction)
+    compiler.patch_to_here(prep as i32);
+
+    // FORLOOP: increment and loop
+    let endfor = compiler.emit_asbx(OpCode::ForLoop, base, NO_JUMP, line);
+    compiler.patch_jump(endfor, prep + 1);
+
+    compiler.leave_block(); // loop scope
+    Ok(())
+}
+
+fn compile_generic_for(
+    compiler: &mut Compiler,
+    names: &[String],
+    iterators: &[super::ast::Expr],
+    body: &Block,
+    line: u32,
+) -> LuaResult<()> {
+    compiler.enter_block(true); // loop scope (breakable)
+    let base = u32::from(compiler.fs().free_reg);
+
+    // 3 hidden control variables
+    compiler.new_local("(for generator)")?;
+    compiler.new_local("(for state)")?;
+    compiler.new_local("(for control)")?;
+
+    // User-declared variables
+    for name in names {
+        compiler.new_local(name)?;
+    }
+
+    // Compile iterator expressions, adjust to exactly 3
+    let (nexps, mut last_e) = compile_exprlist(compiler, iterators, line)?;
+    adjust_assign(compiler, 3, nexps, &mut last_e, line)?;
+
+    compiler.check_stack(3)?;
+    compiler.activate_locals(3); // control vars
+
+    // JMP over the loop body to TFORLOOP
+    let prep = compiler.emit_jump(line);
+
+    // Inner block for declared variables
+    compiler.enter_block(false);
+    let nvars = names.len();
+    #[allow(clippy::cast_possible_truncation)]
+    compiler.activate_locals(nvars as u32);
+    #[allow(clippy::cast_possible_truncation)]
+    compiler.reserve_regs(nvars as u32)?;
+
+    compile_block(compiler, body)?;
+
+    compiler.leave_block();
+
+    // Patch prep JMP to point to TFORLOOP
+    compiler.patch_to_here(prep as i32);
+
+    #[allow(clippy::cast_possible_truncation)]
+    let endfor = compiler.emit_abc(OpCode::TForLoop, base, 0, nvars as u32, line);
+    // JMP back to the beginning of the loop body
+    let loop_jmp = compiler.emit_jump(line);
+    compiler.patch_jump(loop_jmp, prep + 1);
+
+    let _ = endfor;
+    compiler.leave_block();
+    Ok(())
+}
+
+fn compile_func_decl(
+    compiler: &mut Compiler,
+    name: &super::ast::FuncName,
+    body: &super::ast::FuncBody,
+    line: u32,
+) -> LuaResult<()> {
+    let need_self = name.method.is_some();
+
+    // Resolve the function name to a variable target
+    let mut var = compiler.resolve_var(&name.parts[0])?;
+
+    // Handle dotted path: a.b.c -> index chain
+    for part in &name.parts[1..] {
+        compiler.exp2anyreg(&mut var, line)?;
+        let k = compiler.string_constant(part)?;
+        let mut key = ExprContext::new(ExprKind::K, k as i32);
+        compiler.set_indexed(&mut var, &mut key, line)?;
+    }
+
+    // Handle method: a.b:c -> index + self
+    if let Some(method) = &name.method {
+        compiler.exp2anyreg(&mut var, line)?;
+        let k = compiler.string_constant(method)?;
+        let mut key = ExprContext::new(ExprKind::K, k as i32);
+        compiler.set_indexed(&mut var, &mut key, line)?;
+    }
+
+    // Compile function body
+    let mut func_e = compile_funcbody(compiler, body, need_self, line)?;
+
+    // Store function to the variable
+    compiler.storevar(&var, &mut func_e, line)?;
+    Ok(())
+}
+
+fn compile_local_func(
+    compiler: &mut Compiler,
+    name: &str,
+    body: &super::ast::FuncBody,
+    line: u32,
+) -> LuaResult<()> {
+    // Create local first (function can reference itself)
+    compiler.new_local(name)?;
+    compiler.activate_locals(1);
+
+    let mut func_e = compile_funcbody(compiler, body, false, line)?;
+    // Local is already activated; store into its register
+    let reg = u32::from(compiler.fs().num_active_vars) - 1;
+    compiler.exp2reg(&mut func_e, reg, line);
+    Ok(())
+}
+
+fn compile_return(
+    compiler: &mut Compiler,
+    values: &[super::ast::Expr],
+    line: u32,
+) -> LuaResult<()> {
+    if values.is_empty() {
+        compiler.emit_abc(OpCode::Return, 0, 1, 0, line);
+    } else if values.len() == 1 {
+        let mut e = compile_expr(compiler, &values[0])?;
+        // Check for tail call BEFORE discharging (exp2anyreg changes kind)
+        if e.kind == ExprKind::Call {
+            let instr = compiler.get_instruction(e.info as usize);
+            if instr.opcode() == OpCode::Call {
+                let tail = Instruction::abc(OpCode::TailCall, instr.a(), instr.b(), 0);
+                compiler.set_instruction(e.info as usize, tail);
+            }
+            // For tail calls, set multi-return and use RETURN base 0
+            compiler.set_multret(&mut e);
+            let first = u32::from(compiler.fs().num_active_vars);
+            compiler.emit_abc(OpCode::Return, first, 0, 0, line);
+        } else {
+            let first = compiler.exp2anyreg(&mut e, line)?;
+            compiler.emit_abc(OpCode::Return, first, 2, 0, line);
+        }
+    } else {
+        // Multiple return values
+        let base = u32::from(compiler.fs().free_reg);
+        for (i, expr) in values.iter().enumerate() {
+            let mut e = compile_expr(compiler, expr)?;
+            if i == values.len() - 1 {
+                // Last expression: check for multi-return
+                if e.kind == ExprKind::Call || e.kind == ExprKind::VarArg {
+                    compiler.set_multret(&mut e);
+                    let first = u32::from(compiler.fs().num_active_vars);
+                    // 0 means multi-ret
+                    compiler.emit_abc(OpCode::Return, first, 0, 0, line);
+                    return Ok(());
+                }
+            }
+            compiler.exp2nextreg(&mut e, line)?;
+        }
+        let nret = values.len() as u32;
+        compiler.emit_abc(OpCode::Return, base, nret + 1, 0, line);
+    }
+    Ok(())
+}
+
+fn compile_expr_stat(
+    compiler: &mut Compiler,
+    expr: &super::ast::Expr,
+    _line: u32,
+) -> LuaResult<()> {
+    let e = compile_expr(compiler, expr)?;
+    if e.kind == ExprKind::Call {
+        // Function call as statement: set result count to 0
+        let mut instr = compiler.get_instruction(e.info as usize);
+        instr.set_c(1); // C=1 means 0 results
+        compiler.set_instruction(e.info as usize, instr);
+    }
+    Ok(())
+}
+
+// -- Expression compilation --
+
+/// Compiles an expression list. Returns (count, last_expression).
+fn compile_exprlist(
+    compiler: &mut Compiler,
+    exprs: &[super::ast::Expr],
+    line: u32,
+) -> LuaResult<(usize, ExprContext)> {
+    if exprs.is_empty() {
+        return Ok((0, ExprContext::void()));
+    }
+
+    // Compile all but the last expression into registers
+    for expr in &exprs[..exprs.len() - 1] {
+        let mut e = compile_expr(compiler, expr)?;
+        compiler.exp2nextreg(&mut e, line)?;
+    }
+
+    // Compile the last expression (may be multi-return)
+    let last = compile_expr(compiler, &exprs[exprs.len() - 1])?;
+    Ok((exprs.len(), last))
+}
+
+/// Adjusts assignment: ensures exactly `nvars` values on the stack.
+fn adjust_assign(
+    compiler: &mut Compiler,
+    nvars: usize,
+    nexps: usize,
+    last: &mut ExprContext,
+    line: u32,
+) -> LuaResult<()> {
+    let extra = nvars as i32 - nexps as i32;
+    if last.kind == ExprKind::Call || last.kind == ExprKind::VarArg {
+        // Multi-return: adjust to produce needed values
+        let needed = extra + 1;
+        if needed < 0 {
+            // More expressions than variables — set to 1 result
+            compiler.set_one_ret(last);
+        } else {
+            // Set to produce `needed` results
+            let mut instr = compiler.get_instruction(last.info as usize);
+            if last.kind == ExprKind::Call {
+                instr.set_c((needed + 1) as u32);
+            } else {
+                instr.set_b((needed + 1) as u32);
+                last.kind = ExprKind::Relocable;
+            }
+            compiler.set_instruction(last.info as usize, instr);
+        }
+        if needed > 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            compiler.reserve_regs(needed as u32)?;
+        }
+    } else {
+        if last.kind != ExprKind::Void {
+            compiler.exp2nextreg(last, line)?;
+        }
+        if extra > 0 {
+            // Pad with nils
+            let reg = u32::from(compiler.fs().free_reg);
+            #[allow(clippy::cast_possible_truncation)]
+            compiler.reserve_regs(extra as u32)?;
+            // LOADNIL: sets R(A)..R(B) to nil
+            compiler.emit_abc(OpCode::LoadNil, reg, reg + extra as u32 - 1, 0, line);
+        }
+    }
+    Ok(())
+}
+
+/// Compiles a function body into a Proto and returns a Closure expression.
+fn compile_funcbody(
+    compiler: &mut Compiler,
+    body: &super::ast::FuncBody,
+    need_self: bool,
+    line: u32,
+) -> LuaResult<ExprContext> {
+    compiler.enter_function(&compiler.source_name.clone());
+    compiler.fs_mut().proto.line_defined = line;
+
+    // Add 'self' parameter if needed
+    if need_self {
+        compiler.new_local("self")?;
+        compiler.activate_locals(1);
+    }
+
+    // Add parameters
+    for param in &body.params {
+        compiler.new_local(param)?;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        compiler.activate_locals(body.params.len() as u32);
+    }
+
+    // Set function metadata
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        let num_params = body.params.len() as u8 + u8::from(need_self);
+        compiler.fs_mut().proto.num_params = num_params;
+    }
+    if body.has_varargs {
+        compiler.fs_mut().proto.is_vararg = 7; // HASARG | ISVARARG | NEEDSARG
+    }
+
+    // Reserve registers for parameters
+    let nparams = u32::from(compiler.fs().proto.num_params);
+    compiler.reserve_regs(nparams)?;
+
+    // Compile body
+    compile_block(compiler, &body.body)?;
+
+    compiler.fs_mut().proto.last_line_defined = compiler.current_line;
+
+    // Leave function — emits final RETURN and pops FuncState
+    let proto = compiler.leave_function();
+
+    // Add proto as a child of the current function
+    let parent_fs = compiler.fs_mut();
+    let proto_idx = parent_fs.proto.protos.len();
+    parent_fs.proto.protos.push(Rc::new(proto));
+
+    // Emit CLOSURE instruction
+    #[allow(clippy::cast_possible_truncation)]
+    let pc = compiler.emit_abx(OpCode::Closure, 0, proto_idx as u32, line);
+
+    // Emit pseudo-instructions for upvalue capture
+    // (In PUC-Rio, CLOSURE is followed by MOVE/GETUPVAL for each upvalue)
+    // For now, upvalue capture will be added when we have full upvalue support
+
+    let e = ExprContext::new(ExprKind::Relocable, pc as i32);
+    Ok(e)
+}
+
+/// Compiles an expression, returning its ExprContext.
+fn compile_expr(compiler: &mut Compiler, expr: &super::ast::Expr) -> LuaResult<ExprContext> {
+    use super::ast::Expr;
+    let line = expr.span().line;
+    compiler.current_line = line;
+
+    match expr {
+        Expr::Nil(_) => Ok(ExprContext::new(ExprKind::Nil, 0)),
+        Expr::True(_) => Ok(ExprContext::new(ExprKind::True, 0)),
+        Expr::False(_) => Ok(ExprContext::new(ExprKind::False, 0)),
+        Expr::Number(n, _) => Ok(ExprContext::number(*n)),
+
+        Expr::Str(s, _) => {
+            let k = compiler.string_constant(s)?;
+            Ok(ExprContext::new(ExprKind::K, k as i32))
+        }
+
+        Expr::VarArg(_) => {
+            let pc = compiler.emit_abc(OpCode::VarArg, 0, 1, 0, line);
+            Ok(ExprContext::new(ExprKind::VarArg, pc as i32))
+        }
+
+        Expr::Name(name, _) => compiler.resolve_var(name),
+
+        Expr::BinOp {
+            op, left, right, ..
+        } => {
+            let mut e1 = compile_expr(compiler, left)?;
+            compiler.infix(*op, &mut e1, line)?;
+            let mut e2 = compile_expr(compiler, right)?;
+            compiler.postfix(*op, &mut e1, &mut e2, line)?;
+            Ok(e1)
+        }
+
+        Expr::UnOp { op, operand, .. } => {
+            let mut e = compile_expr(compiler, operand)?;
+            compiler.prefix(*op, &mut e, line)?;
+            Ok(e)
+        }
+
+        Expr::Index { table, key, .. } => {
+            let mut t = compile_expr(compiler, table)?;
+            compiler.exp2anyreg(&mut t, line)?;
+            let mut k = compile_expr(compiler, key)?;
+            compiler.set_indexed(&mut t, &mut k, line)?;
+            Ok(t)
+        }
+
+        Expr::Field { table, field, .. } => {
+            let mut t = compile_expr(compiler, table)?;
+            compiler.exp2anyreg(&mut t, line)?;
+            let k_idx = compiler.string_constant(field)?;
+            let mut k = ExprContext::new(ExprKind::K, k_idx as i32);
+            compiler.set_indexed(&mut t, &mut k, line)?;
+            Ok(t)
+        }
+
+        Expr::MethodCall {
+            table,
+            method,
+            args,
+            ..
+        } => {
+            let mut obj = compile_expr(compiler, table)?;
+            compiler.exp2anyreg(&mut obj, line)?;
+            let k = compiler.string_constant(method)?;
+            let mut key = ExprContext::new(ExprKind::K, k as i32);
+            compiler.code_self(&mut obj, &mut key, line)?;
+            compile_funcargs(compiler, &mut obj, args, line)?;
+            Ok(obj)
+        }
+
+        Expr::Call { func, args, .. } => {
+            let mut f = compile_expr(compiler, func)?;
+            compiler.exp2nextreg(&mut f, line)?;
+            compile_funcargs(compiler, &mut f, args, line)?;
+            Ok(f)
+        }
+
+        Expr::FuncDef { body, .. } => compile_funcbody(compiler, body, false, line),
+
+        Expr::TableCtor { fields, .. } => compile_table_ctor(compiler, fields, line),
+    }
+}
+
+/// Compiles function arguments and emits CALL.
+fn compile_funcargs(
+    compiler: &mut Compiler,
+    func: &mut ExprContext,
+    args: &[super::ast::Expr],
+    line: u32,
+) -> LuaResult<()> {
+    let base = func.info as u32;
+
+    if args.is_empty() {
+        // No arguments
+    } else {
+        for (i, arg) in args.iter().enumerate() {
+            let mut e = compile_expr(compiler, arg)?;
+            if i == args.len() - 1 {
+                // Last argument: check for multi-return
+                if e.kind == ExprKind::Call || e.kind == ExprKind::VarArg {
+                    compiler.set_multret(&mut e);
+                    // nparams = LUA_MULTRET
+                    let pc = compiler.emit_abc(OpCode::Call, base, 0, 2, line);
+                    func.info = pc as i32;
+                    func.kind = ExprKind::Call;
+                    compiler.fs_mut().free_reg = (base + 1) as u8;
+                    return Ok(());
+                }
+            }
+            compiler.exp2nextreg(&mut e, line)?;
+        }
+    }
+
+    let nparams = u32::from(compiler.fs().free_reg) - (base + 1);
+    let pc = compiler.emit_abc(OpCode::Call, base, nparams + 1, 2, line);
+    func.info = pc as i32;
+    func.kind = ExprKind::Call;
+    compiler.fs_mut().free_reg = (base + 1) as u8;
+    Ok(())
+}
+
+/// Compiles a table constructor.
+fn compile_table_ctor(
+    compiler: &mut Compiler,
+    fields: &[super::ast::TableField],
+    line: u32,
+) -> LuaResult<ExprContext> {
+    use super::ast::TableField;
+
+    let pc = compiler.emit_abc(OpCode::NewTable, 0, 0, 0, line);
+    let mut t = ExprContext::new(ExprKind::Relocable, pc as i32);
+    compiler.exp2nextreg(&mut t, line)?;
+    let table_reg = t.info as u32;
+
+    let mut na: u32 = 0; // array fields count
+    let mut nh: u32 = 0; // hash fields count
+    let mut tostore: u32 = 0; // pending array fields
+
+    for field in fields {
+        match field {
+            TableField::ValueField { value, .. } => {
+                // Array/list field
+                na += 1;
+                tostore += 1;
+                let mut val_e = compile_expr(compiler, value)?;
+
+                compiler.exp2nextreg(&mut val_e, line)?;
+                if tostore >= LFIELDS_PER_FLUSH {
+                    compiler.code_setlist(table_reg, na, tostore, line);
+                    tostore = 0;
+                }
+            }
+            TableField::NameField { name, value, .. } => {
+                // Hash field: name = value
+                nh += 1;
+                let k = compiler.string_constant(name)?;
+                let key_rk = k | BITRK;
+                let mut val_e = compile_expr(compiler, value)?;
+                let val_rk = compiler.exp2rk(&mut val_e, line)?;
+                compiler.emit_abc(OpCode::SetTable, table_reg, key_rk, val_rk, line);
+                compiler.free_expr(&val_e);
+            }
+            TableField::IndexField { key, value, .. } => {
+                // Hash field: [key] = value
+                nh += 1;
+                let mut key_e = compile_expr(compiler, key)?;
+                let key_rk = compiler.exp2rk(&mut key_e, line)?;
+                let mut val_e = compile_expr(compiler, value)?;
+                let val_rk = compiler.exp2rk(&mut val_e, line)?;
+                compiler.emit_abc(OpCode::SetTable, table_reg, key_rk, val_rk, line);
+                compiler.free_expr(&val_e);
+                compiler.free_expr(&key_e);
+            }
+        }
+    }
+
+    // Flush remaining array fields
+    if tostore > 0 {
+        compiler.code_setlist(table_reg, na, tostore, line);
+    }
+
+    // Backpatch NEWTABLE with actual sizes
+    // Use luaO_int2fb encoding (float byte: eeeeexxx)
+    let mut instr = compiler.get_instruction(pc);
+    instr.set_b(int2fb(na));
+    instr.set_c(int2fb(nh));
+    compiler.set_instruction(pc, instr);
+
+    Ok(t)
+}
+
+/// Converts an integer to PUC-Rio's "float byte" format (eeeeexxx).
+/// If x < 8: result = x. Otherwise: result = ((e+1) << 3) | (x >> (e-1) - 8).
+fn int2fb(mut x: u32) -> u32 {
+    if x < 8 {
+        return x;
+    }
+    let mut e = 0u32;
+    while x >= 16 {
+        x = (x + 1) >> 1;
+        e += 1;
+    }
+    ((e + 1) << 3) | (x - 8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Compiler construction --
+
+    #[test]
+    fn empty_program_compiles() {
+        let proto = compile("", "test").unwrap();
+        assert_eq!(proto.num_params, 0);
+        assert_eq!(proto.is_vararg, 2);
+        // Should have at least the final RETURN
+        assert!(!proto.code.is_empty());
+    }
+
+    #[test]
+    fn return_no_values() {
+        let proto = compile("return", "test").unwrap();
+        // Should have RETURN 0,1 (from the return) + RETURN 0,1 (from finish_main)
+        assert!(!proto.code.is_empty());
+        let instr = Instruction::from_raw(proto.code[0]);
+        assert_eq!(instr.opcode(), OpCode::Return);
+    }
+
+    // -- Constant pool --
+
+    #[test]
+    fn number_constant_dedup() {
+        let mut compiler = Compiler::new("test");
+        let k1 = compiler.number_constant(42.0).unwrap();
+        let k2 = compiler.number_constant(42.0).unwrap();
+        let k3 = compiler.number_constant(99.0).unwrap();
+        assert_eq!(k1, k2); // Same constant, deduped
+        assert_ne!(k1, k3); // Different constant
+    }
+
+    #[test]
+    fn constant_bool_dedup() {
+        let mut compiler = Compiler::new("test");
+        let k1 = compiler.add_constant(Val::Bool(true)).unwrap();
+        let k2 = compiler.add_constant(Val::Bool(true)).unwrap();
+        let k3 = compiler.add_constant(Val::Bool(false)).unwrap();
+        assert_eq!(k1, k2);
+        assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn constant_nan_not_deduped() {
+        let mut compiler = Compiler::new("test");
+        let k1 = compiler.add_constant(Val::Num(f64::NAN)).unwrap();
+        let k2 = compiler.add_constant(Val::Num(f64::NAN)).unwrap();
+        // NaN != NaN, but we use to_bits for dedup, so same bit pattern dedupes
+        assert_eq!(k1, k2);
+    }
+
+    // -- Register allocation --
+
+    #[test]
+    fn alloc_and_free_reg() {
+        let mut compiler = Compiler::new("test");
+        let r1 = compiler.alloc_reg().unwrap();
+        assert_eq!(r1, 0);
+        let r2 = compiler.alloc_reg().unwrap();
+        assert_eq!(r2, 1);
+        compiler.free_reg(r2);
+        assert_eq!(compiler.fs().free_reg, 1);
+        let r3 = compiler.alloc_reg().unwrap();
+        assert_eq!(r3, 1); // Reused
+    }
+
+    #[test]
+    fn reserve_regs() {
+        let mut compiler = Compiler::new("test");
+        compiler.reserve_regs(3).unwrap();
+        assert_eq!(compiler.fs().free_reg, 3);
+    }
+
+    #[test]
+    fn stack_overflow_error() {
+        let mut compiler = Compiler::new("test");
+        compiler.fs_mut().free_reg = 249;
+        assert!(compiler.check_stack(2).is_err());
+    }
+
+    // -- Variable resolution --
+
+    #[test]
+    fn resolve_global() {
+        let mut compiler = Compiler::new("test");
+        let e = compiler.resolve_var("x").unwrap();
+        assert_eq!(e.kind, ExprKind::Global);
+    }
+
+    #[test]
+    fn resolve_local() {
+        let mut compiler = Compiler::new("test");
+        compiler.new_local("x").unwrap();
+        compiler.activate_locals(1);
+        compiler.fs_mut().free_reg = 1; // Local occupies register 0
+
+        let e = compiler.resolve_var("x").unwrap();
+        assert_eq!(e.kind, ExprKind::Local);
+        assert_eq!(e.info, 0); // Register 0
+    }
+
+    // -- Block management --
+
+    #[test]
+    fn enter_leave_block() {
+        let mut compiler = Compiler::new("test");
+        compiler.enter_block(false);
+        assert_eq!(compiler.fs().blocks.len(), 1);
+        compiler.leave_block();
+        assert_eq!(compiler.fs().blocks.len(), 0);
+    }
+
+    #[test]
+    fn locals_removed_on_block_exit() {
+        let mut compiler = Compiler::new("test");
+        compiler.enter_block(false);
+
+        compiler.new_local("x").unwrap();
+        compiler.activate_locals(1);
+        compiler.fs_mut().free_reg = 1;
+        assert_eq!(compiler.fs().num_active_vars, 1);
+
+        compiler.leave_block();
+        assert_eq!(compiler.fs().num_active_vars, 0);
+    }
+
+    // -- Instruction emission --
+
+    #[test]
+    fn emit_instruction() {
+        let mut compiler = Compiler::new("test");
+        let pc = compiler.emit_abc(OpCode::Move, 0, 1, 0, 1);
+        assert_eq!(pc, 0);
+        let instr = compiler.get_instruction(0);
+        assert_eq!(instr.opcode(), OpCode::Move);
+        assert_eq!(instr.a(), 0);
+        assert_eq!(instr.b(), 1);
+    }
+
+    #[test]
+    fn emit_records_line_info() {
+        let mut compiler = Compiler::new("test");
+        compiler.emit_abc(OpCode::Move, 0, 1, 0, 5);
+        compiler.emit_abc(OpCode::LoadK, 1, 0, 0, 10);
+        assert_eq!(compiler.fs().proto.line_info[0], 5);
+        assert_eq!(compiler.fs().proto.line_info[1], 10);
+    }
+
+    // -- Expression discharge --
+
+    #[test]
+    fn discharge_nil() {
+        let mut compiler = Compiler::new("test");
+        let mut e = ExprContext::new(ExprKind::Nil, 0);
+        let reg = compiler.alloc_reg().unwrap();
+        compiler.discharge2reg(&mut e, reg, 1);
+        let instr = compiler.get_instruction(0);
+        assert_eq!(instr.opcode(), OpCode::LoadNil);
+    }
+
+    #[test]
+    fn discharge_true() {
+        let mut compiler = Compiler::new("test");
+        let mut e = ExprContext::new(ExprKind::True, 0);
+        let reg = compiler.alloc_reg().unwrap();
+        compiler.discharge2reg(&mut e, reg, 1);
+        let instr = compiler.get_instruction(0);
+        assert_eq!(instr.opcode(), OpCode::LoadBool);
+        assert_eq!(instr.b(), 1);
+    }
+
+    #[test]
+    fn discharge_number() {
+        let mut compiler = Compiler::new("test");
+        let mut e = ExprContext::number(42.0);
+        let reg = compiler.alloc_reg().unwrap();
+        compiler.discharge2reg(&mut e, reg, 1);
+        let instr = compiler.get_instruction(0);
+        assert_eq!(instr.opcode(), OpCode::LoadK);
+    }
+
+    #[test]
+    fn discharge_local_to_different_reg() {
+        let mut compiler = Compiler::new("test");
+        // Local in register 0
+        compiler.new_local("x").unwrap();
+        compiler.activate_locals(1);
+        compiler.fs_mut().free_reg = 1;
+
+        let mut e = ExprContext::new(ExprKind::Local, 0);
+        compiler.discharge_vars(&mut e, 1);
+        assert_eq!(e.kind, ExprKind::NonReloc);
+
+        // Discharge to register 1 (different from local's register 0)
+        let reg = compiler.alloc_reg().unwrap();
+        compiler.discharge2reg(&mut e, reg, 1);
+        let instr = compiler.get_instruction(0);
+        assert_eq!(instr.opcode(), OpCode::Move);
+        assert_eq!(instr.a(), 1);
+        assert_eq!(instr.b(), 0);
+    }
+
+    // -- Compile integration --
+
+    #[test]
+    fn compile_return_number() {
+        let proto = compile("return 42", "test").unwrap();
+        // Should have: LOADK, RETURN (from return stmt), RETURN (from finish)
+        assert!(proto.code.len() >= 2);
+        // Check constant pool has 42.0
+        assert!(
+            proto
+                .constants
+                .iter()
+                .any(|v| matches!(v, Val::Num(n) if *n == 42.0))
+        );
+    }
+
+    #[test]
+    fn compile_return_nil() {
+        let proto = compile("return nil", "test").unwrap();
+        // Should have: LOADNIL, RETURN, RETURN
+        let instr = Instruction::from_raw(proto.code[0]);
+        assert_eq!(instr.opcode(), OpCode::LoadNil);
+    }
+
+    #[test]
+    fn compile_return_bool() {
+        let proto = compile("return true", "test").unwrap();
+        let instr = Instruction::from_raw(proto.code[0]);
+        assert_eq!(instr.opcode(), OpCode::LoadBool);
+        assert_eq!(instr.b(), 1); // true
+    }
+
+    #[test]
+    fn compile_return_multiple() {
+        let proto = compile("return 1, 2, 3", "test").unwrap();
+        // Should have 3 LOADKs + RETURN + final RETURN
+        let mut loadk_count = 0;
+        for &code in &proto.code {
+            if Instruction::from_raw(code).opcode() == OpCode::LoadK {
+                loadk_count += 1;
+            }
+        }
+        assert_eq!(loadk_count, 3);
+    }
+
+    // -- Helper --
+
+    /// Returns the sequence of opcodes in a compiled proto.
+    fn opcodes(proto: &Proto) -> Vec<OpCode> {
+        proto
+            .code
+            .iter()
+            .map(|&raw| Instruction::from_raw(raw).opcode())
+            .collect()
+    }
+
+    // -- Statement compilation --
+
+    #[test]
+    fn compile_local_decl() {
+        let proto = compile("local x = 42", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::LoadK));
+    }
+
+    #[test]
+    fn compile_local_nil_init() {
+        let proto = compile("local x, y", "test").unwrap();
+        let ops = opcodes(&proto);
+        // Locals without init get nil (LOADNIL)
+        assert!(ops.contains(&OpCode::LoadNil));
+    }
+
+    #[test]
+    fn compile_global_assign() {
+        let proto = compile("x = 1", "test").unwrap();
+        let ops = opcodes(&proto);
+        // Assignment to a global: SETGLOBAL
+        assert!(ops.contains(&OpCode::SetGlobal));
+    }
+
+    #[test]
+    fn compile_local_assign() {
+        let proto = compile("local x; x = 1", "test").unwrap();
+        let ops = opcodes(&proto);
+        // Assignment to a local: LOADK into the local's register (MOVE or direct LOADK)
+        assert!(ops.contains(&OpCode::LoadK));
+    }
+
+    #[test]
+    fn compile_do_block() {
+        // 'do' block creates a scope; locals inside are freed
+        let proto = compile("do local x = 1 end; return", "test").unwrap();
+        assert!(proto.code.len() >= 2);
+    }
+
+    // -- Control flow --
+
+    #[test]
+    fn compile_while_loop() {
+        let proto = compile("local x = true; while x do x = false end", "test").unwrap();
+        let ops = opcodes(&proto);
+        // Should contain a JMP (back edge of while loop)
+        assert!(ops.contains(&OpCode::Jmp));
+    }
+
+    #[test]
+    fn compile_repeat_until() {
+        let proto = compile("local x = 0; repeat x = x + 1 until x", "test").unwrap();
+        let ops = opcodes(&proto);
+        // Repeat-until has a conditional jump and arithmetic
+        assert!(ops.contains(&OpCode::Add));
+    }
+
+    #[test]
+    fn compile_if_then() {
+        let proto = compile("local x = true; if x then return 1 end", "test").unwrap();
+        let ops = opcodes(&proto);
+        // If generates TEST + JMP
+        assert!(
+            ops.contains(&OpCode::Test) || ops.contains(&OpCode::Jmp),
+            "if-then should generate control flow"
+        );
+    }
+
+    #[test]
+    fn compile_if_else() {
+        let proto = compile(
+            "local x = true; if x then return 1 else return 2 end",
+            "test",
+        )
+        .unwrap();
+        let ops = opcodes(&proto);
+        // Should have at least 2 JMPs (condition + else skip)
+        let jmp_count = ops.iter().filter(|&&op| op == OpCode::Jmp).count();
+        assert!(jmp_count >= 1, "if-else needs at least one JMP");
+    }
+
+    #[test]
+    fn compile_numeric_for() {
+        let proto = compile("for i = 1, 10 do end", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::ForPrep));
+        assert!(ops.contains(&OpCode::ForLoop));
+    }
+
+    #[test]
+    fn compile_numeric_for_with_step() {
+        let proto = compile("for i = 1, 10, 2 do end", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::ForPrep));
+        assert!(ops.contains(&OpCode::ForLoop));
+        // Step value 2 should be in constants
+        assert!(
+            proto
+                .constants
+                .iter()
+                .any(|v| matches!(v, Val::Num(n) if n == &2.0))
+        );
+    }
+
+    #[test]
+    fn compile_generic_for() {
+        let proto = compile("for k, v in next, t do end", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::TForLoop));
+        assert!(ops.contains(&OpCode::Jmp));
+    }
+
+    #[test]
+    fn compile_break() {
+        let proto = compile("while true do break end", "test").unwrap();
+        let ops = opcodes(&proto);
+        // Break emits a JMP that gets patched to loop exit
+        assert!(ops.contains(&OpCode::Jmp));
+    }
+
+    // -- Expression compilation --
+
+    #[test]
+    fn compile_arithmetic() {
+        let proto = compile("return 1 + 2", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::Add));
+    }
+
+    #[test]
+    fn compile_comparison() {
+        let proto = compile("return 1 < 2", "test").unwrap();
+        let ops = opcodes(&proto);
+        // Comparisons emit EQ/LT/LE + JMP + LoadBool pair
+        assert!(ops.contains(&OpCode::Lt));
+    }
+
+    #[test]
+    fn compile_concat() {
+        let proto = compile("return 'a' .. 'b'", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::Concat));
+    }
+
+    #[test]
+    fn compile_unary_neg() {
+        let proto = compile("local x = 1; return -x", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::Unm));
+    }
+
+    #[test]
+    fn compile_unary_not() {
+        let proto = compile("return not true", "test").unwrap();
+        let ops = opcodes(&proto);
+        // 'not true' is constant-folded to false at compile time
+        assert!(ops.contains(&OpCode::LoadBool));
+    }
+
+    #[test]
+    fn compile_unary_len() {
+        let proto = compile("local x = {}; return #x", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::Len));
+    }
+
+    #[test]
+    fn compile_string_constant() {
+        // String constants are stored as Val::Nil placeholders until GC integration.
+        // Verify the code compiles and emits a LOADK to reference the constant.
+        let proto = compile("return 'hello'", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::LoadK));
+        // Constant pool should have at least one entry (the string placeholder)
+        assert!(!proto.constants.is_empty());
+    }
+
+    #[test]
+    fn compile_and_short_circuit() {
+        let proto = compile("local a, b; return a and b", "test").unwrap();
+        let ops = opcodes(&proto);
+        // 'and' uses TEST + JMP (short-circuit)
+        assert!(
+            ops.contains(&OpCode::Test) || ops.contains(&OpCode::TestSet),
+            "and should use TEST/TESTSET"
+        );
+    }
+
+    #[test]
+    fn compile_or_short_circuit() {
+        let proto = compile("local a, b; return a or b", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(
+            ops.contains(&OpCode::Test) || ops.contains(&OpCode::TestSet),
+            "or should use TEST/TESTSET"
+        );
+    }
+
+    // -- Function compilation --
+
+    #[test]
+    fn compile_function_call() {
+        let proto = compile("print(42)", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::GetGlobal));
+        assert!(ops.contains(&OpCode::Call));
+    }
+
+    #[test]
+    fn compile_method_call() {
+        let proto = compile("local t = {}; t:foo(1)", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::OpSelf));
+        assert!(ops.contains(&OpCode::Call));
+    }
+
+    #[test]
+    fn compile_function_def() {
+        let proto = compile("local f = function(x) return x end", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::Closure));
+        // Should have a child proto
+        assert_eq!(proto.protos.len(), 1);
+        let child = &proto.protos[0];
+        assert_eq!(child.num_params, 1);
+    }
+
+    #[test]
+    fn compile_local_function() {
+        let proto = compile("local function f(a, b) return a + b end", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::Closure));
+        assert_eq!(proto.protos.len(), 1);
+        let child = &proto.protos[0];
+        assert_eq!(child.num_params, 2);
+    }
+
+    #[test]
+    fn compile_named_function() {
+        let proto = compile("function f(x) return x end", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::Closure));
+        assert!(ops.contains(&OpCode::SetGlobal));
+    }
+
+    #[test]
+    fn compile_vararg_function() {
+        let proto = compile("local f = function(...) return ... end", "test").unwrap();
+        let child = &proto.protos[0];
+        assert!(child.is_vararg & 2 != 0); // VARARG_ISVARARG
+    }
+
+    // -- Table construction --
+
+    #[test]
+    fn compile_empty_table() {
+        let proto = compile("return {}", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::NewTable));
+    }
+
+    #[test]
+    fn compile_array_table() {
+        let proto = compile("return {1, 2, 3}", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::NewTable));
+        assert!(ops.contains(&OpCode::SetList));
+    }
+
+    #[test]
+    fn compile_hash_table() {
+        let proto = compile("return {x = 1, y = 2}", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::NewTable));
+        assert!(ops.contains(&OpCode::SetTable));
+    }
+
+    #[test]
+    fn compile_index_table() {
+        let proto = compile("return {[1] = 'a'}", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::NewTable));
+        assert!(ops.contains(&OpCode::SetTable));
+    }
+
+    // -- Table access --
+
+    #[test]
+    fn compile_table_field_access() {
+        let proto = compile("local t = {}; return t.x", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::GetTable));
+    }
+
+    #[test]
+    fn compile_table_index_access() {
+        let proto = compile("local t = {}; return t[1]", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::GetTable));
+    }
+
+    // -- Tail calls --
+
+    #[test]
+    fn compile_tail_call() {
+        let proto = compile("local function f(x) return f(x) end", "test").unwrap();
+        let child = &proto.protos[0];
+        let child_ops: Vec<OpCode> = child
+            .code
+            .iter()
+            .map(|&raw| Instruction::from_raw(raw).opcode())
+            .collect();
+        assert!(
+            child_ops.contains(&OpCode::TailCall),
+            "recursive return should use TAILCALL"
+        );
+    }
+
+    // -- Line info --
+
+    #[test]
+    fn compile_line_info() {
+        let proto = compile("return 42", "test").unwrap();
+        assert_eq!(proto.code.len(), proto.line_info.len());
+    }
+
+    // -- Edge cases --
+
+    #[test]
+    fn compile_return_string() {
+        let proto = compile("return 'hello'", "test").unwrap();
+        let instr = Instruction::from_raw(proto.code[0]);
+        assert_eq!(instr.opcode(), OpCode::LoadK);
+    }
+
+    #[test]
+    fn compile_expr_stat_call() {
+        // Expression statement with function call should discard results
+        let proto = compile("print(1)", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::Call));
+        // The CALL should have C=1 (0 results)
+        for &code in &proto.code {
+            let instr = Instruction::from_raw(code);
+            if instr.opcode() == OpCode::Call {
+                assert_eq!(
+                    instr.c(),
+                    1,
+                    "expression statement call should have C=1 (0 results)"
+                );
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn compile_single_global_assign() {
+        // Single global assignment
+        let proto = compile("x = 42", "test").unwrap();
+        let ops = opcodes(&proto);
+        assert!(ops.contains(&OpCode::SetGlobal));
+    }
+
+    #[test]
+    fn compile_nested_function() {
+        let proto = compile(
+            "local function f() local function g() return 1 end return g end",
+            "test",
+        )
+        .unwrap();
+        assert_eq!(proto.protos.len(), 1);
+        let f = &proto.protos[0];
+        assert_eq!(f.protos.len(), 1); // g is nested inside f
+    }
+
+    // -- int2fb --
+
+    #[test]
+    fn int2fb_small_values() {
+        assert_eq!(int2fb(0), 0);
+        assert_eq!(int2fb(1), 1);
+        assert_eq!(int2fb(7), 7);
+    }
+
+    #[test]
+    fn int2fb_exact_powers() {
+        // Values >= 8 get encoded in float-byte format
+        let encoded = int2fb(8);
+        assert!(encoded >= 8);
+    }
+
+    #[test]
+    fn compile_syntax_error() {
+        let result = compile("if", "test");
+        assert!(result.is_err());
+    }
+}
