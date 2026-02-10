@@ -193,51 +193,156 @@ impl Trace for Table {
 
 ### Mark Phase (Propagate)
 
-1. Mark roots gray: main thread, global table, registry, all type
-   metatables (not just string — one per type that supports it).
-2. Pop gray objects from gray stack.
-3. For each gray object, call `trace()` to mark children.
-4. Mark the object black.
-5. Repeat until gray stack is empty.
+Triggered by transitioning from `Pause` to `Propagate`. Runs
+incrementally via `single_step()`.
+
+**Root marking** (`mark_root`): Mark the following objects gray:
+
+- Main thread
+- Global table
+- Registry
+- All per-type metatables (one per Lua type)
+
+**Propagation** (`propagate_mark`): Each incremental step:
+
+1. Pop one gray object from `gray_stack`.
+2. Mark it black (set color to `Black`).
+3. Call `trace()` on the object, which marks its children:
+   - **Table**: Mark metatable. Check `__mode` for weak table
+     handling. If weak, add to `weak_tables` list and keep gray
+     (do not mark children covered by weakness). Non-weak keys and
+     values are marked.
+   - **Closure (Lua)**: Mark environment table, prototype (Rc, no
+     GC mark needed), and all upvalue GcRefs.
+   - **Closure (Rust)**: Mark environment table and all upvalue
+     values.
+   - **Thread**: Mark globals table. Mark all values in the stack
+     from `stack[0]` to the maximum of all CallInfo `top` values.
+     Nil out the inactive portion. Strings in the stack are marked
+     directly (not pushed to gray).
+   - **Proto** (if GC-managed): Mark source name, constant strings,
+     nested protos, local variable names, upvalue names. In rilua,
+     Proto is `Rc`-managed, so this does not apply.
+4. Return the estimated work cost (object memory size in bytes).
+5. Repeat until gray stack is empty, then transition to atomic
+   phase.
+
+**Strings**: Never pushed to gray stack. They have no children to
+trace. `mark_string` clears the white bits directly (white to
+non-white in one step).
 
 ### Atomic Phase
 
-After propagation completes (runs without interleaving). The
-ordering below matches PUC-Rio's `atomic()` in `lgc.c`:
+Runs without interleaving after propagation drains the gray stack.
+This is the only stop-the-world portion of the GC cycle.
 
-1. Re-mark open upvalues (`remarkupvals`). Upvalues of dead
-   threads are not roots in `markroot` but must be re-marked here.
-2. Propagate all objects marked from step 1 and from write
-   barriers that fired during the propagate phase.
-3. Set up weak tables for re-traversal (move weak list to gray).
-4. Re-mark the currently running thread.
-5. Re-mark all type metatables.
-6. Propagate all from steps 3-5.
-7. Re-trace the gray-again list (tables and threads modified
-   during marking via backward barriers). Propagate.
-8. Separate finalizable userdata: dead userdata with `__gc`
-   metamethods move to `finalize_list`.
-9. Mark preserved userdata alive (`marktmu`). Propagate.
-10. Clear dead weak entries (`cleartable`).
-11. Flip `current_white` (White0 becomes White1 or vice versa).
-    New allocations from this point use the new current white.
-12. Set state to `SweepString`.
+The ordering matches PUC-Rio's `atomic()` in `lgc.c`. Each step
+includes the rationale:
+
+1. **Re-mark open upvalues** (`remarkupvals`). Iterate the global
+   open upvalue list. For each gray upvalue, mark its pointed-to
+   value. *Rationale*: A thread may have died during the mark phase,
+   but another closure still holds an upvalue pointing to the dead
+   thread's stack. The upvalue's value must stay alive.
+
+2. **Propagate** from step 1. Drain any gray objects created by
+   upvalue re-marking.
+
+3. **Move weak tables to gray** (`gray_stack = weak_tables`; clear
+   `weak_tables`). *Rationale*: Weak tables were kept gray during
+   propagation. Now re-traverse them to determine which entries are
+   still reachable via non-weak paths.
+
+4. **Re-mark current thread** and **re-mark all type metatables**.
+   *Rationale*: Objects may have been created or mutated since the
+   main mark phase started. The current thread and metatables are
+   always reachable.
+
+5. **Propagate** from steps 3-4.
+
+6. **Re-trace gray-again list** (`gray_stack = gray_again`; clear
+   `gray_again`). Propagate. *Rationale*: The gray-again list
+   contains tables that were marked black but subsequently mutated
+   (caught by the backward write barrier). They must be re-traversed
+   to ensure all their new children are marked.
+
+7. **Separate finalizable userdata** (`separate_udata`). Iterate
+   all userdata. For each white (dead) userdata that has a `__gc`
+   metamethod and has not been finalized yet:
+   - Mark it as finalized (set flag).
+   - Move it to `finalize_list`.
+   *Rationale*: Identifies which userdata need finalizer calls.
+
+8. **Mark finalizable userdata alive** (`mark_tmu`). For each
+   userdata in `finalize_list`:
+   - Reset to current white (resurrect it).
+   - Mark it and trace its children.
+   Propagate. *Rationale*: `__gc` methods can reference other
+   objects. Those objects must not be collected this cycle. This is
+   the "resurrection" mechanism.
+
+9. **Clear dead weak entries** (`clear_table`). For each table in
+   the weak tables list, remove entries where:
+   - Weak key is white (dead) -- remove entry.
+   - Weak value is white (dead) -- remove entry.
+   - Exception: **strings are never cleared** from weak tables
+     (the `is_cleared` check re-marks strings immediately).
+   *Rationale*: Weak references to dead objects must be removed.
+
+10. **Flip current white**. `current_white` toggles between
+    `White0` and `White1`. All new allocations from this point use
+    the new current white. Objects still bearing the old white are
+    dead and will be freed during sweep.
+
+11. **Initialize sweep**: Set `state = SweepString`, reset sweep
+    cursors, compute `estimate` (live memory estimate, excluding
+    finalizable userdata size).
 
 ### Sweep Phase
 
-Iterate each arena linearly. For each occupied slot:
+Two sub-phases, each runs incrementally:
 
-- If white (not marked): free the slot (return to free list).
-- If black (marked): reset to white for next cycle.
+**SweepString** (`state = SweepString`): Iterate the string intern
+table one hash bucket per step. For each string in the bucket:
+- If bearing the "other white" (dead): remove from intern table
+  and free.
+- If alive: reset to current white.
+
+String sweep is separate because strings are stored in the intern
+table (hash map), not in the main object list.
+
+When all string buckets are swept, transition to `Sweep`.
+
+**Sweep** (`state = Sweep`): Iterate each typed arena linearly, up
+to `GCSWEEPMAX` (40) objects per step. For each occupied slot:
+- If bearing the "other white" (dead): free the slot (return to
+  arena free list), decrement `total_bytes`.
+- If alive (black or current white): reset color to current white
+  for the next cycle.
+
+When all arenas are swept, transition to `Finalize`.
+
+**Dead object test**: An object is dead if its white color does not
+match `current_white`. After the atomic phase flips white, the old
+white becomes the "other white" and marks dead objects.
 
 ### Finalize Phase
 
-For each userdata in `finalize_list`:
+Runs one finalizer per incremental step:
 
-1. Call its `__gc` metamethod.
-2. Mark it as finalized (will not finalize again).
-3. The finalizer may resurrect the object by storing it somewhere
-   reachable. It will be collected in the next cycle if still dead.
+1. Pop the first userdata from `finalize_list`.
+2. Move it back to the main arena (it may be collected next cycle
+   if not resurrected).
+3. Reset its color to current white.
+4. Look up `__gc` on its metatable.
+5. If `__gc` exists:
+   - Disable debug hooks during the call.
+   - Set a high GC threshold (prevent nested GC: `threshold =
+     2 * total_bytes`).
+   - Call `__gc(userdata)` with zero expected results.
+   - Restore hooks and threshold.
+6. When `finalize_list` is empty, transition to `Pause`.
+   Set `threshold = (estimate / 100) * gc_pause`.
 
 ## Write Barriers
 
@@ -245,20 +350,51 @@ During the propagate phase, mutations can violate the tri-color
 invariant (a black object must not point to a white object). Write
 barriers restore the invariant:
 
-**Forward barrier** (closures, upvalues, userdata): When assigning
-a white value into a black object during the Propagate phase, mark
-the value gray. During SweepString and Sweep phases, the barrier
-instead marks the parent white to avoid unnecessary marking. (The
-forward barrier is never called during Finalize or Pause — PUC-Rio
-asserts this in `luaC_barrierf`.)
+**Forward barrier** (`barrier_f`) — used by closures, upvalues,
+userdata:
 
-**Backward barrier** (tables, threads): When assigning a white value
-into a black table, mark the table gray-again (push onto the
-`gray_again` list for re-traversal in the atomic phase). Tables use
-the backward barrier because they are mutated frequently — re-marking
-the table is cheaper than marking every assigned value. Threads also
-use a backward-like mechanism because their stacks can be mutated at
-any time.
+```
+fn barrier_f(parent: &mut GcObject, child: GcRef) {
+    assert!(parent.is_black() && child.is_white());
+    assert!(state != Finalize && state != Pause);
+    if state == Propagate {
+        mark_object(child);  // Mark the white child gray
+    } else {
+        // During sweep phases: make the parent white instead.
+        // Cheaper than marking since we are near end of cycle.
+        parent.set_color(current_white);
+    }
+}
+```
+
+Triggered when:
+- Setting an upvalue's value
+- Setting a closure's environment
+
+**Backward barrier** (`barrier_back`) — used by tables:
+
+```
+fn barrier_back(table: &mut Table) {
+    assert!(table.is_black());
+    assert!(state != Finalize && state != Pause);
+    table.set_color(Gray);        // Demote black to gray
+    gray_again.push(table.ref);   // Re-traverse in atomic phase
+}
+```
+
+Triggered when:
+- Setting a table element (`t[k] = v`)
+- Setting a table's metatable
+
+Tables use the backward barrier because they are mutated frequently.
+Re-traversing the entire table once in the atomic phase is cheaper
+than marking each individual value as it is assigned. The gray-again
+list is drained in atomic phase step 6.
+
+**Why two barrier types**: Forward barriers (mark the child) are
+appropriate for small objects with few references. Backward barriers
+(re-gray the parent) are appropriate for large objects that are
+frequently mutated. The choice follows PUC-Rio exactly.
 
 ## Weak Tables
 
@@ -303,6 +439,29 @@ execution, triggered when `total_bytes >= threshold`:
    `threshold = (estimate / 100) * gc_pause`, where `estimate`
    is the memory usage at the end of the cycle (which may differ
    from `total_bytes` due to finalized userdata and freed memory).
+
+### Scheduling Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `GCSTEPSIZE` | 1024 | Base work quantum (bytes) |
+| `GCSWEEPMAX` | 40 | Max objects swept per step |
+| `GCSWEEPCOST` | 10 | Estimated cost per string bucket |
+| `GCFINALIZECOST` | 100 | Estimated cost per finalizer |
+
+**Work budget per step**: `(GCSTEPSIZE / 100) * gc_step_mul`.
+With default `gc_step_mul = 200`: budget = 2048 bytes of work.
+
+**Cost reporting per phase**:
+- Propagate: returns the memory size of the traversed object.
+- SweepString: returns `GCSWEEPCOST` per bucket.
+- Sweep: returns `GCSWEEPMAX * GCSWEEPCOST` per step.
+- Finalize: returns `GCFINALIZECOST` per finalizer.
+
+**Debt tracking**: The GC accumulates "debt" when allocations
+exceed the threshold faster than the GC can keep up. Each step
+reduces debt by the work performed. When debt exceeds `GCSTEPSIZE`,
+the next step runs immediately (threshold set to `total_bytes`).
 
 This matches PUC-Rio's debt-based scheduling model.
 

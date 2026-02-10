@@ -55,29 +55,62 @@ isolation.
 Lua scripts in `tests/` that exercise language features through the
 full pipeline. Each test uses `assert()` to validate behavior.
 
-Organization:
+Organization mirrors the Lua 5.1 Reference Manual. Language tests
+cover Chapter 2 ("The Language"), standard library tests cover
+Chapter 5 ("Standard Libraries").
+
+**Language tests** (Chapter 2):
+
+| File | Section | Description |
+|------|---------|-------------|
+| `lexical.lua` | 2.1 | Lexical conventions (keywords, names, strings, numbers, comments) |
+| `types.lua` | 2.2 | Values and types, coercion (2.2.1) |
+| `variables.lua` | 2.3 | Global, local, and table field variables |
+| `statements.lua` | 2.4 | Chunks, blocks, assignment, control structures, for loops, local declarations |
+| `expressions.lua` | 2.5 | Arithmetic, relational, logical operators, concatenation, length, precedence, table constructors, function calls, function definitions |
+| `visibility.lua` | 2.6 | Lexical scoping, upvalues, closures |
+| `errors.lua` | 2.7 | error(), pcall, xpcall, error objects, stack traces |
+| `metatables.lua` | 2.8 | Metamethods for arithmetic, comparison, indexing, call, concatenation, length |
+| `environments.lua` | 2.9 | Function environments, setfenv, getfenv |
+| `gc.lua` | 2.10 | Garbage collection, finalizers (2.10.1), weak tables (2.10.2) |
+| `coroutines.lua` | 2.11 | create, resume, yield, wrap, status, error propagation |
+
+**Standard library tests** (Chapter 5):
+
+| File | Section | Description |
+|------|---------|-------------|
+| `stdlib-base.lua` | 5.1 | Base library (assert, type, tonumber, tostring, select, unpack, etc.) |
+| `stdlib-package.lua` | 5.3 | Package/module library (require, module, loaders, etc.) |
+| `stdlib-string.lua` | 5.4 | String library (find, format, gmatch, gsub, etc.) |
+| `stdlib-table.lua` | 5.5 | Table library (concat, insert, remove, sort, maxn) |
+| `stdlib-math.lua` | 5.6 | Math library (abs, floor, ceil, random, sin, cos, etc.) |
+| `stdlib-io.lua` | 5.7 | I/O library (open, read, write, lines, etc.) |
+| `stdlib-os.lua` | 5.8 | OS library (clock, date, time, execute, etc.) |
+| `stdlib-debug.lua` | 5.9 | Debug library (getinfo, getlocal, sethook, traceback, etc.) |
 
 ```text
 tests/
-  integration.rs       Test runner (calls run_file for each .lua)
-  test01.lua           Basic operations
-  test02.lua           Control flow
-  test03.lua           Functions
-  ...
+  integration.rs           Test runner (calls run_file for each .lua)
+  lexical.lua              2.1  Lexical conventions
+  types.lua                2.2  Values and types, coercion
+  variables.lua            2.3  Variables
+  statements.lua           2.4  Statements and control flow
+  expressions.lua          2.5  Expressions and operators
+  visibility.lua           2.6  Scoping and closures
+  errors.lua               2.7  Error handling
+  metatables.lua           2.8  Metatables and metamethods
+  environments.lua         2.9  Environments
+  gc.lua                   2.10 Garbage collection
+  coroutines.lua           2.11 Coroutines
+  stdlib-base.lua          5.1  Base library
+  stdlib-package.lua       5.3  Package library
+  stdlib-string.lua        5.4  String library
+  stdlib-table.lua         5.5  Table library
+  stdlib-math.lua          5.6  Math library
+  stdlib-io.lua            5.7  I/O library
+  stdlib-os.lua            5.8  OS library
+  stdlib-debug.lua         5.9  Debug library
 ```
-
-Each test file focuses on a specific area:
-
-- Arithmetic and comparison operators
-- String operations and concatenation
-- Table construction and access
-- Control flow (if/while/for/repeat)
-- Functions (calls, returns, varargs)
-- Closures and upvalues
-- Metatables and metamethods
-- Error handling (pcall, xpcall, error)
-- Standard library functions
-- Edge cases and corner cases
 
 ### Layer 3: PUC-Rio Official Test Suite
 
