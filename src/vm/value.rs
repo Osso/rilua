@@ -441,12 +441,23 @@ mod tests {
 
     #[test]
     fn type_name_for_refs() {
+        use crate::vm::closure::{Closure, RustClosure};
+        use crate::vm::state::LuaState;
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn dummy(_: &mut LuaState) -> crate::error::LuaResult<u32> {
+            Ok(0)
+        }
+
         let mut strings: Arena<LuaString> = Arena::new();
         let mut tables: Arena<Table> = Arena::new();
         let mut closures: Arena<Closure> = Arena::new();
         let s = strings.alloc(LuaString::new(b"test", lua_hash(b"test")), Color::White0);
         let t = tables.alloc(Table::new(), Color::White0);
-        let c = closures.alloc(Closure, Color::White0);
+        let c = closures.alloc(
+            Closure::Rust(RustClosure::new(dummy, "test")),
+            Color::White0,
+        );
         assert_eq!(Val::Str(s).type_name(), "string");
         assert_eq!(Val::Table(t).type_name(), "table");
         assert_eq!(Val::Function(c).type_name(), "function");

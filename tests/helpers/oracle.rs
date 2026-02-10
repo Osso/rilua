@@ -91,13 +91,40 @@ pub fn assert_reference_output(code: &str, expected_stdout: &str) {
     );
 }
 
-// Placeholder for rilua execution -- will be filled in Phase 3e when
-// the full pipeline is wired up.
-//
-// pub fn run_rilua(code: &str) -> LuaOutput { ... }
-//
-// pub fn assert_matches_reference(code: &str) {
-//     let reference = run_reference(code).expect("reference binary");
-//     let rilua = run_rilua(code);
-//     assert_eq!(rilua.stdout, reference.stdout, ...);
-// }
+/// Run Lua code in rilua via `rilua -e`.
+#[allow(dead_code, clippy::expect_used)]
+pub fn run_rilua(code: &str) -> LuaOutput {
+    let output = Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .arg("-e")
+        .arg(code)
+        .output()
+        .expect("failed to run rilua binary");
+
+    LuaOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    }
+}
+
+/// Assert that rilua and PUC-Rio produce identical stdout for the given code.
+///
+/// Skips the test if the reference binary is not available.
+#[allow(dead_code)]
+pub fn assert_matches_reference(code: &str) {
+    let Some(reference) = run_reference(code) else {
+        eprintln!("skipping: reference Lua binary not available");
+        return;
+    };
+    let rilua = run_rilua(code);
+    assert_eq!(
+        rilua.stdout, reference.stdout,
+        "Output mismatch for code: {code}\n  rilua stdout: {:?}\n  ref   stdout: {:?}\n  rilua stderr: {}\n  ref   stderr: {}",
+        rilua.stdout, reference.stdout, rilua.stderr, reference.stderr,
+    );
+    assert_eq!(
+        rilua.exit_code, reference.exit_code,
+        "Exit code mismatch for code: {code}\n  rilua: {}\n  ref:   {}",
+        rilua.exit_code, reference.exit_code,
+    );
+}

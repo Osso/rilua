@@ -4,9 +4,582 @@
 //! heap. Each coroutine gets its own `LuaThread` with a separate stack
 //! but sharing the GC heap with all other threads.
 //!
-//! Full implementation in Phase 3a.
+//! ## Gc Struct
+//!
+//! The `Gc` struct holds all typed arenas (strings, tables, closures,
+//! upvalues) and the string interning table. In Phase 3, allocation
+//! works but no collection cycle runs. Collection is added in Phase 6.
+//!
+//! ## Stack Layout
+//!
+//! The value stack is a flat `Vec<Val>`. Each function call occupies a
+//! contiguous range: `[func, arg1, ..., argN, local1, ..., localM]`.
+//! The `base` field points to the first local (register 0).
+//!
+//! Reference: `lstate.h`, `lstate.c` in PUC-Rio Lua 5.1.1.
+
+use super::callinfo::{CallInfo, LUA_MULTRET};
+use super::closure::{Closure, Upvalue};
+use super::gc::Color;
+use super::gc::arena::{Arena, GcRef};
+use super::string::{LuaString, StringTable};
+use super::table::Table;
+use super::value::Val;
+
+// ---------------------------------------------------------------------------
+// Constants (match PUC-Rio limits)
+// ---------------------------------------------------------------------------
+
+/// Maximum total call depth (Lua + Rust functions).
+pub const MAXCALLS: usize = 20_000;
+
+/// Maximum nested Rust function calls (prevents Rust stack overflow).
+pub const MAXCCALLS: u16 = 200;
+
+/// Minimum stack slots guaranteed for Rust functions.
+pub const LUA_MINSTACK: usize = 20;
+
+/// Initial value stack size (2 * LUA_MINSTACK).
+const BASIC_STACK_SIZE: usize = 2 * LUA_MINSTACK;
+
+/// Initial CallInfo array capacity.
+const BASIC_CI_SIZE: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Gc (garbage collector state -- allocation only, no sweep yet)
+// ---------------------------------------------------------------------------
+
+/// GC state: holds all typed arenas and the string table.
+///
+/// Phase 3: allocation only. The mark-sweep collector (Phase 6)
+/// adds the collection cycle, gray stack, and GC pacing.
+pub struct Gc {
+    /// Interned strings.
+    pub strings: StringTable,
+    /// String arena (LuaString storage).
+    pub string_arena: Arena<LuaString>,
+    /// Table arena.
+    pub tables: Arena<Table>,
+    /// Closure arena (Lua and Rust closures).
+    pub closures: Arena<Closure>,
+    /// Upvalue arena.
+    pub upvalues: Arena<Upvalue>,
+    /// Thread arena (coroutines -- placeholder).
+    pub threads: Arena<LuaThread>,
+    /// Current white color for new allocations.
+    pub current_white: Color,
+}
+
+impl Gc {
+    /// Creates a new GC state with empty arenas.
+    fn new() -> Self {
+        Self {
+            strings: StringTable::new(),
+            string_arena: Arena::new(),
+            tables: Arena::new(),
+            closures: Arena::new(),
+            upvalues: Arena::new(),
+            threads: Arena::new(),
+            current_white: Color::White0,
+        }
+    }
+
+    /// Interns a string, returning a GcRef to the interned LuaString.
+    pub fn intern_string(&mut self, data: &[u8]) -> GcRef<LuaString> {
+        self.strings
+            .intern(data, &mut self.string_arena, self.current_white)
+    }
+
+    /// Allocates a new table in the GC arena.
+    pub fn alloc_table(&mut self, table: Table) -> GcRef<Table> {
+        self.tables.alloc(table, self.current_white)
+    }
+
+    /// Allocates a new closure in the GC arena.
+    pub fn alloc_closure(&mut self, closure: Closure) -> GcRef<Closure> {
+        self.closures.alloc(closure, self.current_white)
+    }
+
+    /// Allocates a new upvalue in the GC arena.
+    pub fn alloc_upvalue(&mut self, upvalue: Upvalue) -> GcRef<Upvalue> {
+        self.upvalues.alloc(upvalue, self.current_white)
+    }
+}
+
+impl Default for Gc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LuaThread (coroutine placeholder)
+// ---------------------------------------------------------------------------
 
 /// A Lua thread (coroutine) with its own stack and call stack.
 ///
-/// Placeholder -- fields will be added in Phase 3a.
+/// Placeholder -- full coroutine support is Phase 9.
 pub struct LuaThread;
+
+// ---------------------------------------------------------------------------
+// LuaState
+// ---------------------------------------------------------------------------
+
+/// The main VM state.
+///
+/// Holds the value stack, call stack, GC heap, global table, registry,
+/// and open upvalue list. This is the central data structure for
+/// executing Lua bytecode.
+pub struct LuaState {
+    /// Value stack. All Lua values live here during execution.
+    pub stack: Vec<Val>,
+
+    /// Base of current function's frame (first local / register 0).
+    /// Always mirrors `call_stack[ci].base`.
+    pub base: usize,
+
+    /// First free slot in the value stack.
+    pub top: usize,
+
+    /// Call stack: one entry per active function call.
+    pub call_stack: Vec<CallInfo>,
+
+    /// Index into `call_stack` for the current frame.
+    pub ci: usize,
+
+    /// Nested Rust call depth counter.
+    pub n_ccalls: u16,
+
+    /// Global table (_G). Used by GETGLOBAL/SETGLOBAL.
+    pub global: GcRef<Table>,
+
+    /// Registry table. Internal storage for the VM.
+    pub registry: GcRef<Table>,
+
+    /// Open upvalues sorted by stack index (descending).
+    /// Used by find_upvalue and close_upvalues.
+    pub open_upvalues: Vec<GcRef<Upvalue>>,
+
+    /// GC state (all arenas and string table).
+    pub gc: Gc,
+}
+
+impl LuaState {
+    /// Creates a new VM state with an empty stack and initial CallInfo.
+    ///
+    /// Allocates the global table and registry in the GC arena,
+    /// initializes the value stack to `BASIC_STACK_SIZE` slots (all nil),
+    /// and pushes the initial (bottom) CallInfo frame.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut gc = Gc::new();
+
+        // Allocate global and registry tables.
+        let global = gc.alloc_table(Table::new());
+        let registry = gc.alloc_table(Table::new());
+
+        // Initialize value stack: BASIC_STACK_SIZE slots, all nil.
+        let stack = vec![Val::Nil; BASIC_STACK_SIZE];
+
+        // Initial CallInfo: func=0, base=1 (slot 0 holds the "entry" function).
+        // Top is set to base + LUA_MINSTACK to provide minimum stack space.
+        let initial_ci = CallInfo::new(0, 1, 1 + LUA_MINSTACK, LUA_MULTRET);
+
+        let mut call_stack = Vec::with_capacity(BASIC_CI_SIZE);
+        call_stack.push(initial_ci);
+
+        Self {
+            stack,
+            base: 1,
+            top: 1,
+            call_stack,
+            ci: 0,
+            n_ccalls: 0,
+            global,
+            registry,
+            open_upvalues: Vec::new(),
+            gc,
+        }
+    }
+
+    // ----- Stack operations -----
+
+    /// Returns the value at the given absolute stack index.
+    ///
+    /// Returns `Val::Nil` if the index is out of bounds.
+    #[inline]
+    pub fn stack_get(&self, idx: usize) -> Val {
+        if idx < self.stack.len() {
+            self.stack[idx]
+        } else {
+            Val::Nil
+        }
+    }
+
+    /// Sets the value at the given absolute stack index.
+    ///
+    /// Grows the stack with nil values if the index is beyond current
+    /// capacity.
+    #[inline]
+    pub fn stack_set(&mut self, idx: usize, val: Val) {
+        if idx >= self.stack.len() {
+            self.stack.resize(idx + 1, Val::Nil);
+        }
+        self.stack[idx] = val;
+    }
+
+    /// Ensures at least `n` free slots above `top`.
+    ///
+    /// Grows the stack if necessary.
+    pub fn ensure_stack(&mut self, n: usize) {
+        let needed = self.top + n;
+        if needed > self.stack.len() {
+            self.stack.resize(needed, Val::Nil);
+        }
+    }
+
+    /// Pushes a value onto the stack at `top` and increments `top`.
+    pub fn push(&mut self, val: Val) {
+        if self.top >= self.stack.len() {
+            self.stack.resize(self.top + 1, Val::Nil);
+        }
+        self.stack[self.top] = val;
+        self.top += 1;
+    }
+
+    /// Pops the top value from the stack and returns it.
+    ///
+    /// Returns `Val::Nil` if the stack is empty.
+    pub fn pop(&mut self) -> Val {
+        if self.top > 0 {
+            self.top -= 1;
+            self.stack[self.top]
+        } else {
+            Val::Nil
+        }
+    }
+
+    // ----- CallInfo helpers -----
+
+    /// Returns a reference to the current CallInfo.
+    #[inline]
+    pub fn ci(&self) -> &CallInfo {
+        &self.call_stack[self.ci]
+    }
+
+    /// Returns a mutable reference to the current CallInfo.
+    #[inline]
+    pub fn ci_mut(&mut self) -> &mut CallInfo {
+        &mut self.call_stack[self.ci]
+    }
+
+    /// Pushes a new CallInfo frame onto the call stack.
+    ///
+    /// Increments `ci` to point to the new frame. Returns a mutable
+    /// reference to the new CallInfo for further initialization.
+    pub fn push_ci(&mut self, ci: CallInfo) -> &mut CallInfo {
+        self.call_stack.push(ci);
+        self.ci = self.call_stack.len() - 1;
+        &mut self.call_stack[self.ci]
+    }
+
+    /// Pops the current CallInfo frame from the call stack.
+    ///
+    /// Restores `ci` to point to the previous frame.
+    pub fn pop_ci(&mut self) {
+        if self.ci > 0 {
+            self.ci -= 1;
+        }
+    }
+
+    /// Returns the number of arguments currently on the stack above `func`.
+    ///
+    /// Computed as `top - func - 1` (the function itself is not an argument).
+    #[inline]
+    pub fn get_nargs(&self, func_idx: usize) -> usize {
+        if self.top > func_idx + 1 {
+            self.top - func_idx - 1
+        } else {
+            0
+        }
+    }
+}
+
+impl Default for LuaState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- LuaState construction -----
+
+    #[test]
+    fn new_state_has_stack() {
+        let state = LuaState::new();
+        assert_eq!(state.stack.len(), BASIC_STACK_SIZE);
+        assert_eq!(state.top, 1);
+        assert_eq!(state.base, 1);
+    }
+
+    #[test]
+    fn new_state_has_initial_ci() {
+        let state = LuaState::new();
+        assert_eq!(state.call_stack.len(), 1);
+        assert_eq!(state.ci, 0);
+        let ci = state.ci();
+        assert_eq!(ci.func, 0);
+        assert_eq!(ci.base, 1);
+        assert_eq!(ci.top, 1 + LUA_MINSTACK);
+        assert_eq!(ci.num_results, LUA_MULTRET);
+    }
+
+    #[test]
+    fn new_state_has_global_table() {
+        let state = LuaState::new();
+        assert!(state.gc.tables.is_valid(state.global));
+    }
+
+    #[test]
+    fn new_state_has_registry() {
+        let state = LuaState::new();
+        assert!(state.gc.tables.is_valid(state.registry));
+    }
+
+    #[test]
+    fn new_state_gc_initialized() {
+        let state = LuaState::new();
+        // Two tables allocated (global + registry).
+        assert_eq!(state.gc.tables.len(), 2);
+        assert_eq!(state.gc.string_arena.len(), 0);
+        assert_eq!(state.gc.closures.len(), 0);
+        assert_eq!(state.gc.upvalues.len(), 0);
+    }
+
+    #[test]
+    fn new_state_no_ccalls() {
+        let state = LuaState::new();
+        assert_eq!(state.n_ccalls, 0);
+    }
+
+    #[test]
+    fn new_state_no_open_upvalues() {
+        let state = LuaState::new();
+        assert!(state.open_upvalues.is_empty());
+    }
+
+    // ----- Stack operations -----
+
+    #[test]
+    fn stack_get_valid_index() {
+        let mut state = LuaState::new();
+        state.stack[5] = Val::Num(42.0);
+        assert_eq!(state.stack_get(5), Val::Num(42.0));
+    }
+
+    #[test]
+    fn stack_get_out_of_bounds() {
+        let state = LuaState::new();
+        assert!(state.stack_get(1000).is_nil());
+    }
+
+    #[test]
+    fn stack_set_within_bounds() {
+        let mut state = LuaState::new();
+        state.stack_set(5, Val::Num(99.0));
+        assert_eq!(state.stack[5], Val::Num(99.0));
+    }
+
+    #[test]
+    fn stack_set_grows_stack() {
+        let mut state = LuaState::new();
+        let old_len = state.stack.len();
+        state.stack_set(old_len + 10, Val::Bool(true));
+        assert!(state.stack.len() > old_len);
+        assert_eq!(state.stack[old_len + 10], Val::Bool(true));
+    }
+
+    #[test]
+    fn ensure_stack_no_growth_needed() {
+        let mut state = LuaState::new();
+        let old_len = state.stack.len();
+        state.ensure_stack(5);
+        // top=1, need 1+5=6, stack is already BASIC_STACK_SIZE (40).
+        assert_eq!(state.stack.len(), old_len);
+    }
+
+    #[test]
+    fn ensure_stack_grows() {
+        let mut state = LuaState::new();
+        state.top = BASIC_STACK_SIZE - 2;
+        state.ensure_stack(10);
+        assert!(state.stack.len() >= BASIC_STACK_SIZE - 2 + 10);
+    }
+
+    #[test]
+    fn push_and_pop() {
+        let mut state = LuaState::new();
+        state.push(Val::Num(1.0));
+        state.push(Val::Num(2.0));
+        state.push(Val::Num(3.0));
+        assert_eq!(state.top, 4); // base was 1, pushed 3
+        assert_eq!(state.pop(), Val::Num(3.0));
+        assert_eq!(state.pop(), Val::Num(2.0));
+        assert_eq!(state.pop(), Val::Num(1.0));
+        assert_eq!(state.top, 1);
+    }
+
+    #[test]
+    fn pop_empty_returns_nil() {
+        let mut state = LuaState::new();
+        state.top = 0;
+        assert!(state.pop().is_nil());
+    }
+
+    #[test]
+    fn push_grows_stack_if_needed() {
+        let mut state = LuaState::new();
+        state.top = state.stack.len();
+        state.push(Val::Num(42.0));
+        assert_eq!(state.stack_get(state.top - 1), Val::Num(42.0));
+    }
+
+    // ----- CallInfo helpers -----
+
+    #[test]
+    fn ci_returns_current_frame() {
+        let state = LuaState::new();
+        assert_eq!(state.ci().func, 0);
+        assert_eq!(state.ci().base, 1);
+    }
+
+    #[test]
+    fn ci_mut_allows_modification() {
+        let mut state = LuaState::new();
+        state.ci_mut().saved_pc = 10;
+        assert_eq!(state.ci().saved_pc, 10);
+    }
+
+    #[test]
+    fn push_and_pop_ci() {
+        let mut state = LuaState::new();
+        assert_eq!(state.ci, 0);
+
+        let new_ci = CallInfo::new(5, 6, 26, 1);
+        state.push_ci(new_ci);
+        assert_eq!(state.ci, 1);
+        assert_eq!(state.ci().func, 5);
+        assert_eq!(state.ci().base, 6);
+
+        state.pop_ci();
+        assert_eq!(state.ci, 0);
+        assert_eq!(state.ci().func, 0);
+    }
+
+    #[test]
+    fn nested_ci_push_pop() {
+        let mut state = LuaState::new();
+        state.push_ci(CallInfo::new(5, 6, 26, 1));
+        state.push_ci(CallInfo::new(10, 11, 31, 2));
+        state.push_ci(CallInfo::new(15, 16, 36, 3));
+        assert_eq!(state.ci, 3);
+        assert_eq!(state.call_stack.len(), 4);
+
+        state.pop_ci();
+        assert_eq!(state.ci, 2);
+        assert_eq!(state.ci().func, 10);
+
+        state.pop_ci();
+        assert_eq!(state.ci, 1);
+        assert_eq!(state.ci().func, 5);
+
+        state.pop_ci();
+        assert_eq!(state.ci, 0);
+        assert_eq!(state.ci().func, 0);
+    }
+
+    #[test]
+    fn pop_ci_does_not_underflow() {
+        let mut state = LuaState::new();
+        state.pop_ci(); // already at 0
+        assert_eq!(state.ci, 0);
+    }
+
+    // ----- Gc operations -----
+
+    #[test]
+    fn gc_intern_string() {
+        let mut state = LuaState::new();
+        let r = state.gc.intern_string(b"hello");
+        assert!(state.gc.string_arena.is_valid(r));
+        let s = state.gc.string_arena.get(r);
+        assert!(s.is_some());
+        assert_eq!(s.map(LuaString::data), Some(b"hello".as_ref()));
+    }
+
+    #[test]
+    fn gc_intern_string_dedup() {
+        let mut state = LuaState::new();
+        let r1 = state.gc.intern_string(b"test");
+        let r2 = state.gc.intern_string(b"test");
+        assert_eq!(r1, r2);
+        assert_eq!(state.gc.string_arena.len(), 1);
+    }
+
+    #[test]
+    fn gc_alloc_table() {
+        let mut state = LuaState::new();
+        let t = state.gc.alloc_table(Table::new());
+        assert!(state.gc.tables.is_valid(t));
+        // 2 from new() + 1 just allocated.
+        assert_eq!(state.gc.tables.len(), 3);
+    }
+
+    #[test]
+    fn get_nargs_with_args() {
+        let mut state = LuaState::new();
+        // Simulate: func at index 5, args at 6,7,8, top=9
+        state.top = 9;
+        assert_eq!(state.get_nargs(5), 3);
+    }
+
+    #[test]
+    fn get_nargs_no_args() {
+        let mut state = LuaState::new();
+        // func at index 5, top=6 (only the function itself)
+        state.top = 6;
+        assert_eq!(state.get_nargs(5), 0);
+    }
+
+    #[test]
+    fn get_nargs_top_before_func() {
+        let mut state = LuaState::new();
+        state.top = 3;
+        assert_eq!(state.get_nargs(5), 0);
+    }
+
+    // ----- Constants -----
+
+    #[test]
+    fn constants_match_puc_rio() {
+        assert_eq!(MAXCALLS, 20_000);
+        assert_eq!(MAXCCALLS, 200);
+        assert_eq!(LUA_MINSTACK, 20);
+        assert_eq!(BASIC_STACK_SIZE, 40);
+        assert_eq!(BASIC_CI_SIZE, 8);
+    }
+
+    #[test]
+    fn default_creates_new_state() {
+        let state = LuaState::default();
+        assert_eq!(state.call_stack.len(), 1);
+        assert_eq!(state.stack.len(), BASIC_STACK_SIZE);
+    }
+}

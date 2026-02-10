@@ -99,3 +99,52 @@ fn reference_version_string() {
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout, "Lua 5.1\n");
 }
+
+// ---------------------------------------------------------------------------
+// Oracle comparison tests: rilua vs PUC-Rio
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_print_hello() {
+    oracle::assert_matches_reference("print('hello')");
+}
+
+#[test]
+fn oracle_arithmetic() {
+    oracle::assert_matches_reference("print(1 + 2)");
+}
+
+#[test]
+fn oracle_multiple_values() {
+    oracle::assert_matches_reference("print(1, 2, 3)");
+}
+
+#[test]
+fn oracle_print_nil() {
+    oracle::assert_matches_reference("print(nil)");
+}
+
+#[test]
+fn oracle_print_bool() {
+    oracle::assert_matches_reference("print(true, false)");
+}
+
+#[test]
+fn oracle_print_no_args() {
+    oracle::assert_matches_reference("print()");
+}
+
+#[test]
+fn oracle_variable_assignment() {
+    oracle::assert_matches_reference("x = 42 print(x)");
+}
+
+#[test]
+fn oracle_print_negative() {
+    oracle::assert_matches_reference("print(-5)");
+}
+
+#[test]
+fn oracle_print_float() {
+    oracle::assert_matches_reference("print(3.14)");
+}

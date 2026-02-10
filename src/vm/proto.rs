@@ -63,6 +63,10 @@ pub struct Proto {
     pub is_vararg: u8,
     /// Maximum stack size needed by this function.
     pub max_stack_size: u8,
+    /// String constants awaiting GC interning. Each entry maps a constant
+    /// pool index to the raw string bytes. Populated by the compiler,
+    /// consumed by `patch_string_constants` before execution.
+    pub string_pool: Vec<(u32, Vec<u8>)>,
 }
 
 impl Proto {
@@ -83,6 +87,7 @@ impl Proto {
             num_params: 0,
             is_vararg: 0,
             max_stack_size: 2, // minimum per PUC-Rio (register 0 + temps)
+            string_pool: Vec::new(),
         }
     }
 }
@@ -107,6 +112,7 @@ mod tests {
         assert_eq!(p.num_params, 0);
         assert_eq!(p.is_vararg, 0);
         assert_eq!(p.max_stack_size, 2);
+        assert!(p.string_pool.is_empty());
     }
 
     #[test]

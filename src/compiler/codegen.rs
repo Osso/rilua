@@ -422,33 +422,33 @@ impl Compiler {
     }
 
     /// Adds a string constant to the pool. Returns the constant index.
-    pub(crate) fn string_constant(&mut self, _s: &str) -> LuaResult<u32> {
-        // For the compiler, we store strings as Val::Num with a sentinel,
-        // but actually we need a string representation in the constant pool.
-        // Since we don't have GC strings during compilation, we use a
-        // placeholder: store the string bytes directly.
-        // TODO: Once GC integration is complete, this should create proper
-        // GcRef<LuaString> values. For now, we use a string constant table
-        // alongside the main constant pool.
-        //
-        // Actually, the simplest approach for now: store string constants
-        // separately and reference them by index. The Proto already has
-        // constants as Vec<Val>, but Val::Str requires a GcRef which we
-        // don't have during compilation.
-        //
-        // For the compiler to work standalone (before VM integration),
-        // we store strings as Val::Nil placeholders with a separate string
-        // table. The final integration step will convert these.
+    ///
+    /// Deduplicates by comparing raw byte content in `proto.string_pool`.
+    /// Stores `Val::Nil` as a placeholder in the constant pool; the real
+    /// `Val::Str` is patched in by `patch_string_constants` before execution.
+    pub(crate) fn string_constant(&mut self, s: &str) -> LuaResult<u32> {
+        let bytes = s.as_bytes();
         let fs = self.fs();
-        // Search existing string constants
-        for (i, name) in fs.proto.upvalue_names.iter().enumerate() {
-            // Repurpose upvalue_names temporarily? No, that's wrong.
-            // Let's use a simpler approach: store string index in the
-            // constant pool using a marker.
-            let _ = (i, name);
+
+        // Check existing string constants for byte-equal match.
+        for &(idx, ref existing) in &fs.proto.string_pool {
+            if existing == bytes {
+                return Ok(idx);
+            }
         }
-        // For now: add Val::Nil as placeholder, track strings separately
-        self.add_constant(Val::Nil)
+
+        // Not found: push a new Val::Nil placeholder directly (bypass
+        // add_constant to avoid nil-vs-nil dedup).
+        let fs = self.fs_mut();
+        let idx = fs.proto.constants.len();
+        if idx > MAXARG_BX as usize {
+            return Err(self.syntax_error("constant table overflow"));
+        }
+        fs.proto.constants.push(Val::Nil);
+        #[allow(clippy::cast_possible_truncation)]
+        let idx = idx as u32;
+        fs.proto.string_pool.push((idx, bytes.to_vec()));
+        Ok(idx)
     }
 
     /// Adds a number constant to the pool. Returns the constant index.
