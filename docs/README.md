@@ -12,7 +12,9 @@ understanding the pipeline.
 
 1. [architecture.md](architecture.md) -- Design principles, module
    structure, decision summary
-2. [references.md](references.md) -- Studied implementations and what
+2. [use-cases.md](use-cases.md) -- WoW ecosystem and general
+   embedding use cases
+3. [references.md](references.md) -- Studied implementations and what
    we learned from each
 
 ### 2. Compilation Pipeline
@@ -33,10 +35,16 @@ understanding the pipeline.
 
 ### 4. Execution and Memory
 
-1. [gc.md](gc.md) -- Arena with generational indices, mark-sweep,
+1. [callinfo.md](callinfo.md) -- Call stack frames, call/return protocol,
+   tail calls, vararg handling, error recovery
+2. [metatables.md](metatables.md) -- 17 metamethod events, dispatch
+   algorithms, type coercion, fast-path caching
+3. [gc.md](gc.md) -- Arena with generational indices, mark-sweep,
    weak tables, finalizers, collectgarbage() API
-2. [errors.md](errors.md) -- Result-based propagation, protected calls,
+4. [errors.md](errors.md) -- Result-based propagation, protected calls,
    error objects
+5. [coroutines.md](coroutines.md) -- Thread structure, resume/yield
+   protocols, GC interaction, coroutine library
 
 ### 5. External Interface
 
@@ -49,3 +57,8 @@ understanding the pipeline.
 
 1. [testing.md](testing.md) -- Unit tests, integration tests, PUC-Rio
    suite, behavioral equivalence
+
+### 7. Planning
+
+1. [roadmap.md](roadmap.md) -- Implementation phases, dependencies,
+   milestones

@@ -113,6 +113,9 @@ Each decision is documented in detail in its own file:
 | Error handling | Result-based | Idiomatic Rust, no longjmp | [errors.md](errors.md) |
 | Public API | Trait-based, Rust-idiomatic | Ergonomic embedding | [api.md](api.md) |
 | Standard library | Modular, per-library files | Independent testing, optional loading | [stdlib.md](stdlib.md) |
+| Call stack | Dynamic CallInfo array | Separate from value stack, index-based | [callinfo.md](callinfo.md) |
+| Metatables | PUC-Rio 5.1.1 dispatch semantics | 17 metamethods, type coercion rules | [metatables.md](metatables.md) |
+| Coroutines | Threads with shared GC heap | Independent stacks, cooperative multithreading | [coroutines.md](coroutines.md) |
 | Testing strategy | Spec-driven, multi-layer | Correctness assurance | [testing.md](testing.md) |
 
 ## Reference Implementations
