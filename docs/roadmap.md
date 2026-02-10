@@ -4,6 +4,26 @@ Step-by-step build order for rilua. Each chunk produces compilable,
 tested code. Later chunks depend on earlier ones. Testing is
 integrated at every step.
 
+## Current Status
+
+| Phase | Status | Tests |
+|-------|--------|-------|
+| 0: Skeleton + Test Infra | Done | Quality gate passes, oracle helpers work |
+| 1: Core Data Structures | Done | 143 unit tests + 10 oracle |
+| 2: Compilation Pipeline | Done | 354 unit tests + 10 oracle, bytecode matches `luac -l` |
+| 3: Core VM | Done | 466 total (431 unit + 16 integration + 19 oracle) |
+| 4: Language Features | Not started | -- |
+| 5: Standard Libraries | Not started | -- |
+| 6: Coroutines | Not started | -- |
+| 7: GC Collector | Not started | -- |
+| 8: Public API + CLI | Not started | -- |
+| 9: Compatibility | Not started | -- |
+
+Phase 3 audit found and fixed 9 bugs across the compiler and VM.
+60/60 oracle test cases pass against PUC-Rio Lua 5.1.1. The full
+quality gate (`cargo fmt -- --check && cargo clippy --all-targets &&
+cargo test && cargo doc --no-deps`) passes clean.
+
 ## Reference Tools
 
 PUC-Rio Lua 5.1.1 serves as the oracle for behavioral equivalence
@@ -34,7 +54,7 @@ Every chunk lists its specific tests. See `docs/testing.md` for the
 full testing strategy including the oracle comparison framework and
 progressive PUC-Rio test suite unlocking.
 
-## Phase 0: Project Skeleton + Test Infrastructure
+## Phase 0: Project Skeleton + Test Infrastructure [Done]
 
 **Goal**: Directory structure, error types, test helpers. Everything
 compiles and the quality gate passes.
@@ -60,7 +80,7 @@ Files: `tests/helpers/mod.rs`, `tests/helpers/oracle.rs`.
 **Tests**: Helper functions compile. Reference `lua` binary is
 callable. `run_reference("print(1+1)")` returns `"2\n"`.
 
-## Phase 1: Core Data Structures
+## Phase 1: Core Data Structures [Done]
 
 **Goal**: Val enum, GC arena, string interning, basic table.
 
@@ -163,7 +183,7 @@ Files: `src/vm/table.rs` (extends 1e).
 edge cases (sparse arrays, mixed keys, empty table), boundary
 detection matching PUC-Rio.
 
-## Phase 2: Compilation Pipeline
+## Phase 2: Compilation Pipeline [Done]
 
 **Goal**: Lex, parse, and compile Lua source to Proto bytecode.
 Bytecode comparison tests verify output matches `luac -l`.
@@ -328,10 +348,16 @@ Test cases:
 - Upvalue capture chains
 - Table constructors
 
-## Phase 3: Core VM
+## Phase 3: Core VM [Done]
 
 **Goal**: Execute bytecode. Run simple Lua programs end-to-end.
 Oracle comparison tests activate at the end of this phase.
+
+Phase 3 audit fixed 9 bugs: invertjump target, GT/GE expression
+order, VM comparison condition, boolean materialization, closure
+upvalue pseudo-instructions, push_ci/pop_ci desync, TESTSET vs TEST
+in jumponcond, set_multret calling set_one_ret, and multi-target
+assignment register allocation.
 
 ### 3a. CallInfo and VM state
 
@@ -818,18 +844,18 @@ throughout but becomes the focus after Phase 8.
 
 ## Milestones
 
-| Milestone | Criteria | Chunks |
-|-----------|----------|--------|
-| Skeleton builds | Phase 0 complete, quality gate passes | 0a-0b |
-| Data structures | Arena, Val, strings, tables work in isolation | 1a-1f |
-| First bytecode | Compile Lua to Proto, compare with `luac -l` | 2a-2i |
-| First execution | `print("hello world")` runs end-to-end | 3a-3e |
-| Language complete | All Lua 5.1.1 language semantics work | 4a-4d |
-| Stdlib complete | All 9 standard libraries implemented | 5a-5h |
-| Coroutines | resume/yield work, `closure.lua` passes | 6 |
-| GC functional | Incremental collection, `gc.lua` passes | 7a-7b |
-| Embeddable | Rust API functional, CLI matches PUC-Rio | 8a-8c |
-| Compatible | PUC-Rio test suite passing | 9 |
+| Milestone | Criteria | Chunks | Status |
+|-----------|----------|--------|--------|
+| Skeleton builds | Phase 0 complete, quality gate passes | 0a-0b | Done |
+| Data structures | Arena, Val, strings, tables work in isolation | 1a-1f | Done |
+| First bytecode | Compile Lua to Proto, compare with `luac -l` | 2a-2i | Done |
+| First execution | `print("hello world")` runs end-to-end | 3a-3e | Done |
+| Language complete | All Lua 5.1.1 language semantics work | 4a-4d | -- |
+| Stdlib complete | All 9 standard libraries implemented | 5a-5h | -- |
+| Coroutines | resume/yield work, `closure.lua` passes | 6 | -- |
+| GC functional | Incremental collection, `gc.lua` passes | 7a-7b | -- |
+| Embeddable | Rust API functional, CLI matches PUC-Rio | 8a-8c | -- |
+| Compatible | PUC-Rio test suite passing | 9 | -- |
 
 ## Chunk Summary
 

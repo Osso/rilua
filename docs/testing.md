@@ -7,8 +7,11 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Note: This document describes the planned testing strategy. The
-layers below are implemented incrementally as features are added.
+As of Phase 3 completion: 466 tests (431 unit, 16 integration,
+19 oracle). 60/60 oracle test cases pass against PUC-Rio 5.1.1.
+Layers 1-3 are active. Layer 4 (PUC-Rio test suite) activates
+after Phase 5a (base library). Layer 5 (behavioral equivalence)
+is partially active via oracle comparison tests.
 
 ## Test Layers
 
