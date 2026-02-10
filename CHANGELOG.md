@@ -21,8 +21,10 @@ and this project adheres to
     atomic phase, barriers, finalizers, incremental step sizing
   - `tables.md` -- array + hash dual representation with Brent's
     collision resolution, 3-phase resize, length operator algorithms
-  - `strings.md` -- interned strings with cached hash
-  - `closures.md` -- open/closed upvalue model
+  - `strings.md` -- interned strings with cached hash, PUC-Rio hash
+    algorithm, interning table, GC sweep mechanics, string fixation
+  - `closures.md` -- open/closed upvalue model, upvalue list structures,
+    findupval/close algorithms, OP_CLOSURE processing, GC interaction
   - `callinfo.md` -- call stack frames, call/return protocol, tail
     calls, vararg handling, error recovery
   - `metatables.md` -- 17 metamethod events, dispatch algorithms,
