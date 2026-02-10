@@ -17,6 +17,25 @@ Lua code must produce identical results.
 Part of the [WoW Emulation project](https://github.com/wowemulation-dev).
 Zero external dependencies -- only Rust's standard library.
 
+### Use Cases
+
+rilua is built for the World of Warcraft emulation ecosystem:
+
+- **Addon development and testing** -- Run and test WoW addons outside the
+  game client without launching WoW
+- **Server-side scripting** -- Embed in private server emulators (CMaNGOS,
+  TrinityCore, AzerothCore) for scripted encounters, quests, and NPC
+  behavior
+- **Client Lua environment emulation** -- Reproduce the WoW client's Lua
+  sandbox including restricted stdlib, taint system, and WoW-specific
+  extensions (bit library, string functions, global aliases)
+- **Addon compatibility testing** -- Automated test harness for verifying
+  addons against the Lua 5.1.1 spec
+
+It also serves as an embeddable Lua 5.1.1 interpreter for Rust applications
+and as a readable reference implementation for studying Lua internals.
+See `docs/use-cases.md` for details.
+
 ### Why Lua 5.1.1
 
 World of Warcraft's addon system uses Lua 5.1.1. Key 5.1-specific traits:
