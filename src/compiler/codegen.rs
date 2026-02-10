@@ -14,7 +14,7 @@ use super::parser;
 
 use crate::vm::instructions::{
     BITRK, Instruction, LFIELDS_PER_FLUSH, LUAI_MAXUPVALUES, LUAI_MAXVARS, MAXARG_BX, MAXINDEXRK,
-    MAXSTACK, NO_JUMP, OpCode, is_k,
+    MAXSTACK, NO_JUMP, NO_REG, OpCode, is_k,
 };
 use crate::vm::proto::{LocalVar, Proto};
 use crate::vm::value::Val;
@@ -372,11 +372,14 @@ impl Compiler {
     }
 
     /// Patches all jumps in `list` to target `target`.
-    pub(crate) fn patch_list(&mut self, mut list: i32, target: usize) {
-        while list != NO_JUMP {
-            let next = self.get_jump_target(list as usize);
-            self.patch_jump(list as usize, target);
-            list = next;
+    /// If target is the current pc, delegates to `patch_to_here` (lazy patching).
+    /// Otherwise uses `patch_list_aux` with NO_REG.
+    /// Maps to PUC-Rio's `luaK_patchlist`.
+    pub(crate) fn patch_list(&mut self, list: i32, target: usize) {
+        if target == self.fs().pc() {
+            self.patch_to_here(list);
+        } else {
+            self.patch_list_aux(list, target, NO_REG, target);
         }
     }
 
@@ -393,9 +396,67 @@ impl Compiler {
         let jpc = self.fs().jpc;
         if jpc != NO_JUMP {
             let pc = self.fs().pc();
-            self.patch_list(jpc, pc);
+            self.patch_list_aux(jpc, pc, NO_REG, pc);
             self.fs_mut().jpc = NO_JUMP;
         }
+    }
+
+    /// Checks whether any jump in `list` requires a value (i.e., the control
+    /// instruction is NOT a TESTSET). Maps to PUC-Rio's `need_value`.
+    fn need_value(&self, mut list: i32) -> bool {
+        while list != NO_JUMP {
+            let ctrl = self.get_jump_control(list as usize);
+            let instr = self.get_instruction(ctrl);
+            if instr.opcode() != OpCode::TestSet {
+                return true;
+            }
+            list = self.get_jump_target(list as usize);
+        }
+        false
+    }
+
+    /// If the control instruction at `node` is TESTSET, patches it:
+    /// - If `reg != NO_REG` and `reg != B`, sets A = reg (value destination)
+    /// - Otherwise, converts TESTSET to TEST (discards the value)
+    /// Returns true if the instruction was TESTSET.
+    /// Maps to PUC-Rio's `patchtestreg`.
+    fn patch_test_reg(&mut self, node: usize, reg: u32) -> bool {
+        let ctrl = self.get_jump_control(node);
+        let instr = self.get_instruction(ctrl);
+        if instr.opcode() != OpCode::TestSet {
+            return false;
+        }
+        if reg != NO_REG && reg != instr.b() {
+            let mut patched = instr;
+            patched.set_a(reg);
+            self.set_instruction(ctrl, patched);
+        } else {
+            // Convert TESTSET to TEST: TEST B _ C
+            let replacement = Instruction::abc(OpCode::Test, instr.b(), 0, instr.c());
+            self.set_instruction(ctrl, replacement);
+        }
+        true
+    }
+
+    /// Patches a jump list with separate targets for TESTSET jumps (`vtarget`)
+    /// and other jumps (`dtarget`). Maps to PUC-Rio's `patchlistaux`.
+    fn patch_list_aux(&mut self, mut list: i32, vtarget: usize, reg: u32, dtarget: usize) {
+        while list != NO_JUMP {
+            let next = self.get_jump_target(list as usize);
+            if self.patch_test_reg(list as usize, reg) {
+                self.patch_jump(list as usize, vtarget);
+            } else {
+                self.patch_jump(list as usize, dtarget);
+            }
+            list = next;
+        }
+    }
+
+    /// Emits `LOADBOOL reg, b, jump` after calling `get_label`.
+    /// Maps to PUC-Rio's `code_label`.
+    fn code_label(&mut self, reg: u32, b: u32, jump: u32, line: u32) -> usize {
+        self.get_label();
+        self.emit_abc(OpCode::LoadBool, reg, b, jump, line)
     }
 
     // -- Constant pool --
@@ -820,25 +881,46 @@ impl Compiler {
     }
 
     /// Emits code to place an expression value into register `reg`.
+    /// When the expression has jump lists (e.g., comparison results),
+    /// emits LOADBOOL pair to materialize the boolean value.
+    /// Maps to PUC-Rio's `exp2reg`.
+    #[allow(clippy::cast_sign_loss)]
     pub(crate) fn exp2reg(&mut self, e: &mut ExprContext, reg: u32, line: u32) {
         self.discharge2reg(e, reg, line);
-        // Handle pending jumps
         if e.kind == ExprKind::Jmp {
             let mut e_t = e.t;
             self.concat_jumps(&mut e_t, e.info);
             e.t = e_t;
         }
         if e.has_jumps() {
-            // Need to patch true/false jump lists
-            let p_f = NO_JUMP;
-            let p_t = NO_JUMP;
-            // For simple cases without conditional jumps, just patch
-            if p_f == NO_JUMP && p_t == NO_JUMP {
-                // No conditional patching needed
+            let mut p_f = NO_JUMP; // position of eventual LOADBOOL false
+            let mut p_t = NO_JUMP; // position of eventual LOADBOOL true
+            if self.need_value(e.t) || self.need_value(e.f) {
+                let fj = if e.kind == ExprKind::Jmp {
+                    NO_JUMP
+                } else {
+                    self.emit_jump(line) as i32
+                };
+                p_f = self.code_label(reg, 0, 1, line) as i32; // LOADBOOL reg 0 1 (false, skip)
+                p_t = self.code_label(reg, 1, 0, line) as i32; // LOADBOOL reg 1 0 (true)
+                self.patch_to_here(fj);
             }
-            let pc = self.fs().pc();
-            self.patch_list(e.f, pc);
-            self.patch_list(e.t, pc);
+            let final_pc = self.get_label();
+            // When p_f/p_t are NO_JUMP, all jumps in that list must be
+            // TESTSET (need_value was false), so dtarget is never reached.
+            // Use final_pc as a safe fallback.
+            let dt_f = if p_f == NO_JUMP {
+                final_pc
+            } else {
+                p_f as usize
+            };
+            let dt_t = if p_t == NO_JUMP {
+                final_pc
+            } else {
+                p_t as usize
+            };
+            self.patch_list_aux(e.f, final_pc, reg, dt_f);
+            self.patch_list_aux(e.t, final_pc, reg, dt_t);
         }
         e.f = NO_JUMP;
         e.t = NO_JUMP;
@@ -882,6 +964,18 @@ impl Compiler {
         }
         e.info = reg as i32;
         e.kind = ExprKind::NonReloc;
+    }
+
+    /// Ensures expression is in any register. If already in a register
+    /// (NonReloc), does nothing. Otherwise reserves a new register and
+    /// discharges to it. Maps to PUC-Rio's `discharge2anyreg`.
+    fn discharge2anyreg(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<()> {
+        if e.kind != ExprKind::NonReloc {
+            self.reserve_regs(1)?;
+            let reg = u32::from(self.fs().free_reg) - 1;
+            self.discharge2reg(e, reg, line);
+        }
+        Ok(())
     }
 
     /// Converts expression to RK format (register or constant).
@@ -969,7 +1063,7 @@ impl Compiler {
 
     /// Converts expression to "go if true" — jumps to the false list on false.
     /// Maps to PUC-Rio's `luaK_goiftrue`.
-    pub(crate) fn goiftrue(&mut self, e: &mut ExprContext, line: u32) {
+    pub(crate) fn goiftrue(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<()> {
         self.discharge_vars(e, line);
         let pc = match e.kind {
             ExprKind::K | ExprKind::KNum | ExprKind::True => {
@@ -980,7 +1074,7 @@ impl Compiler {
                 self.invertjump(e);
                 e.info
             }
-            _ => self.jumponcond(e, false, line),
+            _ => self.jumponcond(e, false, line)?,
         };
         // Insert the jump into the false list
         let mut f = e.f;
@@ -988,11 +1082,12 @@ impl Compiler {
         e.f = f;
         self.patch_to_here(e.t);
         e.t = NO_JUMP;
+        Ok(())
     }
 
     /// Converts expression to "go if false" — jumps to the true list on true.
     /// Maps to PUC-Rio's `luaK_goiffalse`.
-    pub(crate) fn goiffalse(&mut self, e: &mut ExprContext, line: u32) {
+    pub(crate) fn goiffalse(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<()> {
         self.discharge_vars(e, line);
         let pc = match e.kind {
             ExprKind::Nil | ExprKind::False => {
@@ -1000,7 +1095,7 @@ impl Compiler {
             }
             ExprKind::True => self.emit_jump(line) as i32,
             ExprKind::Jmp => e.info,
-            _ => self.jumponcond(e, true, line),
+            _ => self.jumponcond(e, true, line)?,
         };
         // Insert the jump into the true list
         let mut t = e.t;
@@ -1008,36 +1103,62 @@ impl Compiler {
         e.t = t;
         self.patch_to_here(e.f);
         e.f = NO_JUMP;
+        Ok(())
     }
 
-    /// Inverts the condition of a jump instruction.
+    /// Returns the pc of the "control" instruction for a given jump.
+    ///
+    /// If the instruction before the JMP is a test-mode instruction
+    /// (EQ, LT, LE, TEST, TESTSET), returns its pc. Otherwise returns
+    /// the JMP's own pc.
+    ///
+    /// Maps to PUC-Rio's `getjumpcontrol`.
+    fn get_jump_control(&self, pc: usize) -> usize {
+        if pc >= 1 {
+            let prev = self.get_instruction(pc - 1);
+            if prev.opcode().is_test_mode() {
+                return pc - 1;
+            }
+        }
+        pc
+    }
+
+    /// Inverts the condition of a comparison/test instruction before a JMP.
+    ///
+    /// Maps to PUC-Rio's `invertjump`. Uses `get_jump_control` to find the
+    /// comparison instruction (at `pc - 1`), not the JMP itself.
     fn invertjump(&mut self, e: &ExprContext) {
-        let pc = e.info as usize;
-        let mut instr = self.get_instruction(pc);
+        let jmp_pc = e.info as usize;
+        let ctrl_pc = self.get_jump_control(jmp_pc);
+        let mut instr = self.get_instruction(ctrl_pc);
         let a = instr.a();
         instr.set_a(u32::from(a == 0));
-        self.set_instruction(pc, instr);
+        self.set_instruction(ctrl_pc, instr);
     }
 
     /// Emits TEST + JMP for conditional expression.
     /// Returns the pc of the JMP instruction.
-    fn jumponcond(&mut self, e: &mut ExprContext, cond: bool, line: u32) -> i32 {
-        // If expression is a relocable NOT instruction, optimize
+    fn jumponcond(&mut self, e: &mut ExprContext, cond: bool, line: u32) -> LuaResult<i32> {
+        // If expression is a relocable NOT instruction, optimize:
+        // remove the NOT, emit TEST with inverted condition + JMP.
         if e.kind == ExprKind::Relocable {
             let instr = self.get_instruction(e.info as usize);
             if instr.opcode() == OpCode::Not {
-                // Remove the NOT, emit TESTSET with inverted condition
                 self.fs_mut().proto.code.pop();
                 self.fs_mut().proto.line_info.pop();
                 let cond_val = u32::from(!cond);
-                return self.emit_abc(OpCode::Test, instr.b(), 0, cond_val, line) as i32;
+                self.emit_abc(OpCode::Test, instr.b(), 0, cond_val, line);
+                return Ok(self.emit_jump(line) as i32);
             }
         }
-        self.discharge2reg(e, e.info as u32, line);
+        // General case: discharge to any register, emit TESTSET + JMP.
+        // TESTSET with A=NO_REG enables patch_test_reg to later set
+        // the target register for and/or value propagation.
+        self.discharge2anyreg(e, line)?;
         self.free_expr(e);
         let cond_val = u32::from(cond);
-        self.emit_abc(OpCode::Test, e.info as u32, 0, cond_val, line);
-        self.emit_jump(line) as i32
+        self.emit_abc(OpCode::TestSet, NO_REG, e.info as u32, cond_val, line);
+        Ok(self.emit_jump(line) as i32)
     }
 
     // -- Expression value conversion --
@@ -1056,7 +1177,9 @@ impl Compiler {
 
     /// Sets an expression to multi-return mode (B=0 for calls, vararg).
     pub(crate) fn set_multret(&mut self, e: &mut ExprContext) {
-        self.set_one_ret(e);
+        // Directly patch for MULTRET without calling set_one_ret.
+        // PUC-Rio's luaK_setmultret calls luaK_setreturns(fs, e, LUA_MULTRET)
+        // which sets C=0 for CALL and B=0 for VARARG.
         if e.kind == ExprKind::Call {
             let mut instr = self.get_instruction(e.info as usize);
             instr.set_c(0); // 0 = multi-return
@@ -1064,7 +1187,9 @@ impl Compiler {
         } else if e.kind == ExprKind::VarArg {
             let mut instr = self.get_instruction(e.info as usize);
             instr.set_b(0); // 0 = multi-return
+            instr.set_a(u32::from(self.fs().free_reg));
             self.set_instruction(e.info as usize, instr);
+            self.reserve_regs(1).ok(); // PUC-Rio reserves one register
             e.kind = ExprKind::Relocable;
         }
     }
@@ -1151,13 +1276,18 @@ impl Compiler {
         e2: &mut ExprContext,
         line: u32,
     ) -> LuaResult<()> {
-        let b = self.exp2rk(e1, line)?;
-        let c = self.exp2rk(e2, line)?;
+        let mut b = self.exp2rk(e1, line)?;
+        let mut c = self.exp2rk(e2, line)?;
         self.free_expr(e2);
         self.free_expr(e1);
-        // For swapped operands (GT, GE), swap b and c
+        let mut cond = cond;
+        // For GT/GE (cond=0, non-EQ), swap operands and set cond=1.
+        // This matches PUC-Rio's codecomp: the caller passes swapped
+        // expression args with cond=0, and we swap the RK indices back
+        // while flipping cond to 1.
         if cond == 0 && op != OpCode::Eq {
-            // Already handled at caller by choosing the right opcode
+            std::mem::swap(&mut b, &mut c);
+            cond = 1;
         }
         self.emit_abc(op, cond, b, c, line);
         let jmp = self.emit_jump(line);
@@ -1179,10 +1309,10 @@ impl Compiler {
     ) -> LuaResult<()> {
         match op {
             super::ast::BinOp::And => {
-                self.goiftrue(e, line);
+                self.goiftrue(e, line)?;
             }
             super::ast::BinOp::Or => {
-                self.goiffalse(e, line);
+                self.goiffalse(e, line)?;
             }
             super::ast::BinOp::Concat => {
                 self.exp2nextreg(e, line)?;
@@ -1258,9 +1388,11 @@ impl Compiler {
             super::ast::BinOp::Ne => self.code_comp(OpCode::Eq, 0, e1, e2, line)?,
             super::ast::BinOp::Lt => self.code_comp(OpCode::Lt, 1, e1, e2, line)?,
             super::ast::BinOp::Le => self.code_comp(OpCode::Le, 1, e1, e2, line)?,
-            // GT and GE swap operands
-            super::ast::BinOp::Gt => self.code_comp(OpCode::Lt, 1, e2, e1, line)?,
-            super::ast::BinOp::Ge => self.code_comp(OpCode::Le, 1, e2, e1, line)?,
+            // GT and GE: pass cond=0; code_comp swaps the RK indices
+            // internally and sets cond=1 (matching PUC-Rio's codecomp).
+            // Expression args are NOT swapped — the swap is on o1/o2 inside.
+            super::ast::BinOp::Gt => self.code_comp(OpCode::Lt, 0, e1, e2, line)?,
+            super::ast::BinOp::Ge => self.code_comp(OpCode::Le, 0, e1, e2, line)?,
         }
         Ok(())
     }
@@ -1493,11 +1625,10 @@ fn compile_assign(
     values: &[super::ast::Expr],
     line: u32,
 ) -> LuaResult<()> {
-    // Compile all targets to get their variable locations
+    // Compile all targets to get their variable locations.
     let mut target_exprs: Vec<ExprContext> = Vec::new();
     for target in targets {
         let e = compile_expr(compiler, target)?;
-        // For indexed targets, we need to ensure the table is in a register
         if e.kind != ExprKind::Local
             && e.kind != ExprKind::Upval
             && e.kind != ExprKind::Global
@@ -1512,40 +1643,40 @@ fn compile_assign(
         target_exprs.push(e);
     }
 
-    // Compile all values
     let nvars = targets.len();
     let (nexps, mut last_e) = compile_exprlist(compiler, values, line)?;
 
-    // Adjust: if fewer values than variables, pad with nil; if more, discard
-    if nexps < nvars {
+    // Following PUC-Rio's `assignment` pattern:
+    // When nexps == nvars: store last value directly to last target,
+    // then assign remaining targets from free_reg-1 (reverse order).
+    // When nexps != nvars: adjust first, then assign all from free_reg-1.
+    if nexps != nvars {
         adjust_assign(compiler, nvars, nexps, &mut last_e, line)?;
-    } else if nexps > nvars {
-        // Extra values: discard by resetting free_reg
+        #[allow(clippy::cast_possible_truncation)]
         if nexps > nvars {
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                compiler.fs_mut().free_reg -= (nexps - nvars) as u8;
-            }
+            compiler.fs_mut().free_reg -= (nexps - nvars) as u8;
         }
-    }
-
-    // Store values to targets (in reverse order for multi-assign)
-    // For the last target, use the last expression directly if counts match
-    if nexps == nvars && nvars > 0 {
+        // All targets assigned from free_reg-1 in reverse.
+        for target in target_exprs.iter().rev() {
+            let reg = u32::from(compiler.fs().free_reg) - 1;
+            let mut val_e = ExprContext::new(ExprKind::NonReloc, reg as i32);
+            let t = *target;
+            compiler.storevar(&t, &mut val_e, line)?;
+        }
+    } else {
+        // nexps == nvars: last target gets the last expression directly.
         compiler.set_one_ret(&mut last_e);
-        let target = target_exprs[nvars - 1];
-        compiler.storevar(&target, &mut last_e, line)?;
-        target_exprs.pop();
-    }
-
-    // Store remaining targets from registers
-    for (i, target) in target_exprs.iter().enumerate().rev() {
-        let reg = u32::from(compiler.fs().num_active_vars)
-            + (values.len().min(nvars) as u32).saturating_sub(1)
-            - (target_exprs.len() as u32 - 1 - i as u32);
-        let mut val_e = ExprContext::new(ExprKind::NonReloc, reg as i32);
-        let t = *target;
-        compiler.storevar(&t, &mut val_e, line)?;
+        let last_target = target_exprs[nvars - 1];
+        compiler.storevar(&last_target, &mut last_e, line)?;
+        // Remaining targets in reverse, each using free_reg-1.
+        // storevar calls freeexp which decrements free_reg, so each
+        // iteration naturally picks up the next value register.
+        for i in (0..nvars - 1).rev() {
+            let reg = u32::from(compiler.fs().free_reg) - 1;
+            let mut val_e = ExprContext::new(ExprKind::NonReloc, reg as i32);
+            let t = target_exprs[i];
+            compiler.storevar(&t, &mut val_e, line)?;
+        }
     }
 
     Ok(())
@@ -1585,7 +1716,7 @@ fn compile_while(
 ) -> LuaResult<()> {
     let whileinit = compiler.get_label();
     let mut cond_e = compile_expr(compiler, condition)?;
-    compiler.goiftrue(&mut cond_e, line);
+    compiler.goiftrue(&mut cond_e, line)?;
     let condexit = cond_e.f;
 
     compiler.enter_block(true); // breakable
@@ -1610,7 +1741,7 @@ fn compile_repeat(
     compile_block(compiler, body)?;
 
     let mut cond_e = compile_expr(compiler, condition)?;
-    compiler.goiftrue(&mut cond_e, line);
+    compiler.goiftrue(&mut cond_e, line)?;
     let condexit = cond_e.f;
 
     compiler.leave_block(); // scope
@@ -1631,7 +1762,7 @@ fn compile_if(
 
     // First condition + body (the 'if' part)
     let mut cond_e = compile_expr(compiler, &conditions[0])?;
-    compiler.goiftrue(&mut cond_e, line);
+    compiler.goiftrue(&mut cond_e, line)?;
     let mut flist = cond_e.f;
 
     compile_block_scoped(compiler, &bodies[0])?;
@@ -1643,7 +1774,7 @@ fn compile_if(
         compiler.patch_to_here(flist);
 
         let mut cond_e = compile_expr(compiler, &conditions[i])?;
-        compiler.goiftrue(&mut cond_e, line);
+        compiler.goiftrue(&mut cond_e, line)?;
         flist = cond_e.f;
 
         compile_block_scoped(compiler, &bodies[i])?;
@@ -1840,14 +1971,16 @@ fn compile_return(
         compiler.emit_abc(OpCode::Return, 0, 1, 0, line);
     } else if values.len() == 1 {
         let mut e = compile_expr(compiler, &values[0])?;
-        // Check for tail call BEFORE discharging (exp2anyreg changes kind)
-        if e.kind == ExprKind::Call {
-            let instr = compiler.get_instruction(e.info as usize);
-            if instr.opcode() == OpCode::Call {
-                let tail = Instruction::abc(OpCode::TailCall, instr.a(), instr.b(), 0);
-                compiler.set_instruction(e.info as usize, tail);
+        // Check for multi-return (call or vararg) BEFORE discharging.
+        if e.kind == ExprKind::Call || e.kind == ExprKind::VarArg {
+            // Tail call optimization: only for single CALL (not VARARG)
+            if e.kind == ExprKind::Call {
+                let instr = compiler.get_instruction(e.info as usize);
+                if instr.opcode() == OpCode::Call {
+                    let tail = Instruction::abc(OpCode::TailCall, instr.a(), instr.b(), 0);
+                    compiler.set_instruction(e.info as usize, tail);
+                }
             }
-            // For tail calls, set multi-return and use RETURN base 0
             compiler.set_multret(&mut e);
             let first = u32::from(compiler.fs().num_active_vars);
             compiler.emit_abc(OpCode::Return, first, 0, 0, line);
@@ -2006,6 +2139,12 @@ fn compile_funcbody(
 
     compiler.fs_mut().proto.last_line_defined = compiler.current_line;
 
+    // Save child's upvalue descriptors before leave_function discards them.
+    // PUC-Rio accesses func->upvalues in pushclosure while the child
+    // FuncState is still alive; we save a copy because leave_function
+    // pops the FuncState entirely.
+    let child_upvalues = compiler.fs().upvalues.clone();
+
     // Leave function — emits final RETURN and pops FuncState
     let proto = compiler.leave_function();
 
@@ -2018,9 +2157,18 @@ fn compile_funcbody(
     #[allow(clippy::cast_possible_truncation)]
     let pc = compiler.emit_abx(OpCode::Closure, 0, proto_idx as u32, line);
 
-    // Emit pseudo-instructions for upvalue capture
-    // (In PUC-Rio, CLOSURE is followed by MOVE/GETUPVAL for each upvalue)
-    // For now, upvalue capture will be added when we have full upvalue support
+    // Emit pseudo-instructions for upvalue capture.
+    // Each upvalue has a MOVE (local from current frame) or
+    // GETUPVAL (inherited from parent's upvalues). Maps to PUC-Rio's
+    // pushclosure loop.
+    for uv in &child_upvalues {
+        let op = if uv.in_stack {
+            OpCode::Move
+        } else {
+            OpCode::GetUpval
+        };
+        compiler.emit_abc(op, 0, u32::from(uv.index), 0, line);
+    }
 
     let e = ExprContext::new(ExprKind::Relocable, pc as i32);
     Ok(e)

@@ -785,9 +785,9 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
                     let equal = val_equal(b_val, c_val, &state.gc);
-                    let expected = a != 0; // A field used as boolean
+                    // PUC-Rio: if (result == A) then dojump; else skip JMP
+                    let expected = a != 0;
                     if equal == expected {
-                        // Jump: read sBx from the next instruction.
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
                         pc = ((pc as i64) + (jump_instr.sbx() as i64)) as usize;
                     }
@@ -798,6 +798,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
                     let result = val_less_than(b_val, c_val, &state.gc, &proto, pc)?;
+                    // PUC-Rio: if (result == A) then dojump; else skip JMP
                     let expected = a != 0;
                     if result == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
@@ -810,6 +811,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
                     let result = val_less_equal(b_val, c_val, &state.gc, &proto, pc)?;
+                    // PUC-Rio: if (result == A) then dojump; else skip JMP
                     let expected = a != 0;
                     if result == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);

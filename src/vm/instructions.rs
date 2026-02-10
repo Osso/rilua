@@ -228,6 +228,21 @@ impl OpCode {
         }
     }
 
+    /// Returns `true` if this opcode is a "test mode" instruction.
+    ///
+    /// Test mode opcodes use the A field as a boolean condition flag
+    /// and are always followed by a JMP instruction. Used by
+    /// `getjumpcontrol` to find the control instruction before a JMP.
+    ///
+    /// Maps to PUC-Rio's `testTMode` / `luaP_opmodes` OpArgMask flag.
+    #[must_use]
+    pub fn is_test_mode(self) -> bool {
+        matches!(
+            self,
+            Self::Eq | Self::Lt | Self::Le | Self::Test | Self::TestSet
+        )
+    }
+
     /// Returns the opcode name matching PUC-Rio's `luaP_opnames`.
     #[must_use]
     pub fn name(self) -> &'static str {

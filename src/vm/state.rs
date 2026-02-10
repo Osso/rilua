@@ -275,11 +275,17 @@ impl LuaState {
 
     /// Pushes a new CallInfo frame onto the call stack.
     ///
-    /// Increments `ci` to point to the new frame. Returns a mutable
-    /// reference to the new CallInfo for further initialization.
+    /// Writes at `ci + 1`, reusing stale slots left by previous `pop_ci`
+    /// calls. Only appends when no reusable slot exists. This matches
+    /// PUC-Rio's linked-list reuse pattern for `CallInfo` frames.
     pub fn push_ci(&mut self, ci: CallInfo) -> &mut CallInfo {
-        self.call_stack.push(ci);
-        self.ci = self.call_stack.len() - 1;
+        let new_idx = self.ci + 1;
+        if new_idx < self.call_stack.len() {
+            self.call_stack[new_idx] = ci;
+        } else {
+            self.call_stack.push(ci);
+        }
+        self.ci = new_idx;
         &mut self.call_stack[self.ci]
     }
 
