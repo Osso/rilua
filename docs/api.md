@@ -297,9 +297,153 @@ fn main() -> rilua::Result<()> {
 }
 ```
 
+## Internal Stack Model
+
+Internally, rilua uses a virtual stack similar to PUC-Rio's C API
+for stdlib function implementation. Understanding this model is
+necessary for implementing stdlib functions and the debug library.
+
+### Stack Index Addressing
+
+Stack indices address values relative to the current call frame:
+
+| Index type | Range | Resolution |
+|-----------|-------|------------|
+| Positive | 1, 2, 3, ... | Base-relative: `base + index - 1` |
+| Negative | -1, -2, -3, ... | Top-relative: `top + index` |
+| Pseudo-index | special constants | Registry, globals, environment, upvalues |
+
+**Pseudo-indices** provide access to non-stack locations:
+
+| Pseudo-index | Target |
+|-------------|--------|
+| `REGISTRY_INDEX` | Global registry table (shared across all threads) |
+| `GLOBALS_INDEX` | Current thread's global table |
+| `ENVIRON_INDEX` | Current function's environment table |
+| Upvalue indices | C closure upvalue slots (one per captured value) |
+
+### Push/Get Protocol
+
+**Push operations** write to `stack[top]` then increment `top`.
+Operations that allocate GC objects (strings, tables, closures)
+trigger a GC check. Operations on immediate values (nil, boolean,
+number) do not.
+
+**Get operations** read from the addressed stack slot. Most are
+non-mutating. Exception: number-to-string conversion mutates the
+stack slot in place and triggers a GC check (string allocation).
+
+**C closure upvalues** are stored as values directly inside the
+closure struct (not as UpVal objects like Lua closures). When
+creating a C closure with `n` upvalues, the top `n` stack values
+are popped and copied into the closure's upvalue array.
+
+### Table Operations
+
+**With metamethods** (`gettable`/`settable`): invoke the full
+`__index`/`__newindex` chain (up to 100 iterations). `gettable`
+takes the key from the stack top, replaces it with the result.
+`settable` takes key and value from the top, pops both.
+
+**Without metamethods** (`rawget`/`rawset`): bypass the metamethod
+chain. Call `luaH_get`/`luaH_set` directly. The raw variants require
+the target to be a table (not just anything with a metatable).
+
+**Integer shortcuts** (`rawgeti`/`rawseti`): take the integer key
+as a parameter instead of from the stack.
+
+### Call Protocol
+
+1. Push the function onto the stack.
+2. Push arguments in order (first argument pushed first).
+3. Call with `(nargs, nresults)`.
+4. The function and all arguments are removed.
+5. `nresults` results are pushed (excess discarded, missing padded
+   with nil). `MULTRET` (-1) means push all results.
+
+**Protected calls** return a status code. On error, the function and
+arguments are replaced by a single error message on the stack. An
+optional error handler function is specified by stack index (converted
+to a stack offset internally because the stack may be reallocated).
+
+### Registry and Environments
+
+**The registry** is a global table stored in the shared state. It is
+accessible via the registry pseudo-index. C libraries use it to store
+private data (metatables, module state, references) that should not
+be accessible from Lua code.
+
+**Function environments**: every closure (C or Lua) has an associated
+environment table. For Lua closures, the environment is the table
+used for global variable lookups. The environment is captured from
+the creating function when a new closure is created.
+
+**Thread environments**: each thread has its own global table. The
+main thread's global table is the default environment for new
+closures.
+
+### Reference System
+
+The reference system provides a way to store Lua values in a table
+(typically the registry) and retrieve them later by integer handle.
+It is a free-list allocator using integer keys:
+
+- `ref(table)` pops a value from the stack, stores it at an integer
+  key. If there is a free slot (from a previous `unref`), it reuses
+  it. Otherwise appends at `#table + 1`.
+- `unref(table, ref)` adds the slot back to the free list.
+- `table[0]` stores the free list head. Each free slot stores the
+  index of the next free slot as its value.
+- Special constants: `REF_NIL` (-1) for nil values (never stored),
+  `NO_REF` (-2) for invalid references.
+
+### Library Registration Protocol
+
+Each standard library is loaded by pushing its opener function,
+pushing the library name as argument, then calling. The opener:
+
+1. Creates a table for the library (or reuses an existing one from
+   `_LOADED`).
+2. Registers all functions via closure creation and field assignment.
+3. Stores the table in both `_LOADED[name]` and as a global.
+
+The base library uses an empty name and registers directly into the
+global table.
+
+### GC Handle Safety
+
+Values on the Lua stack (between `stack[0]` and `stack[top-1]`) are
+marked as reachable during GC traversal. This is the primary
+mechanism for protecting values from collection.
+
+**Stack traversal during GC**:
+
+1. Mark the thread's global table.
+2. Mark all values from `stack[0]` to `stack[top-1]`.
+3. Nil out slots from `top` to the maximum `ci.top` across all call
+   frames (clears stale references).
+
+**GC checks** (`checkGC`) run after operations that allocate GC
+objects. The check occurs before the allocation in the API function,
+which is safe because the new object does not exist yet. After
+allocation, the object is immediately placed on the stack (making it
+reachable).
+
+**Write barriers** maintain the tri-color invariant during
+incremental GC:
+
+- **Forward barrier**: when a black object (already traversed) gets
+  a white value (not yet traversed) stored into it, the white value
+  is immediately marked.
+- **Back barrier** (for tables): the table is re-grayed so it will
+  be re-traversed.
+
+C closure upvalues and table entries both require write barriers when
+mutated through the API.
+
 ## Compatibility Note
 
 While the public API is Rust-idiomatic, internal implementation
-may expose a lower-level stack-based API for stdlib functions
-that mirrors PUC-Rio's `lua_*` conventions. This is an internal
-detail, not part of the public API.
+uses a lower-level stack-based API for stdlib functions that mirrors
+PUC-Rio's `lua_*` conventions. This is an internal detail, not part
+of the public API.

@@ -52,6 +52,63 @@ Global functions not in any table.
 | `_VERSION` | Required | `"Lua 5.1"` |
 | `newproxy` | Optional | Undocumented, creates proxy userdata |
 
+#### Base Library Behavioral Notes
+
+**`assert(v [, message])`** — if `v` is nil or false, calls
+`error(message)`. Default message is `"assertion failed!"`. Returns
+all arguments on success.
+
+**`error(message [, level])`** — level 0 means no position prefix.
+Level 1 (default) prefixes with the current function's location.
+Level 2 uses the caller's location, etc. If message is not a string,
+no position prefix is added.
+
+**`getfenv(f)`** — `f` can be a function or a number (stack level).
+Level 0 returns the thread environment. Level 1 (default) returns
+the current function's environment. `getfenv(0)` differs from
+`getfenv()` (the latter defaults to level 1).
+
+**`getmetatable(object)`** — if the metatable has a `__metatable`
+field, returns that field's value instead of the actual metatable.
+This protects metatables from user inspection.
+
+**`ipairs(t)`** — returns an iterator function, the table, and 0.
+The iterator returns `index, value` pairs starting at 1 until
+`t[index]` is nil. Uses raw access (no metamethods).
+
+**`pcall(f, ...)`** — calls `f(...)` in protected mode. Returns
+`true, results...` on success or `false, error` on failure. The
+error object can be any type, not just strings.
+
+**`select(index, ...)`** — if index is `"#"`, returns the count of
+remaining arguments. If index is negative, counts from the end.
+Error: `"index out of range"` if the resulting position is < 1.
+
+**`setfenv(f, table)`** — level 0 changes the thread environment
+(returns nothing). Cannot change environments of C functions (error:
+`"'setfenv' cannot change environment of given object"`).
+
+**`setmetatable(table, metatable)`** — first arg must be a table
+(not userdata). If the existing metatable has a `__metatable` field,
+error: `"cannot change a protected metatable"`.
+
+**`tonumber(e [, base])`** — base 10 uses `lua_isnumber` (handles
+strings, hex `0xff`, whitespace). Other bases (2-36) use unsigned
+integer conversion only. Returns nil on failure.
+
+**`tostring(e)`** — checks `__tostring` metamethod first. Without
+metamethod: numbers use `"%.14g"` format, booleans produce
+`"true"`/`"false"`, nil produces `"nil"`, other types produce
+`"typename: pointer"`.
+
+**`unpack(list [, i [, j]])`** — `i` defaults to 1, `j` defaults to
+`#list`. Returns `list[i]` through `list[j]` using raw access. Error:
+`"table too big to unpack"` if the range exceeds stack space.
+
+**`xpcall(f, err)`** — calls `f()` with zero arguments (extra args
+are discarded). The error handler receives the original error object
+and its return value becomes the error returned by `xpcall`.
+
 ### Coroutine Library (registered by `luaopen_base`)
 
 The coroutine library is registered as the `coroutine` table by
@@ -94,6 +151,96 @@ classes (`%a`, `%d`, `%w`, etc.), anchors (`^`, `$`), quantifiers
 (`*`, `+`, `-`, `?`), captures, and backreferences (`%1` through
 `%9` to match a previous capture). They do not support alternation.
 
+#### String Library Behavioral Notes
+
+**`string.byte(s [, i [, j]])`** — `i` defaults to 1, `j` defaults
+to `i`. Negative positions count from end. Returns one integer per
+byte (0-255). Stack check: `"string slice too long"`.
+
+**`string.char(...)`** — each argument must be 0-255 (error:
+`"invalid value"`). No arguments returns empty string.
+
+**`string.dump(function)`** — function must be a Lua function, not a
+C function (error: `"unable to dump given function"`).
+
+**`string.find(s, pattern [, init [, plain]])`** — `init` defaults
+to 1 (negative counts from end). Plain mode does literal substring
+search. Returns `start, end, captures...` on match, nil on failure.
+Positions are 1-based.
+
+**`string.format(formatstring, ...)`** — specifiers: `c d i o u x X
+e E f g G q s` and `%%`. Flags: `- + (space) # 0`. Width/precision
+max 2 digits each. `%q` produces a Lua-readable quoted string
+(escapes `"`, `\`, newlines, `\r`, `\0`). `%s` with no precision and
+string >= 100 chars pushes directly (no truncation).
+
+**`string.gmatch(s, pattern)`** — returns an iterator. Each call
+returns the next match's captures. Empty matches advance by 1
+character to prevent infinite loops.
+
+**`string.gsub(s, pattern, repl [, n])`** — replacement can be
+string (`%0`=match, `%1`-`%9`=captures, `%%`=literal %), function
+(called with captures; falsy return keeps original), or table
+(first capture as key; falsy result keeps original). Returns the
+result string and substitution count.
+
+**`string.sub(s, i [, j])`** — `j` defaults to -1 (end of string).
+Negative positions count from end. Returns empty string if
+`start > end`.
+
+#### Pattern Language Specification
+
+**Character classes** (from `match_class` in `lstrlib.c`):
+
+| Class | Matches | Negation |
+|-------|---------|----------|
+| `%a` | letters (`isalpha`) | `%A` |
+| `%c` | control characters (`iscntrl`) | `%C` |
+| `%d` | digits (`isdigit`) | `%D` |
+| `%l` | lowercase letters (`islower`) | `%L` |
+| `%p` | punctuation (`ispunct`) | `%P` |
+| `%s` | whitespace (`isspace`) | `%S` |
+| `%u` | uppercase letters (`isupper`) | `%U` |
+| `%w` | alphanumeric (`isalnum`) | `%W` |
+| `%x` | hex digits (`isxdigit`) | `%X` |
+| `%z` | the null byte (`\0`) | `%Z` |
+| `%.` | literal `.` (any `%` + non-letter = literal) | — |
+
+**Bracket classes**: `[abc]` matches any of a, b, c. `[^abc]`
+negated. `[a-z]` ranges. `%` classes work inside brackets.
+
+**Single character matchers**: `.` matches any character. `%x`
+matches a class. `[...]` matches a bracket class. Anything else
+matches literally.
+
+**Quantifiers**:
+
+| Quantifier | Meaning | Strategy |
+|------------|---------|----------|
+| `*` | 0 or more | Greedy (max first, backtrack) |
+| `+` | 1 or more | Greedy |
+| `-` | 0 or more | Lazy (min first, extend) |
+| `?` | 0 or 1 | Greedy |
+
+**Anchors**: `^` at pattern start anchors to beginning. `$` at
+pattern end anchors to end. Elsewhere they are literal.
+
+**Captures**: `(...)` captures matched text. `()` captures the
+position (1-based integer) instead of text. Maximum 32 captures
+(`LUA_MAXCAPTURES`). Backreferences: `%1` through `%9` match the
+same text as the corresponding capture.
+
+**Special patterns**: `%bxy` matches balanced delimiters (e.g.,
+`%b()` matches balanced parentheses). `%f[set]` is a frontier
+pattern — matches a position where the previous character does not
+match `[set]` and the current character does. At string start, the
+"previous character" is `\0`.
+
+**Error conditions**: `"malformed pattern (ends with '%%')"`,
+`"malformed pattern (missing ']')"`, `"invalid capture index"`,
+`"unfinished capture"`, `"invalid pattern capture"`,
+`"too many captures"`, `"missing '[' after '%%f' in pattern"`.
+
 ### Table Library (`stdlib/table.rs`)
 
 | Function | Notes |
@@ -107,6 +254,33 @@ classes (`%a`, `%d`, `%w`, etc.), anchors (`^`, `$`), quantifiers
 | `table.foreachi` | Deprecated: iterate array (use ipairs) |
 | `table.getn` | Deprecated: table length (use # operator) |
 | `table.setn` | Deprecated: raises error in 5.1.1 |
+
+#### Table Library Behavioral Notes
+
+**`table.concat(list [, sep [, i [, j]]])`** — sep defaults to `""`,
+i defaults to 1, j defaults to `#list`. Each element must be a
+string or number (error: `"table contains non-strings"`). Uses raw
+access. Returns empty string if `i > j`.
+
+**`table.insert(list, [pos,] value)`** — 2 args appends at end. 3
+args inserts at pos, shifting elements up. Error: `"wrong number of
+arguments to 'insert'"` for other counts.
+
+**`table.maxn(list)`** — scans ALL keys (both parts) via `next()`.
+Returns the largest positive numeric key (including non-integer keys
+like 1.5). Returns 0 if no positive numeric keys exist.
+
+**`table.remove(list [, pos])`** — pos defaults to `#list` (remove
+from end). Shifts elements down, sets last element to nil. Returns
+the removed element, or nothing if the table was empty.
+
+**`table.sort(list [, comp])`** — Quicksort with median-of-three
+pivot. Tail recursion on the larger partition. Default comparison uses
+`<` (invokes `__lt` metamethods). Error: `"invalid order function for
+sorting"` if the comparison is inconsistent (e.g., NaN values break
+strict weak ordering). Not stable.
+
+**`table.setn(table, n)`** — error: `"'setn' is obsolete"`.
 
 ### Math Library (`stdlib/math.rs`)
 
@@ -143,6 +317,38 @@ classes (`%a`, `%d`, `%w`, etc.), anchors (`^`, `$`), quantifiers
 | `math.sqrt` | Square root |
 | `math.tan` | Tangent |
 | `math.tanh` | Hyperbolic tangent |
+
+#### Math Library Behavioral Notes
+
+All single-argument functions use `f64` methods from Rust's standard
+library. Each takes one number argument and returns one number.
+
+**`math.random([m [, n]])`** — 0 args: float in `[0, 1)`. 1 arg:
+integer in `[1, m]`. 2 args: integer in `[m, n]`. Error: `"interval
+is empty"` if the range is invalid. Uses C `rand()` equivalent
+(deterministic for a given seed).
+
+**`math.randomseed(x)`** — seeds the random generator. Argument
+must be convertible to integer.
+
+**`math.min(...)` / `math.max(...)`** — requires at least 1 argument.
+NaN asymmetry: if NaN is the first argument, it is returned. If NaN
+appears later, it is skipped (since `NaN < x` and `NaN > x` are
+both false).
+
+**`math.frexp(x)`** — returns 2 values: mantissa `m` and integer
+exponent `e` where `x = m * 2^e` and `0.5 <= |m| < 1`.
+
+**`math.modf(x)`** — returns 2 values: integer part and fractional
+part.
+
+**`math.log(x)`** — natural logarithm only (no base parameter in
+5.1). Base-10 is `math.log10`.
+
+**Lua `%` vs `math.fmod`**: the Lua `%` operator uses
+`a - floor(a/b)*b` (result has same sign as `b`), while `math.fmod`
+uses C `fmod` (result has same sign as `a`). Example: `-1 % 5` is
+`4` in Lua but `math.fmod(-1, 5)` is `-1`.
 
 ### I/O Library (`stdlib/io.rs`)
 
@@ -227,6 +433,25 @@ lua.open_table()?;
 lua.open_math()?;
 // io, os, debug, package omitted (sandboxed)
 ```
+
+## Error Message Formats
+
+All `luaL_error` messages are prefixed by source location
+(`"source:line: "` or empty string).
+
+**Argument errors**: `"bad argument #N to 'funcname' (message)"`.
+For methods, narg is decremented by 1 (implicit self). If narg
+becomes 0: `"calling 'name' on bad self (message)"`.
+
+**Type errors**: `"bad argument #N to 'funcname' (expected expected,
+got actual)"`.
+
+**Key format constants**:
+
+| Constant | Value |
+|----------|-------|
+| `LUA_MAXCAPTURES` | 32 |
+| `LUA_NUMBER_FMT` | `"%.14g"` |
 
 ## Implementation Priority
 
