@@ -616,10 +616,9 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 }
 
                 OpCode::NewTable => {
-                    let b = fb2int(instr.b());
-                    let c = fb2int(instr.c());
-                    let _ = (b, c); // Size hints -- Table::new() starts empty.
-                    let t = state.gc.alloc_table(Table::new());
+                    let narray = fb2int(instr.b()) as usize;
+                    let nhash = fb2int(instr.c()) as usize;
+                    let t = state.gc.alloc_table(Table::with_sizes(narray, nhash));
                     state.stack_set(ra, Val::Table(t));
                 }
 

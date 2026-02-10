@@ -240,7 +240,12 @@ fn fmt_lua_number(f: &mut fmt::Formatter<'_>, n: f64) -> fmt::Result {
         };
     }
     if n == 0.0 {
-        return write!(f, "0");
+        // PUC-Rio's %.14g prints "-0" for negative zero.
+        return if n.is_sign_negative() {
+            write!(f, "-0")
+        } else {
+            write!(f, "0")
+        };
     }
 
     let abs = n.abs();
