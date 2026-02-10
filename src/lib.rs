@@ -6,6 +6,11 @@
 //!
 //! # Architecture
 //!
-//! Pipeline: Source → Lexer → Parser → AST → Compiler → Proto → VM
+//! Pipeline: Source -> Lexer -> Parser -> AST -> Compiler -> Proto -> VM
 //!
 //! See `docs/architecture.md` for design documentation.
+
+pub mod compiler;
+pub mod error;
+pub mod stdlib;
+pub mod vm;
