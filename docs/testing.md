@@ -3,8 +3,9 @@
 ## Decision
 
 **Spec-driven, multi-layer testing. Unit tests for internals,
-integration tests for language semantics, PUC-Rio official test
-suite as the compatibility target.**
+oracle comparison for behavioral equivalence, integration tests
+for language semantics, PUC-Rio official test suite as the
+compatibility target.**
 
 Note: This document describes the planned testing strategy. The
 layers below are implemented incrementally as features are added.
@@ -14,7 +15,7 @@ layers below are implemented incrementally as features are added.
 ### Layer 1: Unit Tests
 
 In-module `#[cfg(test)]` blocks testing internal components in
-isolation.
+isolation. Every implementation chunk includes unit tests.
 
 **Lexer tests** (`src/compiler/lexer.rs`):
 
@@ -50,7 +51,89 @@ isolation.
 - String interning
 - Closure creation and upvalue management
 
-### Layer 2: Integration Tests
+### Layer 2: Oracle Comparison Tests
+
+Oracle comparison tests run the same Lua code in both rilua and
+PUC-Rio Lua 5.1.1, comparing output to verify behavioral equivalence.
+This catches divergences that unit tests and integration tests might
+miss.
+
+#### Reference Binaries
+
+- **lua**: `~/Repos/github.com/lua/lua/lua` (PUC-Rio Lua 5.1.1,
+  git tag `v5.1.1`)
+- **luac**: built from the Lua 5.1.1 source distribution
+  (`https://lua.org/ftp/lua-5.1.1.tar.gz`)
+
+The `lua` binary path is configured via the `LUA_REFERENCE_BIN`
+environment variable. Tests that require the reference binary skip
+gracefully if it is not available.
+
+#### Oracle Test Framework
+
+Test helpers in `tests/helpers/`:
+
+```rust
+// tests/helpers/oracle.rs
+
+/// Run code in PUC-Rio Lua 5.1.1 and return (stdout, stderr, exit_code).
+fn run_reference(code: &str) -> (String, String, i32);
+
+/// Run code in rilua and return (stdout, stderr).
+fn run_rilua(code: &str) -> (String, String);
+
+/// Assert rilua produces the expected stdout for the given code.
+fn assert_output(code: &str, expected: &str);
+
+/// Run in both interpreters, assert stdout matches.
+fn assert_matches_reference(code: &str);
+```
+
+Usage in tests:
+
+```rust
+#[test]
+fn arithmetic_matches_reference() {
+    assert_matches_reference("print(1 + 2)");
+    assert_matches_reference("print(2 ^ 10)");
+    assert_matches_reference("print(10 % 3)");
+    assert_matches_reference("print(-7 % 3)");  // floor modulo
+}
+```
+
+#### Bytecode Comparison
+
+After the compiler is implemented, bytecode comparison tests compile
+Lua snippets with both rilua and `luac -l`, then compare instruction
+output. This verifies the compiler produces correct bytecode before
+the VM exists.
+
+```rust
+/// Compile code with rilua and return a formatted instruction listing.
+fn compile_rilua(code: &str) -> String;
+
+/// Compile code with PUC-Rio luac -l and return the listing.
+fn compile_reference(code: &str) -> String;
+
+/// Assert both compilers produce equivalent bytecode.
+fn assert_bytecode_matches(code: &str);
+```
+
+Bytecode comparison checks instruction opcodes and operands. It does
+not compare constant pool ordering or debug info formatting, since
+these may differ between implementations without affecting semantics.
+
+#### When Each Test Category Activates
+
+| Category | Activates after | Mechanism |
+|----------|----------------|-----------|
+| Unit tests | Phase 0 (skeleton) | `cargo test --lib` |
+| Bytecode comparison | Phase 2 (compiler) | Compare rilua compiler output with `luac -l` |
+| Oracle comparison | Phase 3 + `print` | Compare rilua output with `lua -e` |
+| Integration `.lua` tests | Phase 3 + `assert` | `cargo test --test integration` |
+| PUC-Rio test suite | Phase 5a (base lib) | `cargo test --test lua51` |
+
+### Layer 3: Integration Tests
 
 Lua scripts in `tests/` that exercise language features through the
 full pipeline. Each test uses `assert()` to validate behavior.
@@ -90,29 +173,34 @@ Chapter 5 ("Standard Libraries").
 
 ```text
 tests/
-  integration.rs           Test runner (calls run_file for each .lua)
-  lexical.lua              2.1  Lexical conventions
-  types.lua                2.2  Values and types, coercion
-  variables.lua            2.3  Variables
-  statements.lua           2.4  Statements and control flow
-  expressions.lua          2.5  Expressions and operators
-  visibility.lua           2.6  Scoping and closures
-  errors.lua               2.7  Error handling
-  metatables.lua           2.8  Metatables and metamethods
-  environments.lua         2.9  Environments
-  gc.lua                   2.10 Garbage collection
-  coroutines.lua           2.11 Coroutines
-  stdlib-base.lua          5.1  Base library
-  stdlib-package.lua       5.3  Package library
-  stdlib-string.lua        5.4  String library
-  stdlib-table.lua         5.5  Table library
-  stdlib-math.lua          5.6  Math library
-  stdlib-io.lua            5.7  I/O library
-  stdlib-os.lua            5.8  OS library
-  stdlib-debug.lua         5.9  Debug library
+  helpers/
+    mod.rs               Shared test utilities
+    oracle.rs            PUC-Rio comparison functions
+  integration.rs         Test runner (calls run_file for each .lua)
+  lua51.rs               PUC-Rio test suite runner
+  lexical.lua            2.1  Lexical conventions
+  types.lua              2.2  Values and types, coercion
+  variables.lua          2.3  Variables
+  statements.lua         2.4  Statements and control flow
+  expressions.lua        2.5  Expressions and operators
+  visibility.lua         2.6  Scoping and closures
+  errors.lua             2.7  Error handling
+  metatables.lua         2.8  Metatables and metamethods
+  environments.lua       2.9  Environments
+  gc.lua                 2.10 Garbage collection
+  coroutines.lua         2.11 Coroutines
+  stdlib-base.lua        5.1  Base library
+  stdlib-package.lua     5.3  Package library
+  stdlib-string.lua      5.4  String library
+  stdlib-table.lua       5.5  Table library
+  stdlib-math.lua        5.6  Math library
+  stdlib-io.lua          5.7  I/O library
+  stdlib-os.lua          5.8  OS library
+  stdlib-debug.lua       5.9  Debug library
+  lua51/                 PUC-Rio official test suite (verbatim)
 ```
 
-### Layer 3: PUC-Rio Official Test Suite
+### Layer 4: PUC-Rio Official Test Suite
 
 The PUC-Rio Lua 5.1.1 test suite (`tests/lua51/`) is the
 compatibility target. These are verbatim test files from the
@@ -145,8 +233,28 @@ official Lua repository (tag `v5_1_1`).
 | `vararg.lua` | Vararg functions |
 | `verybig.lua` | Very large programs |
 
-The goal is to pass all official tests. Progress is tracked by
-counting passing vs failing test files.
+#### Progressive Test Suite Unlocking
+
+PUC-Rio test files become passable as features are implemented.
+This table tracks which test files should pass after each phase
+(see `docs/roadmap.md` for phase definitions).
+
+| After | Test files expected to pass |
+|-------|-----------------------------|
+| Phase 3 (core VM) | -- (test files require stdlib for assertions) |
+| Phase 5a (base lib) | `literals.lua` (partial), `constructs.lua` (partial) |
+| Phase 4 + 5a | `calls.lua`, `locals.lua`, `vararg.lua` |
+| Phase 4 + 5a | `events.lua`, `errors.lua` |
+| Phase 5b (string lib) | `strings.lua`, `pm.lua` |
+| Phase 5c (table lib) | `sort.lua`, `nextvar.lua` |
+| Phase 5d (math lib) | `math.lua` |
+| Phase 5e (io lib) | `files.lua` |
+| Phase 5g (package lib) | `attrib.lua` |
+| Phase 5h (debug lib) | `db.lua` |
+| Phase 6 (coroutines) | `closure.lua` |
+| Phase 7 (GC) | `gc.lua` |
+| Phase 8c (CLI) | `main.lua` |
+| All phases | `big.lua`, `verybig.lua` |
 
 **testC dependency**: Three test files (`api.lua`, `code.lua`,
 `checktable.lua`) require the `T` global (a C test library compiled
@@ -160,7 +268,7 @@ the `arg` table in vararg functions). WoW's Lua disables some of
 these. Tests that depend on compat options may need conditional
 handling.
 
-### Layer 4: Behavioral Equivalence Tests
+### Layer 5: Behavioral Equivalence Tests
 
 Tests that specifically verify behavioral equivalence with PUC-Rio
 Lua 5.1.1. These test edge cases where implementations commonly
@@ -176,7 +284,28 @@ diverge:
 - Modulo with negative operands (floor division)
 - Concatenation type coercion
 
-## Quality Gate
+These tests use the oracle comparison framework to run each case in
+both rilua and PUC-Rio, comparing exact output. They are the last
+line of defense before the PUC-Rio test suite.
+
+## Test Workflow
+
+### Test-Driven Development
+
+New features are implemented test-first where possible:
+
+1. Write a Lua test script that exercises the feature.
+2. Run the test against PUC-Rio Lua 5.1.1 to verify expected
+   behavior.
+3. Implement the feature in rilua.
+4. Run the test and fix until it passes.
+5. Run the oracle comparison to verify matching output.
+6. Run the full test suite to check for regressions.
+
+This ensures every feature is validated against the reference
+implementation.
+
+### Quality Gate
 
 Every commit must pass:
 
@@ -191,30 +320,18 @@ This ensures:
 
 1. Consistent formatting
 2. No lint warnings
-3. All tests pass
+3. All tests pass (unit, integration, oracle, PUC-Rio suite)
 4. Documentation builds without errors
 
-## Test-Driven Development
-
-New features are implemented test-first where possible:
-
-1. Write a Lua test script that exercises the feature.
-2. Run the test against PUC-Rio Lua 5.1.1 to verify expected
-   behavior.
-3. Implement the feature in rilua.
-4. Run the test and fix until it passes.
-5. Run the full test suite to check for regressions.
-
-This ensures every feature is validated against the reference
-implementation.
-
-## Coverage Tracking
+### Coverage Tracking
 
 Test coverage is measured by:
 
-1. **Feature coverage** — which Lua 5.1.1 features are implemented
+1. **Feature coverage** -- which Lua 5.1.1 features are implemented
    and tested (tracked in CHANGELOG.md).
-2. **PUC-Rio test suite progress** — N of 24 official test files
+2. **PUC-Rio test suite progress** -- N of 24 official test files
    passing (tracked in CI).
-3. **Code coverage** — `cargo-tarpaulin` or `llvm-cov` for line
+3. **Oracle comparison count** -- number of Lua snippets verified
+   against PUC-Rio output.
+4. **Code coverage** -- `cargo-tarpaulin` or `llvm-cov` for line
    coverage metrics (informational, not a gate).

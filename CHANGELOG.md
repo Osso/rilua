@@ -36,11 +36,14 @@ and this project adheres to
     specs and pattern language specification
   - `coroutines.md` -- thread structure, resume/yield protocols, GC
     interaction
-  - `testing.md` -- spec-driven multi-layer testing strategy with test
-    files mirroring Lua 5.1 manual structure
+  - `testing.md` -- spec-driven multi-layer testing strategy with oracle
+    comparison framework, bytecode comparison, progressive PUC-Rio suite
+    unlocking, test files mirroring Lua 5.1 manual structure
   - `references.md` -- classification of studied implementations
   - `use-cases.md` -- WoW ecosystem and general embedding use cases
-  - `roadmap.md` -- 9-phase implementation plan with dependencies
+  - `roadmap.md` -- 10-phase, 40-chunk implementation plan with testing
+    integrated per chunk, bytecode and oracle comparison milestones, CLI
+    specification, progressive PUC-Rio test suite unlocking
 - Use case summary in project README
 
 ### Changed
