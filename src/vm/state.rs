@@ -22,6 +22,7 @@ use super::callinfo::{CallInfo, LUA_MULTRET};
 use super::closure::{Closure, Upvalue};
 use super::gc::Color;
 use super::gc::arena::{Arena, GcRef};
+use super::metatable::{NUM_TYPE_TAGS, TM_N, TM_NAMES};
 use super::string::{LuaString, StringTable};
 use super::table::Table;
 use super::value::Val;
@@ -68,12 +69,18 @@ pub struct Gc {
     pub threads: Arena<LuaThread>,
     /// Current white color for new allocations.
     pub current_white: Color,
+    /// Per-type metatables. Indexed by type tag (see `metatable::type_tag`).
+    /// Tables and userdata have per-instance metatables; other types use these.
+    pub type_metatables: [Option<GcRef<Table>>; NUM_TYPE_TAGS],
+    /// Interned metamethod name strings (one per TMS event).
+    /// Initialized once during state creation.
+    pub tm_names: [Option<GcRef<LuaString>>; TM_N],
 }
 
 impl Gc {
     /// Creates a new GC state with empty arenas.
     fn new() -> Self {
-        Self {
+        let mut gc = Self {
             strings: StringTable::new(),
             string_arena: Arena::new(),
             tables: Arena::new(),
@@ -81,6 +88,21 @@ impl Gc {
             upvalues: Arena::new(),
             threads: Arena::new(),
             current_white: Color::White0,
+            type_metatables: [None; NUM_TYPE_TAGS],
+            tm_names: [None; TM_N],
+        };
+        gc.init_tm_names();
+        gc
+    }
+
+    /// Interns all 17 metamethod name strings.
+    ///
+    /// Called once during state initialization. These strings are GC roots
+    /// and are never collected. Matches PUC-Rio's `luaT_init`.
+    fn init_tm_names(&mut self) {
+        for (i, name) in TM_NAMES.iter().enumerate() {
+            let r = self.intern_string(name.as_bytes());
+            self.tm_names[i] = Some(r);
         }
     }
 
@@ -103,6 +125,12 @@ impl Gc {
     /// Allocates a new upvalue in the GC arena.
     pub fn alloc_upvalue(&mut self, upvalue: Upvalue) -> GcRef<Upvalue> {
         self.upvalues.alloc(upvalue, self.current_white)
+    }
+
+    /// Returns the interned string GcRef for a metamethod name.
+    #[inline]
+    pub fn tm_name(&self, event: super::metatable::TMS) -> Option<GcRef<LuaString>> {
+        self.tm_names[event as usize]
     }
 }
 
@@ -162,6 +190,13 @@ pub struct LuaState {
 
     /// GC state (all arenas and string table).
     pub gc: Gc,
+
+    /// Error object for `pcall`/`xpcall` error propagation.
+    ///
+    /// When `error()` throws a value, it's stored here so `pcall` can
+    /// retrieve it. `None` for VM-generated errors (pcall uses the
+    /// message string instead). Cleared after pcall reads it.
+    pub error_object: Option<Val>,
 }
 
 impl LuaState {
@@ -199,6 +234,7 @@ impl LuaState {
             registry,
             open_upvalues: Vec::new(),
             gc,
+            error_object: None,
         }
     }
 
@@ -364,7 +400,8 @@ mod tests {
         let state = LuaState::new();
         // Two tables allocated (global + registry).
         assert_eq!(state.gc.tables.len(), 2);
-        assert_eq!(state.gc.string_arena.len(), 0);
+        // 17 interned metamethod name strings from init_tm_names.
+        assert_eq!(state.gc.string_arena.len(), TM_N as u32);
         assert_eq!(state.gc.closures.len(), 0);
         assert_eq!(state.gc.upvalues.len(), 0);
     }
@@ -533,10 +570,12 @@ mod tests {
     #[test]
     fn gc_intern_string_dedup() {
         let mut state = LuaState::new();
+        let before = state.gc.string_arena.len();
         let r1 = state.gc.intern_string(b"test");
         let r2 = state.gc.intern_string(b"test");
         assert_eq!(r1, r2);
-        assert_eq!(state.gc.string_arena.len(), 1);
+        // Only one new string interned (deduplication).
+        assert_eq!(state.gc.string_arena.len(), before + 1);
     }
 
     #[test]

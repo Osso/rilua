@@ -15,7 +15,9 @@ use crate::error::{LuaError, LuaResult, RuntimeError};
 
 use super::callinfo::{CallInfo, LUA_MULTRET};
 use super::closure::{Closure, LuaClosure, Upvalue};
+use super::gc::arena::GcRef;
 use super::instructions::{Instruction, LFIELDS_PER_FLUSH, OpCode, index_k, is_k};
+use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
 use super::proto::{Proto, VARARG_ISVARARG};
 use super::state::{Gc, LUA_MINSTACK, LuaState, MAXCALLS, MAXCCALLS};
 use super::table::Table;
@@ -45,7 +47,7 @@ fn rk(stack: &[Val], base: usize, constants: &[Val], field: u32) -> Val {
 /// Numbers pass through. Strings are parsed via Lua 5.1 rules
 /// (decimal, hex with `0x` prefix, leading/trailing whitespace OK).
 /// Returns `None` if the value is not coercible.
-fn coerce_to_number(val: Val, gc: &Gc) -> Option<f64> {
+pub(crate) fn coerce_to_number(val: Val, gc: &Gc) -> Option<f64> {
     match val {
         Val::Num(n) => Some(n),
         Val::Str(r) => {
@@ -59,7 +61,7 @@ fn coerce_to_number(val: Val, gc: &Gc) -> Option<f64> {
 /// Parse a byte slice as a Lua number (matching PUC-Rio's `luaO_str2d`).
 ///
 /// Supports decimal, hex (`0x`/`0X` prefix), leading/trailing whitespace.
-fn str_to_number(data: &[u8]) -> Option<f64> {
+pub(crate) fn str_to_number(data: &[u8]) -> Option<f64> {
     let s = std::str::from_utf8(data).ok()?;
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -92,6 +94,7 @@ fn str_to_number(data: &[u8]) -> Option<f64> {
 ///
 /// Numbers are formatted using Lua's %.14g rules. Strings pass through.
 /// Returns `None` for other types.
+#[allow(dead_code)] // Used in Phase 4b (tostring metamethod support)
 fn coerce_to_string(val: Val, gc: &mut Gc) -> Option<Val> {
     match val {
         Val::Str(_) => Some(val),
@@ -118,7 +121,7 @@ fn runtime_error(proto: &Proto, pc: usize, message: String) -> LuaError {
     } else {
         0
     };
-    let source = proto.source.clone();
+    let source = chunkid(&proto.source);
     LuaError::Runtime(RuntimeError {
         message: format!("{source}:{line}: {message}"),
         level: 0,
@@ -182,6 +185,7 @@ fn index_error(proto: &Proto, pc: usize, val: Val) -> LuaError {
 }
 
 /// Type error for calling.
+#[allow(dead_code)] // Used in Phase 4b (__call metamethod)
 fn call_error(proto: &Proto, pc: usize, val: Val) -> LuaError {
     runtime_error(
         proto,
@@ -228,12 +232,36 @@ impl LuaState {
         let closure_ref = match func_val {
             Val::Function(r) => r,
             _ => {
-                // No metamethods in Phase 3.
-                return Err(LuaError::Runtime(RuntimeError {
-                    message: format!("attempt to call a {} value", func_val.type_name()),
-                    level: 0,
-                    traceback: vec![],
-                }));
+                // Try __call metamethod.
+                let tm = get_tm_for_val(&self.gc, func_val, TMS::Call);
+                match tm {
+                    Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+                        // Shift stack up to insert __call at func position.
+                        // The original value becomes the first argument.
+                        let top = self.top;
+                        self.ensure_stack(top + 1);
+                        let mut p = top;
+                        while p > func_idx {
+                            let v = self.stack_get(p - 1);
+                            self.stack_set(p, v);
+                            p -= 1;
+                        }
+                        self.top = top + 1;
+                        self.stack_set(func_idx, tm_val);
+                        // Now func_idx points to __call, original value is at func_idx+1.
+                        match tm_val {
+                            Val::Function(r) => r,
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => {
+                        return Err(LuaError::Runtime(RuntimeError {
+                            message: format!("attempt to call a {} value", func_val.type_name()),
+                            level: 0,
+                            traceback: vec![],
+                        }));
+                    }
+                }
             }
         };
 
@@ -481,6 +509,295 @@ fn runtime_error_simple(message: &str) -> LuaError {
     })
 }
 
+/// Maximum size for short source names (matches PUC-Rio's `LUA_IDSIZE`).
+const LUA_IDSIZE: usize = 60;
+
+/// Converts a source name to a short display form.
+///
+/// - `=name` -> `name` (literal)
+/// - `@filename` -> `filename` or `...filename` (truncated)
+/// - other -> `[string "..."]`
+///
+/// Matches PUC-Rio's `luaO_chunkid`.
+fn chunkid(source: &str) -> String {
+    if let Some(rest) = source.strip_prefix('=') {
+        // Literal name -- strip the '=' prefix.
+        if rest.len() < LUA_IDSIZE {
+            rest.to_string()
+        } else {
+            rest[..LUA_IDSIZE - 1].to_string()
+        }
+    } else if let Some(rest) = source.strip_prefix('@') {
+        // File name.
+        if rest.len() < LUA_IDSIZE {
+            rest.to_string()
+        } else {
+            let skip = rest.len() - (LUA_IDSIZE - 4);
+            format!("...{}", &rest[skip..])
+        }
+    } else {
+        // String source.
+        let first_line = source.split('\n').next().unwrap_or(source);
+        let max_len = LUA_IDSIZE - "[string \"...\"]".len();
+        if first_line.len() <= max_len && !source.contains('\n') {
+            format!("[string \"{first_line}\"]")
+        } else {
+            let truncated = &first_line[..first_line.len().min(max_len)];
+            format!("[string \"{truncated}...\"]")
+        }
+    }
+}
+
+/// Gets "source:line: " for a given call stack level.
+///
+/// Level 0 is the currently running function, level 1 is the caller, etc.
+/// Returns an empty string if the level doesn't exist or has no source info.
+///
+/// Matches PUC-Rio's `luaL_where`.
+pub(crate) fn get_where(state: &LuaState, level: u32) -> String {
+    let level = level as usize;
+    if state.ci < level {
+        return String::new();
+    }
+
+    let target_ci = state.ci - level;
+    let ci = &state.call_stack[target_ci];
+    let func_val = state.stack_get(ci.func);
+
+    if let Val::Function(r) = func_val {
+        if let Some(Closure::Lua(lcl)) = state.gc.closures.get(r) {
+            let proto = &lcl.proto;
+            let pc = ci.saved_pc;
+            let line = if pc > 0 && pc <= proto.line_info.len() {
+                proto.line_info[pc - 1]
+            } else if !proto.line_info.is_empty() {
+                proto.line_info[0]
+            } else {
+                return String::new();
+            };
+            let short_src = chunkid(&proto.source);
+            return format!("{short_src}:{line}: ");
+        }
+    }
+
+    String::new()
+}
+
+// ---------------------------------------------------------------------------
+// Metamethod helpers
+// ---------------------------------------------------------------------------
+
+/// Looks up a metamethod for the given value.
+///
+/// Returns the metamethod value if found, or `None`.
+fn get_tm_for_val(gc: &Gc, val: Val, event: TMS) -> Option<Val> {
+    gettmbyobj(
+        val,
+        event,
+        &gc.tables,
+        &gc.string_arena,
+        &gc.type_metatables,
+        &gc.tm_names,
+    )
+}
+
+/// Call a metamethod with 2 arguments, storing 1 result.
+///
+/// Used by arithmetic and comparison metamethods.
+/// Stack layout: push tm, push arg1, push arg2, call, read result.
+fn call_tm_res(
+    state: &mut LuaState,
+    tm: Val,
+    arg1: Val,
+    arg2: Val,
+    result_reg: usize,
+) -> LuaResult<()> {
+    let call_base = state.top;
+    state.ensure_stack(call_base + 4);
+    state.stack_set(call_base, tm);
+    state.stack_set(call_base + 1, arg1);
+    state.stack_set(call_base + 2, arg2);
+    state.top = call_base + 3;
+
+    match state.precall(call_base, 1)? {
+        CallResult::Lua => execute(state)?,
+        CallResult::Rust => {}
+    }
+
+    // Read the result (poscall placed it at call_base).
+    let result = state.stack_get(call_base);
+    state.stack_set(result_reg, result);
+    Ok(())
+}
+
+/// Call a metamethod with 3 arguments, no result stored.
+///
+/// Used by `__newindex` metamethod.
+fn call_tm_void(state: &mut LuaState, tm: Val, arg1: Val, arg2: Val, arg3: Val) -> LuaResult<()> {
+    let call_base = state.top;
+    state.ensure_stack(call_base + 5);
+    state.stack_set(call_base, tm);
+    state.stack_set(call_base + 1, arg1);
+    state.stack_set(call_base + 2, arg2);
+    state.stack_set(call_base + 3, arg3);
+    state.top = call_base + 4;
+
+    match state.precall(call_base, 0)? {
+        CallResult::Lua => execute(state)?,
+        CallResult::Rust => {}
+    }
+
+    Ok(())
+}
+
+/// Try a binary metamethod on left operand, then right.
+///
+/// Looks up `event` in lhs's metatable. If not found, tries rhs's.
+/// Calls the found metamethod with (lhs, rhs) and stores the result.
+/// Returns an error if neither side has the metamethod.
+fn call_bin_tm(
+    state: &mut LuaState,
+    lhs: Val,
+    rhs: Val,
+    result_reg: usize,
+    event: TMS,
+    proto: &Proto,
+    pc: usize,
+) -> LuaResult<()> {
+    let tm =
+        get_tm_for_val(&state.gc, lhs, event).or_else(|| get_tm_for_val(&state.gc, rhs, event));
+
+    match tm {
+        Some(tm_val) => call_tm_res(state, tm_val, lhs, rhs, result_reg),
+        None => Err(arith_error(proto, pc, lhs)),
+    }
+}
+
+/// Try an order (comparison) metamethod.
+///
+/// Matches PUC-Rio's `call_orderTM`: looks up the event on the left
+/// operand first, then checks that the right operand has the SAME
+/// metamethod (raw equality). Returns `None` if no matching metamethod
+/// exists, `Some(bool)` with the truthiness of the call result.
+fn call_order_tm(state: &mut LuaState, lhs: Val, rhs: Val, event: TMS) -> LuaResult<Option<bool>> {
+    let tm1 = get_tm_for_val(&state.gc, lhs, event);
+    let Some(tm1_val) = tm1 else {
+        return Ok(None);
+    };
+
+    let tm2 = get_tm_for_val(&state.gc, rhs, event);
+    let tm2_val = tm2.unwrap_or(Val::Nil);
+
+    // Both operands must have the same metamethod (raw equality).
+    if !val_raw_equal(tm1_val, tm2_val, &state.gc.tables, &state.gc.string_arena) {
+        return Ok(None);
+    }
+
+    let call_base = state.top;
+    state.ensure_stack(call_base + 4);
+    state.stack_set(call_base, tm1_val);
+    state.stack_set(call_base + 1, lhs);
+    state.stack_set(call_base + 2, rhs);
+    state.top = call_base + 3;
+
+    match state.precall(call_base, 1)? {
+        CallResult::Lua => execute(state)?,
+        CallResult::Rust => {}
+    }
+
+    let result = state.stack_get(call_base);
+    Ok(Some(result.is_truthy()))
+}
+
+// ---------------------------------------------------------------------------
+// String concatenation with metamethod support
+// ---------------------------------------------------------------------------
+
+/// Concatenate registers `base+b` through `base+c`, storing the result
+/// in `base+b`. Matches PUC-Rio's `luaV_concat`.
+///
+/// Processes pairs right-to-left. For each pair, tries to coerce both to
+/// strings. If coercion fails, tries the `__concat` metamethod. Coalesces
+/// consecutive string/number values into a single buffer for efficiency.
+fn vm_concat(
+    state: &mut LuaState,
+    base: usize,
+    b: usize,
+    c: usize,
+    proto: &Proto,
+    pc: usize,
+) -> LuaResult<()> {
+    let mut total = c - b + 1; // number of values remaining
+    let mut last = c; // rightmost index (relative to base)
+
+    while total > 1 {
+        let top = base + last + 1;
+        let lhs = state.stack_get(top - 2);
+        let rhs = state.stack_get(top - 1);
+
+        if !is_string_or_number(lhs, &state.gc) || !is_string_or_number(rhs, &state.gc) {
+            // Try __concat metamethod on the pair.
+            let tm = get_tm_for_val(&state.gc, lhs, TMS::Concat)
+                .or_else(|| get_tm_for_val(&state.gc, rhs, TMS::Concat));
+            if let Some(tm_val) = tm {
+                call_tm_res(state, tm_val, lhs, rhs, top - 2)?;
+            } else {
+                // No metamethod -- find which operand is the problem.
+                if !is_string_or_number(lhs, &state.gc) {
+                    return Err(concat_error(proto, pc, lhs));
+                }
+                return Err(concat_error(proto, pc, rhs));
+            }
+            total -= 1;
+            last -= 1;
+        } else {
+            // Both are string/number. Coalesce as many as possible.
+            let mut n = 2;
+            while n < total && is_string_or_number(state.stack_get(top - n - 1), &state.gc) {
+                n += 1;
+            }
+            // Collect all n values into a single buffer.
+            let mut buffer = Vec::new();
+            for i in (0..n).rev() {
+                let val = state.stack_get(top - 1 - i);
+                val_to_string_bytes(val, &state.gc, &mut buffer);
+            }
+            let r = state.gc.intern_string(&buffer);
+            state.stack_set(top - n, Val::Str(r));
+            total -= n - 1;
+            last -= n - 1;
+        }
+    }
+    Ok(())
+}
+
+/// Check if a value is a string or number (coercible for concatenation).
+fn is_string_or_number(val: Val, gc: &Gc) -> bool {
+    matches!(val, Val::Num(_)) || {
+        if let Val::Str(r) = val {
+            gc.string_arena.get(r).is_some()
+        } else {
+            false
+        }
+    }
+}
+
+/// Append the string representation of a value to a buffer.
+fn val_to_string_bytes(val: Val, gc: &Gc, buffer: &mut Vec<u8>) {
+    match val {
+        Val::Str(r) => {
+            if let Some(s) = gc.string_arena.get(r) {
+                buffer.extend_from_slice(s.data());
+            }
+        }
+        Val::Num(_) => {
+            let formatted = format!("{val}");
+            buffer.extend_from_slice(formatted.as_bytes());
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main execute loop
 // ---------------------------------------------------------------------------
@@ -578,15 +895,16 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::GetGlobal => {
                     let bx = instr.bx() as usize;
                     let key = proto.constants[bx];
-                    let val = table_get(state, env, key)?;
-                    state.stack_set(ra, val);
+                    state.call_stack[state.ci].saved_pc = pc;
+                    vm_gettable(state, Val::Table(env), key, ra, &proto, pc)?;
                 }
 
                 OpCode::SetGlobal => {
                     let bx = instr.bx() as usize;
                     let key = proto.constants[bx];
                     let val = state.stack_get(ra);
-                    table_set(state, env, key, val)?;
+                    state.call_stack[state.ci].saved_pc = pc;
+                    vm_settable(state, Val::Table(env), key, val, &proto, pc)?;
                 }
 
                 // ----- Table access -----
@@ -594,25 +912,16 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let b = instr.b() as usize;
                     let table_val = state.stack_get(base + b);
                     let key = rk(&state.stack, base, &proto.constants, instr.c());
-
-                    let table_ref = match table_val {
-                        Val::Table(r) => r,
-                        _ => return Err(index_error(&proto, pc, table_val)),
-                    };
-                    let val = table_get(state, table_ref, key)?;
-                    state.stack_set(ra, val);
+                    state.call_stack[state.ci].saved_pc = pc;
+                    vm_gettable(state, table_val, key, ra, &proto, pc)?;
                 }
 
                 OpCode::SetTable => {
                     let table_val = state.stack_get(ra);
                     let key = rk(&state.stack, base, &proto.constants, instr.b());
                     let val = rk(&state.stack, base, &proto.constants, instr.c());
-
-                    let table_ref = match table_val {
-                        Val::Table(r) => r,
-                        _ => return Err(index_error(&proto, pc, table_val)),
-                    };
-                    table_set(state, table_ref, key, val)?;
+                    state.call_stack[state.ci].saved_pc = pc;
+                    vm_settable(state, table_val, key, val, &proto, pc)?;
                 }
 
                 OpCode::NewTable => {
@@ -628,83 +937,121 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     // R(A+1) := R(B) -- save table for method call
                     state.stack_set(ra + 1, table_val);
                     let key = rk(&state.stack, base, &proto.constants, instr.c());
-
-                    let table_ref = match table_val {
-                        Val::Table(r) => r,
-                        _ => return Err(index_error(&proto, pc, table_val)),
-                    };
-                    let val = table_get(state, table_ref, key)?;
-                    state.stack_set(ra, val);
+                    state.call_stack[state.ci].saved_pc = pc;
+                    vm_gettable(state, table_val, key, ra, &proto, pc)?;
                 }
 
                 // ----- Arithmetic -----
                 OpCode::Add => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let nb = coerce_to_number(b_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, b_val))?;
-                    let nc = coerce_to_number(c_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, c_val))?;
-                    state.stack_set(ra, Val::Num(nb + nc));
+                    match (
+                        coerce_to_number(b_val, &state.gc),
+                        coerce_to_number(c_val, &state.gc),
+                    ) {
+                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb + nc)),
+                        _ => {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            call_bin_tm(state, b_val, c_val, ra, TMS::Add, &proto, pc)?;
+                        }
+                    }
                 }
 
                 OpCode::Sub => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let nb = coerce_to_number(b_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, b_val))?;
-                    let nc = coerce_to_number(c_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, c_val))?;
-                    state.stack_set(ra, Val::Num(nb - nc));
+                    match (
+                        coerce_to_number(b_val, &state.gc),
+                        coerce_to_number(c_val, &state.gc),
+                    ) {
+                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb - nc)),
+                        _ => {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            call_bin_tm(state, b_val, c_val, ra, TMS::Sub, &proto, pc)?;
+                        }
+                    }
                 }
 
                 OpCode::Mul => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let nb = coerce_to_number(b_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, b_val))?;
-                    let nc = coerce_to_number(c_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, c_val))?;
-                    state.stack_set(ra, Val::Num(nb * nc));
+                    match (
+                        coerce_to_number(b_val, &state.gc),
+                        coerce_to_number(c_val, &state.gc),
+                    ) {
+                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb * nc)),
+                        _ => {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            call_bin_tm(state, b_val, c_val, ra, TMS::Mul, &proto, pc)?;
+                        }
+                    }
                 }
 
                 OpCode::Div => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let nb = coerce_to_number(b_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, b_val))?;
-                    let nc = coerce_to_number(c_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, c_val))?;
-                    state.stack_set(ra, Val::Num(nb / nc));
+                    match (
+                        coerce_to_number(b_val, &state.gc),
+                        coerce_to_number(c_val, &state.gc),
+                    ) {
+                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb / nc)),
+                        _ => {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            call_bin_tm(state, b_val, c_val, ra, TMS::Div, &proto, pc)?;
+                        }
+                    }
                 }
 
                 OpCode::Mod => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let nb = coerce_to_number(b_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, b_val))?;
-                    let nc = coerce_to_number(c_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, c_val))?;
-                    // Lua mod: a - floor(a/b)*b
-                    state.stack_set(ra, Val::Num(nb - (nb / nc).floor() * nc));
+                    match (
+                        coerce_to_number(b_val, &state.gc),
+                        coerce_to_number(c_val, &state.gc),
+                    ) {
+                        (Some(nb), Some(nc)) => {
+                            // Lua mod: a - floor(a/b)*b
+                            state.stack_set(ra, Val::Num(nb - (nb / nc).floor() * nc));
+                        }
+                        _ => {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            call_bin_tm(state, b_val, c_val, ra, TMS::Mod, &proto, pc)?;
+                        }
+                    }
                 }
 
                 OpCode::Pow => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let nb = coerce_to_number(b_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, b_val))?;
-                    let nc = coerce_to_number(c_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, c_val))?;
-                    state.stack_set(ra, Val::Num(nb.powf(nc)));
+                    match (
+                        coerce_to_number(b_val, &state.gc),
+                        coerce_to_number(c_val, &state.gc),
+                    ) {
+                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb.powf(nc))),
+                        _ => {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            call_bin_tm(state, b_val, c_val, ra, TMS::Pow, &proto, pc)?;
+                        }
+                    }
                 }
 
                 OpCode::Unm => {
                     let b = instr.b() as usize;
                     let b_val = state.stack_get(base + b);
-                    let nb = coerce_to_number(b_val, &state.gc)
-                        .ok_or_else(|| arith_error(&proto, pc, b_val))?;
-                    state.stack_set(ra, Val::Num(-nb));
+                    match coerce_to_number(b_val, &state.gc) {
+                        Some(nb) => state.stack_set(ra, Val::Num(-nb)),
+                        None => {
+                            // __unm: try on the single operand only
+                            let tm = get_tm_for_val(&state.gc, b_val, TMS::Unm);
+                            match tm {
+                                Some(tm_val) => {
+                                    state.call_stack[state.ci].saved_pc = pc;
+                                    call_tm_res(state, tm_val, b_val, b_val, ra)?;
+                                }
+                                None => return Err(arith_error(&proto, pc, b_val)),
+                            }
+                        }
+                    }
                 }
 
                 OpCode::Not => {
@@ -728,6 +1075,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                             state.stack_set(ra, Val::Num(s.len() as f64));
                         }
                         Val::Table(r) => {
+                            // Lua 5.1.1: tables always use raw length (no __len).
                             let t = state
                                 .gc
                                 .tables
@@ -737,42 +1085,25 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                             let len = t.len(&state.gc.string_arena) as f64;
                             state.stack_set(ra, Val::Num(len));
                         }
-                        _ => return Err(len_error(&proto, pc, b_val)),
+                        _ => {
+                            // Try __len metamethod for other types.
+                            let tm = get_tm_for_val(&state.gc, b_val, TMS::Len);
+                            if let Some(tm_val) = tm {
+                                state.call_stack[state.ci].saved_pc = pc;
+                                call_tm_res(state, tm_val, b_val, Val::Nil, ra)?;
+                            } else {
+                                return Err(len_error(&proto, pc, b_val));
+                            }
+                        }
                     }
                 }
 
                 OpCode::Concat => {
                     let b = instr.b() as usize;
                     let c = instr.c() as usize;
-                    // Concatenate registers B through C.
-                    // First, coerce all to strings.
-                    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(c - b + 1);
-                    for i in b..=c {
-                        let val = state.stack_get(base + i);
-                        match val {
-                            Val::Str(r) => {
-                                let s = state
-                                    .gc
-                                    .string_arena
-                                    .get(r)
-                                    .ok_or_else(|| concat_error(&proto, pc, val))?;
-                                parts.push(s.data().to_vec());
-                            }
-                            Val::Num(_) => {
-                                let formatted = format!("{val}");
-                                parts.push(formatted.into_bytes());
-                            }
-                            _ => return Err(concat_error(&proto, pc, val)),
-                        }
-                    }
-                    let total_len: usize = parts.iter().map(Vec::len).sum();
-                    let mut buffer = Vec::with_capacity(total_len);
-                    for part in &parts {
-                        buffer.extend_from_slice(part);
-                    }
-                    let r = state.gc.intern_string(&buffer);
-                    state.stack_set(base + b, Val::Str(r));
-                    // The result goes in R(B), then we copy to R(A).
+                    state.call_stack[state.ci].saved_pc = pc;
+                    vm_concat(state, base, b, c, &proto, pc)?;
+                    // The result is in R(base+b). Copy to R(A) if needed.
                     if ra != base + b {
                         let val = state.stack_get(base + b);
                         state.stack_set(ra, val);
@@ -783,7 +1114,38 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Eq => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let equal = val_equal(b_val, c_val, &state.gc);
+                    let equal = if val_equal(b_val, c_val, &state.gc) {
+                        // Raw-equal succeeded.
+                        true
+                    } else if std::mem::discriminant(&b_val) != std::mem::discriminant(&c_val) {
+                        // Different types are never equal (no metamethod).
+                        false
+                    } else {
+                        // Same type, not raw-equal. Try __eq metamethod.
+                        // Only tables (and userdata, Phase 8b) support __eq.
+                        let tm = match (b_val, c_val) {
+                            (Val::Table(r1), Val::Table(r2)) => {
+                                let mt1 = state.gc.tables.get(r1).and_then(Table::metatable);
+                                let mt2 = state.gc.tables.get(r2).and_then(Table::metatable);
+                                get_comp_tm(
+                                    &state.gc.tables,
+                                    &state.gc.string_arena,
+                                    mt1,
+                                    mt2,
+                                    TMS::Eq,
+                                    &state.gc.tm_names,
+                                )
+                            }
+                            _ => None,
+                        };
+                        if let Some(tm_val) = tm {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            call_tm_res(state, tm_val, b_val, c_val, state.top)?;
+                            state.stack_get(state.top).is_truthy()
+                        } else {
+                            false
+                        }
+                    };
                     // PUC-Rio: if (result == A) then dojump; else skip JMP
                     let expected = a != 0;
                     if equal == expected {
@@ -796,7 +1158,8 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Lt => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let result = val_less_than(b_val, c_val, &state.gc, &proto, pc)?;
+                    state.call_stack[state.ci].saved_pc = pc;
+                    let result = val_less_than(b_val, c_val, state, &proto, pc)?;
                     // PUC-Rio: if (result == A) then dojump; else skip JMP
                     let expected = a != 0;
                     if result == expected {
@@ -809,7 +1172,8 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Le => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let result = val_less_equal(b_val, c_val, &state.gc, &proto, pc)?;
+                    state.call_stack[state.ci].saved_pc = pc;
+                    let result = val_less_equal(b_val, c_val, state, &proto, pc)?;
                     // PUC-Rio: if (result == A) then dojump; else skip JMP
                     let expected = a != 0;
                     if result == expected {
@@ -983,18 +1347,19 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         CallResult::Lua => {
                             // Re-enter execute for the callee.
                             execute(state)?;
-                            // After return, restore our frame state.
                         }
                         CallResult::Rust => {
                             // Rust function already completed.
-                            // Adjust top if needed for MULTRET.
-                            if c == 0 {
-                                // top was set by poscall
-                            }
                         }
                     }
-                    // After call returns, base may have changed if this
-                    // was a different frame. Break to reenter outer loop.
+                    // For fixed results (C != 0), restore top to the frame's
+                    // max stack size. For MULTRET (C == 0), leave top as set
+                    // by poscall so the caller knows how many results exist.
+                    // Matches PUC-Rio: `if (nresults >= 0) L->top = L->ci->top;`
+                    if c != 0 {
+                        state.top = state.call_stack[state.ci].top;
+                    }
+                    // Break to outer loop to re-read base and proto.
                     break;
                 }
 
@@ -1228,11 +1593,8 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Raw table get.
-fn table_get(
-    state: &LuaState,
-    table_ref: super::gc::arena::GcRef<Table>,
-    key: Val,
-) -> LuaResult<Val> {
+#[allow(dead_code)] // Used by rawget stdlib function (Phase 4c)
+fn table_get(state: &LuaState, table_ref: GcRef<Table>, key: Val) -> LuaResult<Val> {
     let table = state
         .gc
         .tables
@@ -1242,12 +1604,7 @@ fn table_get(
 }
 
 /// Raw table set.
-fn table_set(
-    state: &mut LuaState,
-    table_ref: super::gc::arena::GcRef<Table>,
-    key: Val,
-    value: Val,
-) -> LuaResult<()> {
+fn table_set(state: &mut LuaState, table_ref: GcRef<Table>, key: Val, value: Val) -> LuaResult<()> {
     let table = state
         .gc
         .tables
@@ -1257,74 +1614,280 @@ fn table_set(
 }
 
 // ---------------------------------------------------------------------------
+// Table access with metamethods
+// ---------------------------------------------------------------------------
+
+/// Lua table get with `__index` metamethod support.
+///
+/// Matches PUC-Rio's `luaV_gettable`:
+/// 1. If `t` is a table, rawget `key`. If not nil, return it.
+/// 2. Look up `__index` in `t`'s metatable.
+/// 3. If `__index` is a function, call it with (t, key) and return result.
+/// 4. If `__index` is a table, repeat the lookup on that table.
+/// 5. Loop up to `MAXTAGLOOP` times to prevent infinite chains.
+fn vm_gettable(
+    state: &mut LuaState,
+    t: Val,
+    key: Val,
+    result_reg: usize,
+    proto: &Proto,
+    pc: usize,
+) -> LuaResult<()> {
+    let mut current = t;
+    for _ in 0..MAXTAGLOOP {
+        if let Val::Table(table_ref) = current {
+            // Try raw table get.
+            let table = state
+                .gc
+                .tables
+                .get(table_ref)
+                .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+            let result = table.get(key, &state.gc.string_arena);
+
+            if !result.is_nil() {
+                // Key found -- return it.
+                state.stack_set(result_reg, result);
+                return Ok(());
+            }
+
+            // Key not found. Check for __index metamethod.
+            let tm = {
+                let mt = table.metatable();
+                match mt {
+                    Some(mt_ref) => {
+                        let tm_val = get_tm_for_table(&state.gc, mt_ref, TMS::Index);
+                        tm_val
+                    }
+                    None => None,
+                }
+            };
+
+            match tm {
+                None => {
+                    // No metamethod -- return nil.
+                    state.stack_set(result_reg, Val::Nil);
+                    return Ok(());
+                }
+                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+                    // __index is a function: call it with (table, key).
+                    call_tm_res(state, tm_val, current, key, result_reg)?;
+                    return Ok(());
+                }
+                Some(tm_val) => {
+                    // __index is a table (or other value): loop.
+                    current = tm_val;
+                }
+            }
+        } else {
+            // Non-table value: check type metatable for __index.
+            let tm = get_tm_for_val(&state.gc, current, TMS::Index);
+            match tm {
+                None => {
+                    return Err(index_error(proto, pc, current));
+                }
+                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+                    call_tm_res(state, tm_val, current, key, result_reg)?;
+                    return Ok(());
+                }
+                Some(tm_val) => {
+                    current = tm_val;
+                }
+            }
+        }
+    }
+    Err(runtime_error_simple("loop in gettable"))
+}
+
+/// Lua table set with `__newindex` metamethod support.
+///
+/// Matches PUC-Rio's `luaV_settable`:
+/// 1. If `t` is a table, rawget `key`. If exists (not nil), rawset and return.
+/// 2. Look up `__newindex` in `t`'s metatable.
+/// 3. If `__newindex` is a function, call it with (t, key, value). Return.
+/// 4. If `__newindex` is a table, repeat the set on that table.
+/// 5. If no `__newindex`, rawset on original table.
+fn vm_settable(
+    state: &mut LuaState,
+    t: Val,
+    key: Val,
+    value: Val,
+    proto: &Proto,
+    pc: usize,
+) -> LuaResult<()> {
+    let mut current = t;
+    for _ in 0..MAXTAGLOOP {
+        if let Val::Table(table_ref) = current {
+            // Check if key already exists (rawget).
+            let existing = {
+                let table = state
+                    .gc
+                    .tables
+                    .get(table_ref)
+                    .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+                table.get(key, &state.gc.string_arena)
+            };
+
+            if !existing.is_nil() {
+                // Key exists -- rawset directly.
+                let table = state
+                    .gc
+                    .tables
+                    .get_mut(table_ref)
+                    .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+                return table.raw_set(key, value, &state.gc.string_arena);
+            }
+
+            // Key not found. Check for __newindex metamethod.
+            let tm = {
+                let table = state
+                    .gc
+                    .tables
+                    .get(table_ref)
+                    .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+                let mt = table.metatable();
+                match mt {
+                    Some(mt_ref) => get_tm_for_table(&state.gc, mt_ref, TMS::NewIndex),
+                    None => None,
+                }
+            };
+
+            match tm {
+                None => {
+                    // No metamethod -- rawset on this table.
+                    let table = state
+                        .gc
+                        .tables
+                        .get_mut(table_ref)
+                        .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+                    return table.raw_set(key, value, &state.gc.string_arena);
+                }
+                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+                    // __newindex is a function: call with (table, key, value).
+                    call_tm_void(state, tm_val, current, key, value)?;
+                    return Ok(());
+                }
+                Some(tm_val) => {
+                    // __newindex is a table: loop.
+                    current = tm_val;
+                }
+            }
+        } else {
+            // Non-table value: check type metatable for __newindex.
+            let tm = get_tm_for_val(&state.gc, current, TMS::NewIndex);
+            match tm {
+                None => {
+                    return Err(index_error(proto, pc, current));
+                }
+                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+                    call_tm_void(state, tm_val, current, key, value)?;
+                    return Ok(());
+                }
+                Some(tm_val) => {
+                    current = tm_val;
+                }
+            }
+        }
+    }
+    Err(runtime_error_simple("loop in settable"))
+}
+
+/// Look up a metamethod in a specific metatable (fast path for tables).
+fn get_tm_for_table(gc: &Gc, mt_ref: GcRef<Table>, event: TMS) -> Option<Val> {
+    use super::metatable::fasttm;
+    fasttm(&gc.tables, &gc.string_arena, mt_ref, event, &gc.tm_names)
+}
+
+// ---------------------------------------------------------------------------
 // Comparison helpers
 // ---------------------------------------------------------------------------
 
-/// Lua equality comparison (no metamethods).
+/// Lua raw equality comparison (no metamethods).
+///
+/// Delegates to `val_raw_equal` in metatable.rs.
 fn val_equal(a: Val, b: Val, gc: &Gc) -> bool {
-    match (&a, &b) {
-        (Val::Nil, Val::Nil) => true,
-        (Val::Bool(x), Val::Bool(y)) => x == y,
-        (Val::Num(x), Val::Num(y)) => x == y,
-        (Val::Str(x), Val::Str(y)) => {
-            if x == y {
-                return true; // Same GcRef (identity)
-            }
-            // Interned strings: same content means same ref.
-            // But compare content as fallback.
-            let sx = gc.string_arena.get(*x);
-            let sy = gc.string_arena.get(*y);
-            match (sx, sy) {
-                (Some(a), Some(b)) => a.data() == b.data(),
-                _ => false,
-            }
-        }
-        // Reference types: identity comparison.
-        (Val::Table(x), Val::Table(y)) => x == y,
-        (Val::Function(x), Val::Function(y)) => x == y,
-        (Val::Userdata(x), Val::Userdata(y)) => x == y,
-        (Val::Thread(x), Val::Thread(y)) => x == y,
-        (Val::LightUserdata(x), Val::LightUserdata(y)) => x == y,
-        // Different types are never equal.
-        _ => false,
-    }
+    val_raw_equal(a, b, &gc.tables, &gc.string_arena)
 }
 
-/// Lua less-than comparison (no metamethods).
-fn val_less_than(a: Val, b: Val, gc: &Gc, proto: &Proto, pc: usize) -> LuaResult<bool> {
+/// Lua less-than comparison with metamethod support.
+///
+/// Matches PUC-Rio's `luaV_lessthan`: numbers and strings use raw
+/// comparison; same-type non-comparable values try `__lt` metamethod
+/// (both operands must share the same TM); different types error.
+fn val_less_than(
+    a: Val,
+    b: Val,
+    state: &mut LuaState,
+    proto: &Proto,
+    pc: usize,
+) -> LuaResult<bool> {
     match (&a, &b) {
         (Val::Num(x), Val::Num(y)) => Ok(x < y),
         (Val::Str(x), Val::Str(y)) => {
-            let sx = gc
+            let sx = state
+                .gc
                 .string_arena
                 .get(*x)
                 .ok_or_else(|| compare_error(proto, pc, a, b))?;
-            let sy = gc
+            let sy = state
+                .gc
                 .string_arena
                 .get(*y)
                 .ok_or_else(|| compare_error(proto, pc, a, b))?;
             Ok(sx.data() < sy.data())
         }
-        _ => Err(compare_error(proto, pc, a, b)),
+        _ => {
+            if std::mem::discriminant(&a) != std::mem::discriminant(&b) {
+                return Err(compare_error(proto, pc, a, b));
+            }
+            match call_order_tm(state, a, b, TMS::Lt)? {
+                Some(result) => Ok(result),
+                None => Err(compare_error(proto, pc, a, b)),
+            }
+        }
     }
 }
 
-/// Lua less-or-equal comparison (no metamethods).
-fn val_less_equal(a: Val, b: Val, gc: &Gc, proto: &Proto, pc: usize) -> LuaResult<bool> {
+/// Lua less-or-equal comparison with metamethod support.
+///
+/// Matches PUC-Rio's `lessequal`: numbers and strings use raw
+/// comparison; same-type non-comparable values try `__le` first,
+/// then fall back to `NOT __lt(rhs, lhs)` with reversed arguments.
+fn val_less_equal(
+    a: Val,
+    b: Val,
+    state: &mut LuaState,
+    proto: &Proto,
+    pc: usize,
+) -> LuaResult<bool> {
     match (&a, &b) {
         (Val::Num(x), Val::Num(y)) => Ok(x <= y),
         (Val::Str(x), Val::Str(y)) => {
-            let sx = gc
+            let sx = state
+                .gc
                 .string_arena
                 .get(*x)
                 .ok_or_else(|| compare_error(proto, pc, a, b))?;
-            let sy = gc
+            let sy = state
+                .gc
                 .string_arena
                 .get(*y)
                 .ok_or_else(|| compare_error(proto, pc, a, b))?;
             Ok(sx.data() <= sy.data())
         }
-        _ => Err(compare_error(proto, pc, a, b)),
+        _ => {
+            if std::mem::discriminant(&a) != std::mem::discriminant(&b) {
+                return Err(compare_error(proto, pc, a, b));
+            }
+            // Try __le first.
+            if let Some(result) = call_order_tm(state, a, b, TMS::Le)? {
+                return Ok(result);
+            }
+            // Fallback: try NOT __lt(rhs, lhs) (reversed arguments).
+            if let Some(result) = call_order_tm(state, b, a, TMS::Lt)? {
+                return Ok(!result);
+            }
+            Err(compare_error(proto, pc, a, b))
+        }
     }
 }
 

@@ -18,7 +18,7 @@ fn main() {
                 eprintln!("rilua: '-e' needs argument");
                 process::exit(1);
             }
-            if let Err(e) = rilua::exec(&args[2]) {
+            if let Err(e) = rilua::exec_with_name(&args[2], "=(command line)") {
                 eprintln!("{e}");
                 process::exit(1);
             }

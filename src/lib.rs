@@ -76,7 +76,7 @@ pub fn exec_with_name(source: &str, name: &str) -> LuaResult<()> {
 /// their raw bytes recorded in `proto.string_pool`. This function
 /// interns each string via the GC and replaces the placeholder with
 /// the real `Val::Str` value. Recurses into child protos.
-fn patch_string_constants(proto: &mut Proto, gc: &mut Gc) {
+pub fn patch_string_constants(proto: &mut Proto, gc: &mut Gc) {
     for (idx, bytes) in proto.string_pool.drain(..) {
         let str_ref = gc.intern_string(&bytes);
         proto.constants[idx as usize] = Val::Str(str_ref);

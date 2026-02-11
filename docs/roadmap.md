@@ -12,17 +12,28 @@ integrated at every step.
 | 1: Core Data Structures | Done | 143 unit tests + 10 oracle |
 | 2: Compilation Pipeline | Done | 354 unit tests + 10 oracle, bytecode matches `luac -l` |
 | 3: Core VM | Done | 466 total (431 unit + 16 integration + 19 oracle) |
-| 4: Language Features | Not started | -- |
-| 5: Standard Libraries | Not started | -- |
+| 4: Language Features | Done | 521 total (439 unit + 43 integration + 39 oracle) |
+| 5: Standard Libraries | In progress (5a-5b done) | 647 total (439 unit + 113 integration + 95 oracle) |
 | 6: Coroutines | Not started | -- |
 | 7: GC Collector | Not started | -- |
 | 8: Public API + CLI | Not started | -- |
 | 9: Compatibility | Not started | -- |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
-60/60 oracle test cases pass against PUC-Rio Lua 5.1.1. The full
-quality gate (`cargo fmt -- --check && cargo clippy --all-targets &&
-cargo test && cargo doc --no-deps`) passes clean.
+Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
+functions. Phase 5a added iterators, dynamic loading, environments, and
+globals. Phase 5b added the string library with all 14 functions plus
+pattern matching engine (find, match, gmatch, gsub with character
+classes, quantifiers, captures, balanced match, frontier patterns).
+String metatable enables method syntax (`("hello"):upper()`). 647 total
+tests pass (439 unit + 113 integration + 95 oracle). All oracle test
+cases match PUC-Rio Lua 5.1.1. The full quality gate passes clean.
+
+Known issues deferred to later phases:
+- `{...}` vararg table constructor captures only first argument (VM bug)
+- Mixed named parameters + varargs register misassignment (VM bug)
+- `newproxy()` returns table instead of userdata (stub, pending Phase 8)
+- `load(func_reader)` hangs when reader never returns nil
 
 ## Reference Tools
 
@@ -850,7 +861,7 @@ throughout but becomes the focus after Phase 8.
 | Data structures | Arena, Val, strings, tables work in isolation | 1a-1f | Done |
 | First bytecode | Compile Lua to Proto, compare with `luac -l` | 2a-2i | Done |
 | First execution | `print("hello world")` runs end-to-end | 3a-3e | Done |
-| Language complete | All Lua 5.1.1 language semantics work | 4a-4d | -- |
+| Language complete | All Lua 5.1.1 language semantics work | 4a-4d | Done |
 | Stdlib complete | All 9 standard libraries implemented | 5a-5h | -- |
 | Coroutines | resume/yield work, `closure.lua` passes | 6 | -- |
 | GC functional | Incremental collection, `gc.lua` passes | 7a-7b | -- |

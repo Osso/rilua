@@ -148,6 +148,12 @@ pub struct Table {
     log2_size: u8,
     /// Optional metatable (GC-managed).
     metatable: Option<GcRef<Self>>,
+    /// Fast negative cache for metamethods.
+    ///
+    /// Bits 0-4 cache absence of events Index, NewIndex, GC, Mode, Eq.
+    /// Set by gettm() when a metamethod is NOT found; cleared to 0 on
+    /// any rawset where the key starts with `__`.
+    flags: u8,
 }
 
 impl Table {
@@ -159,6 +165,7 @@ impl Table {
             last_free: 0,
             log2_size: 0,
             metatable: None,
+            flags: 0,
         }
     }
 
@@ -176,6 +183,7 @@ impl Table {
                 last_free: 0,
                 log2_size: 0,
                 metatable: None,
+                flags: 0,
             }
         } else {
             let log2 = ceil_log2(hash_size);
@@ -190,6 +198,7 @@ impl Table {
                 last_free: actual_size,
                 log2_size: log2,
                 metatable: None,
+                flags: 0,
             }
         }
     }
@@ -216,10 +225,32 @@ impl Table {
         self.metatable
     }
 
-    /// Sets or clears the metatable.
+    /// Sets or clears the metatable. Invalidates the flags cache.
     #[inline]
     pub fn set_metatable(&mut self, mt: Option<GcRef<Self>>) {
         self.metatable = mt;
+        self.flags = 0; // Invalidate metamethod cache
+    }
+
+    /// Returns the flags byte (metamethod absence cache).
+    #[inline]
+    pub fn flags(&self) -> u8 {
+        self.flags
+    }
+
+    /// Sets a bit in the flags byte to cache the absence of a metamethod.
+    #[inline]
+    pub fn set_tm_flag(&mut self, event: u8) {
+        if event <= 4 {
+            self.flags |= 1u8 << event;
+        }
+    }
+
+    /// Invalidates the metamethod cache. Called when a `__`-prefixed key
+    /// is rawset into the table.
+    #[inline]
+    pub fn invalidate_tm_cache(&mut self) {
+        self.flags = 0;
     }
 
     // -----------------------------------------------------------------------
@@ -738,7 +769,17 @@ impl Table {
     /// Setting a value to nil for an existing key leaves the slot
     /// (value becomes nil but key remains). Setting nil for a
     /// non-existent key is a no-op.
+    ///
+    /// Invalidates the metamethod flags cache if the key is a string
+    /// starting with `__`.
     pub fn raw_set(&mut self, key: Val, value: Val, strings: &Arena<LuaString>) -> LuaResult<()> {
+        // Invalidate metamethod cache for `__` keys.
+        if let Val::Str(r) = key
+            && let Some(s) = strings.get(r)
+            && s.data().starts_with(b"__")
+        {
+            self.flags = 0;
+        }
         self.raw_set_impl(key, value, strings, true)
     }
 
