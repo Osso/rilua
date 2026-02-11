@@ -1440,3 +1440,159 @@ fn oracle_coroutine_error_in_body() {
 fn oracle_coroutine_require_loaded() {
     oracle::assert_matches_reference("print(require('coroutine') == coroutine)");
 }
+
+// ---------------------------------------------------------------------------
+// Debug library oracle tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_debug_table_type() {
+    oracle::assert_matches_reference("print(type(debug))");
+}
+
+#[test]
+fn oracle_debug_getregistry_type() {
+    oracle::assert_matches_reference("print(type(debug.getregistry()))");
+}
+
+#[test]
+fn oracle_debug_getmetatable_raw() {
+    oracle::assert_matches_reference(
+        "local t = {} \
+         local mt = {__metatable = 'hidden'} \
+         setmetatable(t, mt) \
+         print(getmetatable(t)) \
+         print(debug.getmetatable(t) == mt)",
+    );
+}
+
+#[test]
+fn oracle_debug_getmetatable_nil() {
+    oracle::assert_matches_reference("print(debug.getmetatable({}))");
+}
+
+#[test]
+fn oracle_debug_setmetatable_returns_true() {
+    oracle::assert_matches_reference(
+        "local t = {} \
+         print(debug.setmetatable(t, {}))",
+    );
+}
+
+#[test]
+fn oracle_debug_getinfo_what_s() {
+    oracle::assert_matches_reference(
+        "local info = debug.getinfo(1, 'S') \
+         print(info.what)",
+    );
+}
+
+#[test]
+fn oracle_debug_getinfo_c_function() {
+    oracle::assert_matches_reference(
+        "local info = debug.getinfo(print, 'S') \
+         print(info.what, info.source)",
+    );
+}
+
+#[test]
+fn oracle_debug_getinfo_invalid_level() {
+    oracle::assert_matches_reference("print(debug.getinfo(100))");
+}
+
+#[test]
+fn oracle_debug_getinfo_nups() {
+    oracle::assert_matches_reference(
+        "local x = 1 \
+         local function f() return x end \
+         print(debug.getinfo(f, 'u').nups)",
+    );
+}
+
+#[test]
+fn oracle_debug_getlocal_basic() {
+    oracle::assert_matches_reference(
+        "local x = 42 \
+         local name, val = debug.getlocal(1, 1) \
+         print(name, val)",
+    );
+}
+
+#[test]
+fn oracle_debug_getlocal_out_of_range() {
+    oracle::assert_matches_reference(
+        "local x = 1 \
+         print(debug.getlocal(1, 99))",
+    );
+}
+
+#[test]
+fn oracle_debug_getupvalue_basic() {
+    oracle::assert_matches_reference(
+        "local x = 42 \
+         local function f() return x end \
+         print(debug.getupvalue(f, 1))",
+    );
+}
+
+#[test]
+fn oracle_debug_getupvalue_out_of_range() {
+    oracle::assert_matches_reference(
+        "local function f() end \
+         print(debug.getupvalue(f, 99))",
+    );
+}
+
+#[test]
+fn oracle_debug_gethook_stub() {
+    oracle::assert_matches_reference(
+        "local a, b, c = debug.gethook() \
+         print(a, b, c)",
+    );
+}
+
+#[test]
+fn oracle_debug_traceback_type() {
+    oracle::assert_matches_reference("print(type(debug.traceback()))");
+}
+
+#[test]
+fn oracle_debug_traceback_non_string() {
+    // Numbers are treated as string messages in both. Our CLI has one fewer
+    // C frame at the bottom (no lua_pcall wrapper), so compare just the
+    // message prefix, not the full traceback.
+    let rilua = oracle::run_rilua("print(debug.traceback(42))");
+    assert!(
+        rilua.stdout.starts_with("42\nstack traceback:"),
+        "rilua output should start with '42\\nstack traceback:': {:?}",
+        rilua.stdout,
+    );
+}
+
+#[test]
+fn oracle_debug_traceback_nil() {
+    oracle::assert_matches_reference("print(debug.traceback(nil))");
+}
+
+#[test]
+fn oracle_debug_require_loaded() {
+    oracle::assert_matches_reference("print(require('debug') == debug)");
+}
+
+#[test]
+fn oracle_debug_getinfo_func_field() {
+    oracle::assert_matches_reference(
+        "local function foo() end \
+         local info = debug.getinfo(foo, 'f') \
+         print(info.func == foo)",
+    );
+}
+
+#[test]
+fn oracle_debug_setmetatable_number() {
+    oracle::assert_matches_reference(
+        "debug.setmetatable(0, {__tostring = function(n) return 'num:' .. n end}) \
+         print(tostring(42)) \
+         debug.setmetatable(0, nil)",
+    );
+}

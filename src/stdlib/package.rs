@@ -909,6 +909,7 @@ pub fn open_package_lib(state: &mut LuaState) -> LuaResult<()> {
         "os",
         "io",
         "coroutine",
+        "debug",
         "package",
     ];
     for lib_name in &lib_names {

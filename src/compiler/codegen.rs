@@ -710,15 +710,20 @@ impl Compiler {
     }
 
     /// Activates `n` local variables (makes them visible).
+    ///
+    /// The `n` newest entries in `active_vars` (pushed by prior `new_local`
+    /// calls) have their `start_pc` set to the current code position.
+    /// Matches PUC-Rio's `adjustlocalvars`.
     pub(crate) fn activate_locals(&mut self, n: u32) {
         let fs = self.fs_mut();
         let pc = fs.proto.code.len();
-        for _ in 0..n {
-            let var_idx = fs.active_vars.len();
+        // The n new vars are at the end of active_vars.
+        let start_idx = fs.active_vars.len() - n as usize;
+        for i in 0..n as usize {
+            let var_idx = fs.active_vars[start_idx + i] as usize;
             if var_idx < fs.proto.local_vars.len() {
                 fs.proto.local_vars[var_idx].start_pc = pc as u32;
             }
-            // The active_vars entry was already pushed by new_local
         }
         fs.num_active_vars += n as u8;
     }
@@ -1487,10 +1492,14 @@ impl Compiler {
     pub(crate) fn leave_function(&mut self) -> Proto {
         // Emit final return
         self.emit_abc(OpCode::Return, 0, 1, 0, self.current_line);
-        let fs = self
+        // Close remaining local variable debug info (PUC-Rio: removevars(ls, 0)).
+        self.remove_locals(0);
+        let mut fs = self
             .func_states
             .pop()
             .expect("cannot leave global function");
+        // Copy upvalue names to proto for debug info.
+        fs.proto.upvalue_names = fs.upvalues.iter().map(|uv| uv.name.clone()).collect();
         fs.proto
     }
 
@@ -1502,10 +1511,15 @@ impl Compiler {
     fn finish_main(&mut self) -> Proto {
         // Emit final return for main chunk
         self.emit_abc(OpCode::Return, 0, 1, 0, self.current_line);
-        self.func_states
+        // Close remaining local variable debug info (PUC-Rio: removevars(ls, 0)).
+        self.remove_locals(0);
+        let mut fs = self
+            .func_states
             .pop()
-            .expect("cannot finish without main function")
-            .proto
+            .expect("cannot finish without main function");
+        // Copy upvalue names to proto for debug info.
+        fs.proto.upvalue_names = fs.upvalues.iter().map(|uv| uv.name.clone()).collect();
+        fs.proto
     }
 }
 

@@ -2878,3 +2878,348 @@ fn coroutine_functions_exist() {
         "function\nfunction\nfunction\nfunction\nfunction\nfunction\n"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Debug library tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn debug_table_exists() {
+    let (stdout, _, code) = run_rilua("print(type(debug))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn debug_functions_exist() {
+    let (stdout, _, code) = run_rilua(
+        "local names = {'debug','getfenv','gethook','getinfo','getlocal',\
+         'getmetatable','getregistry','getupvalue','setfenv','sethook',\
+         'setlocal','setmetatable','setupvalue','traceback'} \
+         for _, n in ipairs(names) do print(type(debug[n])) end",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        "function\nfunction\nfunction\nfunction\nfunction\nfunction\nfunction\nfunction\nfunction\nfunction\nfunction\nfunction\nfunction\nfunction\n"
+    );
+}
+
+#[test]
+fn debug_getregistry_returns_table() {
+    let (stdout, _, code) = run_rilua("print(type(debug.getregistry()))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn debug_getmetatable_returns_raw_metatable() {
+    let (stdout, _, code) = run_rilua(
+        "local t = {} \
+         local mt = {__metatable = 'hidden'} \
+         setmetatable(t, mt) \
+         print(getmetatable(t)) \
+         print(debug.getmetatable(t) == mt)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hidden\ntrue\n");
+}
+
+#[test]
+fn debug_getmetatable_nil_when_none() {
+    let (stdout, _, code) = run_rilua("print(debug.getmetatable({}))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "nil\n");
+}
+
+#[test]
+fn debug_setmetatable_on_table() {
+    let (stdout, _, code) = run_rilua(
+        "local t = {} \
+         local mt = {__tostring = function() return 'custom' end} \
+         debug.setmetatable(t, mt) \
+         print(tostring(t))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "custom\n");
+}
+
+#[test]
+fn debug_setmetatable_on_number() {
+    // Setting a type metatable on numbers: arithmetic between two numbers
+    // uses the fast path and doesn't invoke metamethods (PUC-Rio behavior).
+    // But __tostring will work because tostring always checks metatables.
+    let (stdout, _, code) = run_rilua(
+        "debug.setmetatable(0, {__tostring = function(n) return 'num:' .. n end}) \
+         print(tostring(42)) \
+         debug.setmetatable(0, nil)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "num:42\n");
+}
+
+#[test]
+fn debug_getfenv_returns_env() {
+    let (stdout, _, code) = run_rilua(
+        "local function f() end \
+         print(debug.getfenv(f) == _G)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn debug_setfenv_changes_env() {
+    let (stdout, _, code) = run_rilua(
+        "local function f() return x end \
+         local env = {x = 42} \
+         setmetatable(env, {__index = _G}) \
+         debug.setfenv(f, env) \
+         print(f())",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn debug_getinfo_what_s() {
+    let (stdout, _, code) = run_rilua(
+        "local info = debug.getinfo(1, 'S') \
+         print(info.what) \
+         print(type(info.source)) \
+         print(type(info.short_src))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "main\nstring\nstring\n");
+}
+
+#[test]
+fn debug_getinfo_level_0() {
+    let (stdout, _, code) = run_rilua(
+        "local info = debug.getinfo(1, 'S') \
+         print(info.what)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "main\n");
+}
+
+#[test]
+fn debug_getinfo_function_arg() {
+    let (stdout, _, code) = run_rilua(
+        "local function foo() end \
+         local info = debug.getinfo(foo, 'S') \
+         print(info.what) \
+         print(info.linedefined)",
+    );
+    assert_eq!(code, 0);
+    // "Lua" because line_defined != 0
+    assert_eq!(stdout, "Lua\n1\n");
+}
+
+#[test]
+fn debug_getinfo_c_function() {
+    let (stdout, _, code) = run_rilua(
+        "local info = debug.getinfo(print, 'S') \
+         print(info.what) \
+         print(info.source)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "C\n=[C]\n");
+}
+
+#[test]
+fn debug_getinfo_what_u() {
+    let (stdout, _, code) = run_rilua(
+        "local x = 1 \
+         local function f() return x end \
+         local info = debug.getinfo(f, 'u') \
+         print(info.nups)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn debug_getinfo_what_n() {
+    let (stdout, _, code) = run_rilua(
+        "local info = debug.getinfo(print, 'n') \
+         print(info.name)",
+    );
+    assert_eq!(code, 0);
+    // RustClosure carries its registered name
+    assert_eq!(stdout, "print\n");
+}
+
+#[test]
+fn debug_getinfo_invalid_level() {
+    let (stdout, _, code) = run_rilua("print(debug.getinfo(100))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "nil\n");
+}
+
+#[test]
+fn debug_getinfo_what_l() {
+    let (stdout, _, code) = run_rilua(
+        "local info = debug.getinfo(1, 'l') \
+         print(type(info.currentline))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "number\n");
+}
+
+#[test]
+fn debug_getinfo_what_f() {
+    let (stdout, _, code) = run_rilua(
+        "local function foo() end \
+         local info = debug.getinfo(foo, 'f') \
+         print(info.func == foo)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn debug_getlocal_name_and_value() {
+    let (stdout, _, code) = run_rilua(
+        "local x = 42 \
+         local name, val = debug.getlocal(1, 1) \
+         print(name, val)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "x\t42\n");
+}
+
+#[test]
+fn debug_getlocal_out_of_range() {
+    let (stdout, _, code) = run_rilua(
+        "local x = 1 \
+         print(debug.getlocal(1, 99))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "nil\n");
+}
+
+#[test]
+fn debug_setlocal_changes_value() {
+    let (stdout, _, code) = run_rilua(
+        "local x = 10 \
+         local function f() \
+           local y = 20 \
+           debug.setlocal(1, 1, 99) \
+           print(y) \
+         end \
+         f()",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "99\n");
+}
+
+#[test]
+fn debug_getupvalue_name_and_value() {
+    let (stdout, _, code) = run_rilua(
+        "local x = 42 \
+         local function f() return x end \
+         local name, val = debug.getupvalue(f, 1) \
+         print(name, val)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "x\t42\n");
+}
+
+#[test]
+fn debug_getupvalue_out_of_range() {
+    let (stdout, _, code) = run_rilua(
+        "local function f() end \
+         print(debug.getupvalue(f, 99))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "\n"); // returns nothing, print prints empty line
+}
+
+#[test]
+fn debug_setupvalue_changes_value() {
+    let (stdout, _, code) = run_rilua(
+        "local x = 10 \
+         local function f() return x end \
+         debug.setupvalue(f, 1, 99) \
+         print(f())",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "99\n");
+}
+
+#[test]
+fn debug_gethook_returns_nil_stub() {
+    let (stdout, _, code) = run_rilua(
+        "local a, b, c = debug.gethook() \
+         print(a, b, c)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "nil\t\t0\n");
+}
+
+#[test]
+fn debug_traceback_returns_string() {
+    let (stdout, _, code) = run_rilua("print(type(debug.traceback()))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "string\n");
+}
+
+#[test]
+fn debug_traceback_has_stack_traceback_header() {
+    let (stdout, _, code) = run_rilua(
+        "local tb = debug.traceback() \
+         print(tb:find('stack traceback:') ~= nil)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn debug_traceback_with_message() {
+    let (stdout, _, code) = run_rilua(
+        "local tb = debug.traceback('hello') \
+         print(tb:sub(1, 5))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello\n");
+}
+
+#[test]
+fn debug_traceback_number_as_message() {
+    // Numbers are treated as string messages in PUC-Rio (lua_isstring returns
+    // true for numbers). The number is used as a message prefix.
+    let (stdout, _, code) = run_rilua(
+        "local tb = debug.traceback(42) \
+         print(tb:sub(1, 2))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn debug_traceback_nil_returns_nil() {
+    // nil is non-string/non-number: returned as-is (PUC-Rio behavior)
+    let (stdout, _, code) = run_rilua("print(debug.traceback(nil))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "nil\n");
+}
+
+#[test]
+fn debug_require_loaded() {
+    let (stdout, _, code) = run_rilua("print(type(package.loaded.debug))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn debug_getinfo_in_pcall() {
+    // Level 1 from getinfo inside pcall points to pcall (C), level 2 is main
+    let (stdout, _, code) = run_rilua(
+        "local ok, info = pcall(debug.getinfo, 2, 'S') \
+         print(ok) \
+         print(info.what)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\nmain\n");
+}

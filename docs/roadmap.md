@@ -13,8 +13,8 @@ integrated at every step.
 | 2: Compilation Pipeline | Done | 354 unit tests + 10 oracle, bytecode matches `luac -l` |
 | 3: Core VM | Done | 466 total (431 unit + 16 integration + 19 oracle) |
 | 4: Language Features | Done | 521 total (439 unit + 43 integration + 39 oracle) |
-| 5: Standard Libraries | In progress (5a-5g done) | 981 total (481 unit + 285 integration + 215 oracle) |
-| 6: Coroutines | Done | 1019 total (481 unit + 310 integration + 228 oracle) |
+| 5: Standard Libraries | Done (5a-5h) | 1071 total (481 unit + 342 integration + 248 oracle) |
+| 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Not started | -- |
 | 8: Public API + CLI | Not started | -- |
 | 9: Compatibility | Not started (4/23 PUC-Rio tests pass) | -- |
@@ -46,8 +46,16 @@ C root stub), path searching, package.loaded/preload/loaders/config/
 path/cpath, package.seeall, and package.loadlib. Uses upvalue[0] on
 RustClosures to pass the package table (replaces LUA_ENVIRONINDEX).
 C loaders return "not supported" (incompatible ABI). Circular require
-uses LightUserdata(0xDEAD_CAFE) sentinel. 981 total tests pass (481
-unit + 285 integration + 215 oracle). The full quality gate passes.
+uses LightUserdata(0xDEAD_CAFE) sentinel. Phase 5h added the debug
+library with all 14 functions (getregistry, getmetatable, setmetatable,
+getfenv, setfenv, getinfo, getlocal, setlocal, getupvalue, setupvalue,
+gethook, sethook, debug, traceback). Hooks (sethook/gethook) and
+debug() interactive mode are stubs. Fixed compiler bugs: activate_locals
+PC indexing and missing end_pc for local variable debug info. Fixed
+level calculation in debug introspection (off-by-one from base CI).
+Phase 6 added coroutines (create, resume, yield, wrap, status, running)
+with cooperative threading via LuaThread. 1071 total tests pass (481
+unit + 342 integration + 248 oracle). The full quality gate passes.
 
 Known issues deferred to later phases:
 - `{...}` vararg table constructor captures only first argument (VM bug)

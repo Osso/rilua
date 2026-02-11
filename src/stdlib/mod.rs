@@ -71,6 +71,9 @@ pub fn open_libs(state: &mut LuaState) -> LuaResult<()> {
     // Coroutine library.
     open_coroutine_lib(state)?;
 
+    // Debug library.
+    open_debug_lib(state)?;
+
     // Package library (must be last: populates package.loaded with other libs).
     package::open_package_lib(state)?;
 
@@ -263,6 +266,31 @@ fn register_global_val(state: &mut LuaState, name: &str, val: Val) -> LuaResult<
         })
     })?;
     table.raw_set(key, val, &state.gc.string_arena)?;
+    Ok(())
+}
+
+/// Registers the debug library as `debug` global.
+///
+/// Follows PUC-Rio's `luaopen_debug` pattern from `ldblib.c`.
+fn open_debug_lib(state: &mut LuaState) -> LuaResult<()> {
+    let debug_table = state.gc.alloc_table(Table::new());
+
+    register_table_fn(state, debug_table, "debug", debug::db_debug)?;
+    register_table_fn(state, debug_table, "getfenv", debug::db_getfenv)?;
+    register_table_fn(state, debug_table, "gethook", debug::db_gethook)?;
+    register_table_fn(state, debug_table, "getinfo", debug::db_getinfo)?;
+    register_table_fn(state, debug_table, "getlocal", debug::db_getlocal)?;
+    register_table_fn(state, debug_table, "getregistry", debug::db_getregistry)?;
+    register_table_fn(state, debug_table, "getmetatable", debug::db_getmetatable)?;
+    register_table_fn(state, debug_table, "getupvalue", debug::db_getupvalue)?;
+    register_table_fn(state, debug_table, "setfenv", debug::db_setfenv)?;
+    register_table_fn(state, debug_table, "sethook", debug::db_sethook)?;
+    register_table_fn(state, debug_table, "setlocal", debug::db_setlocal)?;
+    register_table_fn(state, debug_table, "setmetatable", debug::db_setmetatable)?;
+    register_table_fn(state, debug_table, "setupvalue", debug::db_setupvalue)?;
+    register_table_fn(state, debug_table, "traceback", debug::db_traceback)?;
+
+    register_global_val(state, "debug", Val::Table(debug_table))?;
     Ok(())
 }
 
