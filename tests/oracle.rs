@@ -572,3 +572,129 @@ fn oracle_string_format_left_align() {
 fn oracle_string_find_plain_flag() {
     oracle::assert_matches_reference("print(string.find('hello%world', '%', 1, true))");
 }
+
+// ---------------------------------------------------------------------------
+// Table library oracle tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_table_concat_basic() {
+    oracle::assert_matches_reference("print(table.concat({1, 2, 3}, ', '))");
+}
+
+#[test]
+fn oracle_table_concat_default_sep() {
+    oracle::assert_matches_reference("print(table.concat({'a', 'b', 'c'}))");
+}
+
+#[test]
+fn oracle_table_concat_range() {
+    oracle::assert_matches_reference("print(table.concat({'a', 'b', 'c', 'd'}, '-', 2, 3))");
+}
+
+#[test]
+fn oracle_table_concat_empty() {
+    oracle::assert_matches_reference("print(table.concat({}, ', '))");
+}
+
+#[test]
+fn oracle_table_insert_append() {
+    oracle::assert_matches_reference(
+        "local t = {1, 2, 3}; table.insert(t, 4); print(t[1], t[2], t[3], t[4])",
+    );
+}
+
+#[test]
+fn oracle_table_insert_at_position() {
+    oracle::assert_matches_reference(
+        "local t = {1, 2, 3}; table.insert(t, 2, 99); print(t[1], t[2], t[3], t[4])",
+    );
+}
+
+#[test]
+fn oracle_table_remove_last() {
+    oracle::assert_matches_reference(
+        "local t = {1, 2, 3}; local v = table.remove(t); print(v, #t)",
+    );
+}
+
+#[test]
+fn oracle_table_remove_at_position() {
+    oracle::assert_matches_reference(
+        "local t = {1, 2, 3}; local v = table.remove(t, 1); print(v, t[1], t[2])",
+    );
+}
+
+#[test]
+fn oracle_table_sort_numbers() {
+    oracle::assert_matches_reference(
+        "local t = {3, 1, 4, 1, 5, 9, 2, 6}; table.sort(t); print(table.concat(t, ', '))",
+    );
+}
+
+#[test]
+fn oracle_table_sort_strings() {
+    oracle::assert_matches_reference(
+        "local t = {'banana', 'apple', 'cherry'}; table.sort(t); print(table.concat(t, ', '))",
+    );
+}
+
+#[test]
+fn oracle_table_sort_custom() {
+    oracle::assert_matches_reference(
+        "local t = {3, 1, 4}; table.sort(t, function(a, b) return a > b end); print(table.concat(t, ', '))",
+    );
+}
+
+#[test]
+fn oracle_table_maxn() {
+    oracle::assert_matches_reference("print(table.maxn({1, 2, 3}))");
+}
+
+#[test]
+fn oracle_table_maxn_empty() {
+    oracle::assert_matches_reference("print(table.maxn({}))");
+}
+
+#[test]
+fn oracle_table_maxn_float_keys() {
+    oracle::assert_matches_reference(
+        "local t = {}; t[1] = 'a'; t[3.5] = 'b'; t[100] = 'c'; print(table.maxn(t))",
+    );
+}
+
+#[test]
+fn oracle_table_getn() {
+    oracle::assert_matches_reference("print(table.getn({10, 20, 30}))");
+}
+
+#[test]
+fn oracle_table_foreachi() {
+    oracle::assert_matches_reference(
+        "local r = '' table.foreachi({10, 20, 30}, function(i, v) r = r .. i .. '=' .. v .. ' ' end) print(r)",
+    );
+}
+
+#[test]
+fn oracle_table_foreachi_early_return() {
+    oracle::assert_matches_reference(
+        "local v = table.foreachi({10, 20, 30}, function(i, v) if v == 20 then return 'found' end end) print(v)",
+    );
+}
+
+#[test]
+fn oracle_table_sort_empty() {
+    oracle::assert_matches_reference("local t = {}; table.sort(t); print(#t)");
+}
+
+#[test]
+fn oracle_table_sort_single() {
+    oracle::assert_matches_reference("local t = {42}; table.sort(t); print(t[1])");
+}
+
+#[test]
+fn oracle_table_insert_remove_sequence() {
+    oracle::assert_matches_reference(
+        "local t = {1, 2, 3}; table.insert(t, 2, 99); table.remove(t, 3); print(table.concat(t, ', '))",
+    );
+}

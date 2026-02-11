@@ -905,3 +905,293 @@ fn string_global_has_functions() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "function\tfunction\n");
 }
+
+// ---------------------------------------------------------------------------
+// table library tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn table_global_type() {
+    let (stdout, _, code) = run_rilua("print(type(table))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn table_global_has_functions() {
+    let (stdout, _, code) =
+        run_rilua("print(type(table.concat), type(table.insert), type(table.sort))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "function\tfunction\tfunction\n");
+}
+
+// -- table.concat --
+
+#[test]
+fn table_concat_basic() {
+    let (stdout, _, code) = run_rilua("print(table.concat({1, 2, 3}, ', '))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1, 2, 3\n");
+}
+
+#[test]
+fn table_concat_strings() {
+    let (stdout, _, code) = run_rilua("print(table.concat({'a', 'b', 'c'}))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "abc\n");
+}
+
+#[test]
+fn table_concat_default_sep() {
+    let (stdout, _, code) = run_rilua("print(table.concat({'x', 'y', 'z'}))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "xyz\n");
+}
+
+#[test]
+fn table_concat_range() {
+    let (stdout, _, code) = run_rilua("print(table.concat({'a', 'b', 'c', 'd'}, '-', 2, 3))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "b-c\n");
+}
+
+#[test]
+fn table_concat_empty() {
+    let (stdout, _, code) = run_rilua("print(table.concat({}, ', '))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "\n");
+}
+
+#[test]
+fn table_concat_single() {
+    let (stdout, _, code) = run_rilua("print(table.concat({'only'}, ', '))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "only\n");
+}
+
+#[test]
+fn table_concat_numbers() {
+    let (stdout, _, code) = run_rilua("print(table.concat({10, 20, 30}, '+'))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "10+20+30\n");
+}
+
+#[test]
+fn table_concat_error_non_string() {
+    let (_, stderr, code) = run_rilua("table.concat({1, true, 3}, ', ')");
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("table contains non-strings"),
+        "stderr: {stderr}"
+    );
+}
+
+// -- table.insert --
+
+#[test]
+fn table_insert_append() {
+    let (stdout, _, code) =
+        run_rilua("local t = {1, 2, 3}; table.insert(t, 4); print(t[1], t[2], t[3], t[4])");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\t2\t3\t4\n");
+}
+
+#[test]
+fn table_insert_at_position() {
+    let (stdout, _, code) =
+        run_rilua("local t = {1, 2, 3}; table.insert(t, 2, 99); print(t[1], t[2], t[3], t[4])");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\t99\t2\t3\n");
+}
+
+#[test]
+fn table_insert_at_start() {
+    let (stdout, _, code) =
+        run_rilua("local t = {1, 2, 3}; table.insert(t, 1, 0); print(t[1], t[2], t[3], t[4])");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0\t1\t2\t3\n");
+}
+
+#[test]
+fn table_insert_wrong_args() {
+    let (_, stderr, code) = run_rilua("table.insert({})");
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("wrong number of arguments to 'insert'"),
+        "stderr: {stderr}"
+    );
+}
+
+// -- table.remove --
+
+#[test]
+fn table_remove_last() {
+    let (stdout, _, code) =
+        run_rilua("local t = {1, 2, 3}; local v = table.remove(t); print(v, #t, t[1], t[2])");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\t2\t1\t2\n");
+}
+
+#[test]
+fn table_remove_at_position() {
+    let (stdout, _, code) =
+        run_rilua("local t = {1, 2, 3}; local v = table.remove(t, 2); print(v, #t, t[1], t[2])");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "2\t2\t1\t3\n");
+}
+
+#[test]
+fn table_remove_empty() {
+    // table.remove on empty table returns nothing.
+    let (stdout, _, code) = run_rilua("local t = {}; print(table.remove(t))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "\n");
+}
+
+#[test]
+fn table_remove_return_value() {
+    let (stdout, _, code) = run_rilua("local t = {'a', 'b', 'c'}; print(table.remove(t, 1))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "a\n");
+}
+
+// -- table.sort --
+
+#[test]
+fn table_sort_numbers() {
+    let (stdout, _, code) = run_rilua(
+        "local t = {3, 1, 4, 1, 5, 9, 2, 6}; table.sort(t); print(table.concat(t, ', '))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1, 1, 2, 3, 4, 5, 6, 9\n");
+}
+
+#[test]
+fn table_sort_strings() {
+    let (stdout, _, code) = run_rilua(
+        "local t = {'banana', 'apple', 'cherry'}; table.sort(t); print(table.concat(t, ', '))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "apple, banana, cherry\n");
+}
+
+#[test]
+fn table_sort_custom_comparator() {
+    let (stdout, _, code) = run_rilua(
+        "local t = {3, 1, 4, 1, 5}; table.sort(t, function(a, b) return a > b end); print(table.concat(t, ', '))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5, 4, 3, 1, 1\n");
+}
+
+#[test]
+fn table_sort_empty() {
+    let (stdout, _, code) = run_rilua("local t = {}; table.sort(t); print(#t)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn table_sort_single() {
+    let (stdout, _, code) = run_rilua("local t = {42}; table.sort(t); print(t[1])");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn table_sort_already_sorted() {
+    let (stdout, _, code) =
+        run_rilua("local t = {1, 2, 3, 4, 5}; table.sort(t); print(table.concat(t, ', '))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1, 2, 3, 4, 5\n");
+}
+
+#[test]
+fn table_sort_reverse_sorted() {
+    let (stdout, _, code) =
+        run_rilua("local t = {5, 4, 3, 2, 1}; table.sort(t); print(table.concat(t, ', '))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1, 2, 3, 4, 5\n");
+}
+
+// -- table.maxn --
+
+#[test]
+fn table_maxn_basic() {
+    let (stdout, _, code) = run_rilua("print(table.maxn({1, 2, 3}))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\n");
+}
+
+#[test]
+fn table_maxn_empty() {
+    let (stdout, _, code) = run_rilua("print(table.maxn({}))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn table_maxn_float_keys() {
+    let (stdout, _, code) =
+        run_rilua("local t = {}; t[1] = 'a'; t[3.5] = 'b'; t[100] = 'c'; print(table.maxn(t))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "100\n");
+}
+
+// -- table.getn --
+
+#[test]
+fn table_getn_basic() {
+    let (stdout, _, code) = run_rilua("print(table.getn({10, 20, 30}))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\n");
+}
+
+// -- table.setn --
+
+#[test]
+fn table_setn_error() {
+    let (_, stderr, code) = run_rilua("table.setn({}, 5)");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("'setn' is obsolete"), "stderr: {stderr}");
+}
+
+// -- table.foreach / foreachi --
+
+#[test]
+fn table_foreachi_basic() {
+    let (stdout, _, code) = run_rilua(
+        "local r = '' table.foreachi({10, 20, 30}, function(i, v) r = r .. i .. '=' .. v .. ' ' end) print(r)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1=10 2=20 3=30 \n");
+}
+
+#[test]
+fn table_foreachi_early_return() {
+    let (stdout, _, code) = run_rilua(
+        "local v = table.foreachi({10, 20, 30}, function(i, v) if v == 20 then return 'found' end end) print(v)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "found\n");
+}
+
+#[test]
+fn table_foreach_basic() {
+    // foreach iterates all keys -- order is not guaranteed for hash part,
+    // so test with only integer keys where order matches foreachi.
+    let (stdout, _, code) = run_rilua(
+        "local sum = 0 table.foreach({10, 20, 30}, function(k, v) sum = sum + v end) print(sum)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "60\n");
+}
+
+#[test]
+fn table_foreach_early_return() {
+    let (stdout, _, code) = run_rilua(
+        "local v = table.foreach({a=1, b=2}, function(k, v) if v == 1 then return k end end) print(type(v))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "string\n");
+}

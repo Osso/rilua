@@ -13,7 +13,7 @@ integrated at every step.
 | 2: Compilation Pipeline | Done | 354 unit tests + 10 oracle, bytecode matches `luac -l` |
 | 3: Core VM | Done | 466 total (431 unit + 16 integration + 19 oracle) |
 | 4: Language Features | Done | 521 total (439 unit + 43 integration + 39 oracle) |
-| 5: Standard Libraries | In progress (5a-5b done) | 647 total (439 unit + 113 integration + 95 oracle) |
+| 5: Standard Libraries | In progress (5a-5c done) | 701 total (439 unit + 147 integration + 115 oracle) |
 | 6: Coroutines | Not started | -- |
 | 7: GC Collector | Not started | -- |
 | 8: Public API + CLI | Not started | -- |
@@ -25,9 +25,12 @@ functions. Phase 5a added iterators, dynamic loading, environments, and
 globals. Phase 5b added the string library with all 14 functions plus
 pattern matching engine (find, match, gmatch, gsub with character
 classes, quantifiers, captures, balanced match, frontier patterns).
-String metatable enables method syntax (`("hello"):upper()`). 647 total
-tests pass (439 unit + 113 integration + 95 oracle). All oracle test
-cases match PUC-Rio Lua 5.1.1. The full quality gate passes clean.
+String metatable enables method syntax (`("hello"):upper()`). Phase 5c
+added the table library with all 9 functions (concat, insert, remove,
+sort, maxn, getn, setn, foreach, foreachi). Sort implements PUC-Rio's
+median-of-three quicksort (`auxsort`). 701 total tests pass (439 unit +
+147 integration + 115 oracle). All oracle test cases match PUC-Rio Lua
+5.1.1. The full quality gate passes clean.
 
 Known issues deferred to later phases:
 - `{...}` vararg table constructor captures only first argument (VM bug)

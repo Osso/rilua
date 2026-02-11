@@ -56,6 +56,27 @@ pub fn open_libs(state: &mut LuaState) -> LuaResult<()> {
     // String library.
     open_string_lib(state)?;
 
+    // Table library.
+    open_table_lib(state)?;
+
+    Ok(())
+}
+
+/// Registers the table library as `table` global.
+///
+/// Follows PUC-Rio's `luaopen_table` pattern from `ltablib.c`.
+fn open_table_lib(state: &mut LuaState) -> LuaResult<()> {
+    let table_table = state.gc.alloc_table(Table::new());
+    register_table_fn(state, table_table, "concat", table::tab_concat)?;
+    register_table_fn(state, table_table, "foreach", table::tab_foreach)?;
+    register_table_fn(state, table_table, "foreachi", table::tab_foreachi)?;
+    register_table_fn(state, table_table, "getn", table::tab_getn)?;
+    register_table_fn(state, table_table, "insert", table::tab_insert)?;
+    register_table_fn(state, table_table, "maxn", table::tab_maxn)?;
+    register_table_fn(state, table_table, "remove", table::tab_remove)?;
+    register_table_fn(state, table_table, "setn", table::tab_setn)?;
+    register_table_fn(state, table_table, "sort", table::tab_sort)?;
+    register_global_val(state, "table", Val::Table(table_table))?;
     Ok(())
 }
 
