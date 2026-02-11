@@ -1512,7 +1512,10 @@ impl Compiler {
 /// Checks if two Val constants are equal for deduplication.
 fn constants_equal(a: &Val, b: &Val) -> bool {
     match (a, b) {
-        (Val::Nil, Val::Nil) => true,
+        // Val::Nil is used as a placeholder for unresolved string constants
+        // (see `string_constant`). Never dedup nil entries: a real nil
+        // constant must not share an index with a string placeholder.
+        (Val::Nil, Val::Nil) => false,
         (Val::Bool(x), Val::Bool(y)) => x == y,
         (Val::Num(x), Val::Num(y)) => {
             // For constant dedup, we need bitwise equality (NaN != NaN, but
