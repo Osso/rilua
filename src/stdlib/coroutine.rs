@@ -1,1 +1,531 @@
-//! Coroutine library: create, resume, yield, wrap, status.
+//! Coroutine library: create, resume, yield, wrap, status, running.
+//!
+//! Reference: coroutine functions in `lbaselib.c`, `lua_resume`/`lua_yield`
+//! in `ldo.c`, PUC-Rio Lua 5.1.1.
+//!
+//! ## Architecture
+//!
+//! rilua uses a "swap model" for coroutines: `LuaState` always represents
+//! the currently executing thread. When resuming a coroutine, the resumer's
+//! per-thread state (stack, call_stack, etc.) is saved to a `LuaThread`
+//! on the Rust stack, the coroutine's state is loaded from the GC arena
+//! into `LuaState`, execution proceeds, and then the states are swapped
+//! back.
+//!
+//! Yield is implemented via `LuaError::Yield(n_results)`. This error
+//! propagates through the Rust call stack back to the resume handler,
+//! which catches it and treats it as a successful yield.
+//!
+//! The `n_ccalls` counter (managed by `call_function`, the `luaD_call`
+//! equivalent) determines the yield boundary: yield is only allowed when
+//! `n_ccalls == 0`, preventing yield across C-call boundaries.
+
+use crate::error::{LuaError, LuaResult, RuntimeError};
+use crate::vm::callinfo::LUA_MULTRET;
+use crate::vm::closure::{Closure, RustClosure, Upvalue};
+use crate::vm::execute::{self, CallResult};
+use crate::vm::gc::arena::GcRef;
+use crate::vm::state::{LuaState, LuaThread, ThreadStatus};
+use crate::vm::value::Val;
+
+// ---------------------------------------------------------------------------
+// Argument helpers (same pattern as other stdlib modules)
+// ---------------------------------------------------------------------------
+
+/// Returns the number of arguments passed to the current Rust function.
+fn nargs(state: &LuaState) -> usize {
+    let func = state.call_stack[state.ci].func;
+    if state.top > func + 1 {
+        state.top - func - 1
+    } else {
+        0
+    }
+}
+
+/// Returns argument `n` (0-based) to the current Rust function.
+fn arg(state: &LuaState, n: usize) -> Val {
+    let func = state.call_stack[state.ci].func;
+    state.stack_get(func + 1 + n)
+}
+
+/// Creates a simple runtime error.
+fn simple_error(msg: String) -> LuaError {
+    LuaError::Runtime(RuntimeError {
+        message: msg,
+        level: 0,
+        traceback: vec![],
+    })
+}
+
+// ---------------------------------------------------------------------------
+// coroutine.create(f)
+// ---------------------------------------------------------------------------
+
+/// Creates a new coroutine with body `f`. `f` must be a Lua function.
+///
+/// Returns the new coroutine (as a thread value).
+///
+/// Reference: `luaB_cocreate` in `lbaselib.c`.
+pub fn co_create(state: &mut LuaState) -> LuaResult<u32> {
+    let func_val = arg(state, 0);
+
+    // Validate: must be a Lua function (not a Rust function).
+    match func_val {
+        Val::Function(r) => {
+            let cl = state
+                .gc
+                .closures
+                .get(r)
+                .ok_or_else(|| simple_error("invalid function reference".into()))?;
+            if matches!(cl, Closure::Rust(_)) {
+                return Err(simple_error(
+                    "bad argument #1 to 'create' (Lua function expected)".into(),
+                ));
+            }
+        }
+        _ => {
+            return Err(simple_error(
+                "bad argument #1 to 'create' (Lua function expected)".into(),
+            ));
+        }
+    }
+
+    // Create a new thread with the function on its stack.
+    let thread = LuaThread::new(func_val);
+    let thread_ref = state.gc.alloc_thread(thread);
+
+    state.push(Val::Thread(thread_ref));
+    Ok(1)
+}
+
+// ---------------------------------------------------------------------------
+// coroutine.resume(co, ...)
+// ---------------------------------------------------------------------------
+
+/// Resumes a coroutine. Returns `true, results...` on success or yield,
+/// `false, error_message` on error.
+///
+/// Reference: `luaB_coresume` + `auxresume` in `lbaselib.c`,
+/// `lua_resume` in `ldo.c`.
+pub fn co_resume(state: &mut LuaState) -> LuaResult<u32> {
+    let co_val = arg(state, 0);
+    let Val::Thread(co_ref) = co_val else {
+        return Err(simple_error(
+            "bad argument #1 to 'resume' (coroutine expected)".into(),
+        ));
+    };
+
+    // Collect arguments to pass to the coroutine.
+    let n_resume_args = if nargs(state) > 1 {
+        nargs(state) - 1
+    } else {
+        0
+    };
+    let mut resume_args = Vec::with_capacity(n_resume_args);
+    for i in 0..n_resume_args {
+        resume_args.push(arg(state, 1 + i));
+    }
+
+    // Run auxresume and translate the result.
+    match auxresume(state, co_ref, &resume_args) {
+        Ok(results) => {
+            // Success or yield: push true + all results.
+            let base = state.base;
+            state.stack_set(base, Val::Bool(true));
+            for (i, val) in results.iter().enumerate() {
+                state.stack_set(base + 1 + i, *val);
+            }
+            state.top = base + 1 + results.len();
+            Ok((1 + results.len()) as u32)
+        }
+        Err(err_msg) => {
+            // Error: push false + error message.
+            let base = state.base;
+            let msg_ref = state.gc.intern_string(err_msg.as_bytes());
+            state.stack_set(base, Val::Bool(false));
+            state.stack_set(base + 1, Val::Str(msg_ref));
+            state.top = base + 2;
+            Ok(2)
+        }
+    }
+}
+
+/// Closes open upvalues belonging to the function in a coroutine thread.
+///
+/// In rilua's swap model, the main thread's stack is saved before the
+/// coroutine's stack is loaded. Open upvalues from the main thread that
+/// reference its stack would point to invalid data after the swap. This
+/// function closes them, capturing their current values into `Closed`
+/// state, making them stack-independent.
+///
+/// Must be called BEFORE `save_thread_state` while the main thread's
+/// stack is still active in `state.stack`.
+fn close_cross_thread_upvalues(state: &mut LuaState, co_ref: GcRef<LuaThread>) {
+    // Get the function from the coroutine's thread data (at stack[0]).
+    let func_val = state
+        .gc
+        .threads
+        .get(co_ref)
+        .and_then(|t| t.stack.first().copied())
+        .unwrap_or(Val::Nil);
+
+    let Val::Function(closure_ref) = func_val else {
+        return;
+    };
+
+    // Collect upvalue refs from the closure (clone to avoid borrow conflicts).
+    let upvalue_refs: Vec<GcRef<Upvalue>> = match state.gc.closures.get(closure_ref) {
+        Some(Closure::Lua(lc)) => lc.upvalues.clone(),
+        _ => return,
+    };
+
+    // Close each open upvalue using the current (main thread's) stack.
+    for uv_ref in &upvalue_refs {
+        if let Some(uv) = state.gc.upvalues.get_mut(*uv_ref) {
+            uv.close(&state.stack);
+        }
+        // Remove from the main thread's open upvalue tracking list.
+        state.open_upvalues.retain(|r| r != uv_ref);
+    }
+}
+
+/// Core resume logic shared by `coroutine.resume` and `coroutine.wrap`.
+///
+/// Returns `Ok(results)` on success/yield, `Err(error_message)` on error.
+///
+/// Reference: `auxresume` in `lbaselib.c`.
+fn auxresume(
+    state: &mut LuaState,
+    co_ref: GcRef<LuaThread>,
+    args: &[Val],
+) -> Result<Vec<Val>, String> {
+    // Check coroutine status.
+    let co_status = state
+        .gc
+        .threads
+        .get(co_ref)
+        .map_or(ThreadStatus::Dead, |t| t.status);
+
+    match co_status {
+        ThreadStatus::Dead => {
+            return Err("cannot resume dead coroutine".into());
+        }
+        ThreadStatus::Running | ThreadStatus::Normal => {
+            return Err("cannot resume non-suspended coroutine".into());
+        }
+        ThreadStatus::Initial | ThreadStatus::Suspended => {
+            // OK to resume.
+        }
+    }
+
+    // For first resume: close the function's upvalues that reference the
+    // current (main) thread's stack. This captures their values before the
+    // stack swap makes them inaccessible.
+    if co_status == ThreadStatus::Initial {
+        close_cross_thread_upvalues(state, co_ref);
+    }
+
+    // Save the identity of the calling thread (for nested resume tracking).
+    let saved_current_thread = state.current_thread;
+
+    // Save the resumer's state.
+    let resumer = state.save_thread_state();
+
+    // Load the coroutine's state into LuaState.
+    state.load_thread_by_ref(co_ref, ThreadStatus::Running);
+
+    // Track which thread is active.
+    state.current_thread = Some(co_ref);
+
+    // Transfer arguments to the coroutine's stack.
+    if co_status == ThreadStatus::Initial {
+        // First resume: push args after the function (they become function args).
+        for &val in args {
+            state.push(val);
+        }
+    } else {
+        // Resuming from yield: the yield's CI is still on the call stack.
+        // Push resume args as the "return values" of yield.
+        // The yielded values area starts at state.base. Replace with resume args.
+        for (i, &val) in args.iter().enumerate() {
+            state.stack_set(state.base + i, val);
+        }
+        state.top = state.base + args.len();
+    }
+
+    // Execute the coroutine.
+    let exec_result = if co_status == ThreadStatus::Initial {
+        // First resume: call the function at stack[0].
+        // Use precall+execute directly (not call_function) so n_ccalls stays 0.
+        // This allows yield within the coroutine body.
+        let func_idx = 0;
+        (|| -> LuaResult<()> {
+            match state.precall(func_idx, LUA_MULTRET)? {
+                CallResult::Lua => execute::execute(state),
+                CallResult::Rust => Ok(()),
+            }
+        })()
+    } else {
+        // Resuming from yield: the coroutine was suspended inside a Rust
+        // function (yield). We need to complete the interrupted call.
+        //
+        // In PUC-Rio, resume() calls poscall for the interrupted C function,
+        // then luaV_execute. In rilua, yield propagated as an error through
+        // precall, so the CI for yield is still on the stack. We need to
+        // complete poscall for it and then continue execution.
+        //
+        // The resume args are at state.base..state.top. poscall reads from
+        // first_result and places results at the caller's expected position.
+        let first_result = state.base;
+        if state.poscall(first_result) {
+            state.top = state.call_stack[state.ci].top;
+        }
+
+        // Continue execution from where we left off.
+        if state.ci > 0 {
+            execute::execute(state)
+        } else {
+            Ok(())
+        }
+    };
+
+    // Determine outcome and collect results.
+    match exec_result {
+        Ok(()) => {
+            // Coroutine returned normally. Collect return values.
+            // After execute returns from OP_RETURN at the top level,
+            // results are at the coroutine's stack base area.
+            let mut results = Vec::new();
+            let ci_func = state.call_stack[state.ci].func;
+            for i in ci_func..state.top {
+                results.push(state.stack_get(i));
+            }
+
+            // Save coroutine state back (dead) and restore resumer.
+            state.save_and_restore_by_ref(co_ref, ThreadStatus::Dead, resumer);
+            state.current_thread = saved_current_thread;
+            Ok(results)
+        }
+        Err(LuaError::Yield(n_results)) => {
+            // Coroutine yielded. Collect yielded values.
+            // The values are the top n_results on the stack.
+            let mut results = Vec::new();
+            let start = if state.top >= n_results as usize {
+                state.top - n_results as usize
+            } else {
+                0
+            };
+            for i in start..state.top {
+                results.push(state.stack_get(i));
+            }
+
+            // Save coroutine state as suspended and restore resumer.
+            state.save_and_restore_by_ref(co_ref, ThreadStatus::Suspended, resumer);
+            state.current_thread = saved_current_thread;
+            Ok(results)
+        }
+        Err(err) => {
+            // Coroutine errored. Get error message.
+            let error_msg = if let Some(obj) = state.error_object.take() {
+                match obj {
+                    Val::Str(r) => state.gc.string_arena.get(r).map_or_else(
+                        || err.to_string(),
+                        |s| String::from_utf8_lossy(s.data()).to_string(),
+                    ),
+                    _ => err.to_string(),
+                }
+            } else {
+                err.to_string()
+            };
+
+            // Save coroutine state as dead and restore resumer.
+            state.save_and_restore_by_ref(co_ref, ThreadStatus::Dead, resumer);
+            state.current_thread = saved_current_thread;
+            Err(error_msg)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// coroutine.yield(...)
+// ---------------------------------------------------------------------------
+
+/// Suspends the currently running coroutine.
+///
+/// All arguments become the results of `coroutine.resume()` in the
+/// resumer. When the coroutine is resumed again, `yield` returns
+/// the arguments passed to `resume`.
+///
+/// Reference: `luaB_yield` + `lua_yield` in PUC-Rio Lua 5.1.1.
+pub fn co_yield(state: &mut LuaState) -> LuaResult<u32> {
+    // Check yield boundary: can't yield across C-call boundaries.
+    if state.n_ccalls > 0 {
+        return Err(simple_error(
+            "attempt to yield across metamethod/C-call boundary".into(),
+        ));
+    }
+
+    // The yielded values are the arguments to yield (already on the stack).
+    let n = nargs(state) as u32;
+
+    // Signal yield by returning a special error.
+    // The resume handler will catch this and collect the yielded values.
+    Err(LuaError::Yield(n))
+}
+
+// ---------------------------------------------------------------------------
+// coroutine.wrap(f)
+// ---------------------------------------------------------------------------
+
+/// Creates a coroutine and returns a function that resumes it each time
+/// it is called. Arguments to the function go to `resume`; results of
+/// `yield` become results of the function. Errors propagate.
+///
+/// Reference: `luaB_cowrap` + `luaB_auxwrap` in `lbaselib.c`.
+pub fn co_wrap(state: &mut LuaState) -> LuaResult<u32> {
+    // Create the coroutine (reuse co_create logic).
+    let func_val = arg(state, 0);
+
+    // Validate: must be a Lua function.
+    match func_val {
+        Val::Function(r) => {
+            let cl = state
+                .gc
+                .closures
+                .get(r)
+                .ok_or_else(|| simple_error("invalid function reference".into()))?;
+            if matches!(cl, Closure::Rust(_)) {
+                return Err(simple_error(
+                    "bad argument #1 to 'wrap' (Lua function expected)".into(),
+                ));
+            }
+        }
+        _ => {
+            return Err(simple_error(
+                "bad argument #1 to 'wrap' (Lua function expected)".into(),
+            ));
+        }
+    }
+
+    let thread = LuaThread::new(func_val);
+    let thread_ref = state.gc.alloc_thread(thread);
+
+    // Create a Rust closure with the thread as upvalue[0].
+    let mut wrapper = RustClosure::new(wrap_aux, "wrap_aux");
+    wrapper.upvalues.push(Val::Thread(thread_ref));
+    let closure_ref = state.gc.alloc_closure(Closure::Rust(wrapper));
+
+    state.push(Val::Function(closure_ref));
+    Ok(1)
+}
+
+/// The wrapped coroutine resume function (upvalue[0] = thread).
+///
+/// Reference: `luaB_auxwrap` in `lbaselib.c`.
+fn wrap_aux(state: &mut LuaState) -> LuaResult<u32> {
+    // Get the thread from upvalue[0].
+    let ci_func = state.call_stack[state.ci].func;
+    let func_val = state.stack_get(ci_func);
+    let closure_ref = match func_val {
+        Val::Function(r) => r,
+        _ => return Err(simple_error("invalid wrap closure".into())),
+    };
+
+    let co_ref = {
+        let cl = state
+            .gc
+            .closures
+            .get(closure_ref)
+            .ok_or_else(|| simple_error("invalid closure reference".into()))?;
+        match cl {
+            Closure::Rust(rc) => {
+                if let Some(Val::Thread(r)) = rc.upvalues.first() {
+                    *r
+                } else {
+                    return Err(simple_error("wrap: missing thread upvalue".into()));
+                }
+            }
+            _ => return Err(simple_error("wrap: expected Rust closure".into())),
+        }
+    };
+
+    // Collect arguments.
+    let n = nargs(state);
+    let mut args = Vec::with_capacity(n);
+    for i in 0..n {
+        args.push(arg(state, i));
+    }
+
+    // Resume the coroutine.
+    match auxresume(state, co_ref, &args) {
+        Ok(results) => {
+            // Push results directly (no true/false prefix).
+            let base = state.base;
+            for (i, val) in results.iter().enumerate() {
+                state.stack_set(base + i, *val);
+            }
+            state.top = base + results.len();
+            Ok(results.len() as u32)
+        }
+        Err(err_msg) => {
+            // Propagate error (unlike resume which returns false+msg).
+            Err(simple_error(err_msg))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// coroutine.status(co)
+// ---------------------------------------------------------------------------
+
+/// Returns the status of a coroutine as a string:
+/// `"running"`, `"suspended"`, `"normal"`, or `"dead"`.
+///
+/// Reference: `luaB_costatus` in `lbaselib.c`.
+pub fn co_status(state: &mut LuaState) -> LuaResult<u32> {
+    let co_val = arg(state, 0);
+    let Val::Thread(co_ref) = co_val else {
+        return Err(simple_error(
+            "bad argument #1 to 'status' (coroutine expected)".into(),
+        ));
+    };
+
+    // Check if this coroutine is the currently running one.
+    if state.current_thread == Some(co_ref) {
+        let s = state.gc.intern_string(b"running");
+        state.push(Val::Str(s));
+        return Ok(1);
+    }
+
+    let status_str = match state.gc.threads.get(co_ref).map(|t| t.status) {
+        Some(ThreadStatus::Initial) => "suspended",
+        Some(ThreadStatus::Running) => "running",
+        Some(ThreadStatus::Suspended) => "suspended",
+        Some(ThreadStatus::Normal) => "normal",
+        Some(ThreadStatus::Dead) | None => "dead",
+    };
+
+    let s = state.gc.intern_string(status_str.as_bytes());
+    state.push(Val::Str(s));
+    Ok(1)
+}
+
+// ---------------------------------------------------------------------------
+// coroutine.running()
+// ---------------------------------------------------------------------------
+
+/// Returns the running coroutine, or nil if called from the main thread.
+///
+/// Reference: `luaB_corunning` in `lbaselib.c`.
+pub fn co_running(state: &mut LuaState) -> LuaResult<u32> {
+    match state.current_thread {
+        Some(co_ref) => {
+            state.push(Val::Thread(co_ref));
+            Ok(1)
+        }
+        None => {
+            // Main thread: return nothing (nil).
+            Ok(0)
+        }
+    }
+}

@@ -68,6 +68,12 @@ pub fn open_libs(state: &mut LuaState) -> LuaResult<()> {
     // I/O library.
     io::open_io_lib(state)?;
 
+    // Coroutine library.
+    open_coroutine_lib(state)?;
+
+    // Package library (must be last: populates package.loaded with other libs).
+    package::open_package_lib(state)?;
+
     Ok(())
 }
 
@@ -224,6 +230,23 @@ fn open_string_lib(state: &mut LuaState) -> LuaResult<()> {
     // Set the string type metatable (type tag 3 = String).
     state.gc.type_metatables[3] = Some(mt);
 
+    Ok(())
+}
+
+/// Registers the coroutine library as `coroutine` global.
+///
+/// Follows PUC-Rio's `luaopen_base` coroutine registration from `lbaselib.c`.
+fn open_coroutine_lib(state: &mut LuaState) -> LuaResult<()> {
+    let co_table = state.gc.alloc_table(Table::new());
+
+    register_table_fn(state, co_table, "create", coroutine::co_create)?;
+    register_table_fn(state, co_table, "resume", coroutine::co_resume)?;
+    register_table_fn(state, co_table, "yield", coroutine::co_yield)?;
+    register_table_fn(state, co_table, "wrap", coroutine::co_wrap)?;
+    register_table_fn(state, co_table, "status", coroutine::co_status)?;
+    register_table_fn(state, co_table, "running", coroutine::co_running)?;
+
+    register_global_val(state, "coroutine", Val::Table(co_table))?;
     Ok(())
 }
 

@@ -219,6 +219,31 @@ pub enum CallResult {
 }
 
 impl LuaState {
+    /// Calls a function at `func_idx` with C-call boundary tracking.
+    ///
+    /// This is the rilua equivalent of PUC-Rio's `luaD_call()`. It wraps
+    /// `precall` + `execute` with `n_ccalls` increment/decrement. Used by
+    /// stdlib functions (pcall, table.sort, etc.) and metamethods to call
+    /// Lua code. The VM's `OP_CALL` handler uses `precall` + `execute`
+    /// directly without `n_ccalls` tracking.
+    ///
+    /// The `n_ccalls` counter determines the yield boundary: `coroutine.yield()`
+    /// is only allowed when `n_ccalls == 0`, preventing yield across C-call
+    /// boundaries (metamethods, pcall, stdlib callbacks).
+    pub fn call_function(&mut self, func_idx: usize, num_results: i32) -> LuaResult<()> {
+        self.n_ccalls += 1;
+        if self.n_ccalls >= MAXCCALLS {
+            self.n_ccalls -= 1;
+            return Err(runtime_error_simple("C stack overflow"));
+        }
+        let result = (|| match self.precall(func_idx, num_results)? {
+            CallResult::Lua => execute(self),
+            CallResult::Rust => Ok(()),
+        })();
+        self.n_ccalls -= 1;
+        result
+    }
+
     /// Sets up a call frame for the function at `func_idx`.
     ///
     /// For Lua functions: pushes a new CallInfo and returns `CallResult::Lua`.
@@ -334,17 +359,12 @@ impl LuaState {
                 self.push_ci(ci);
                 self.base = func_idx + 1;
 
-                self.n_ccalls += 1;
-                if self.n_ccalls >= MAXCCALLS {
-                    self.n_ccalls -= 1;
-                    self.pop_ci();
-                    return Err(runtime_error_simple("C stack overflow"));
-                }
+                // Note: n_ccalls is NOT incremented here. The C-call boundary
+                // counter is managed by call_function() (the luaD_call equivalent).
+                // This matches PUC-Rio where luaD_precall does not touch nCcalls.
 
                 // Execute the Rust function.
                 let n_results = func(self)?;
-
-                self.n_ccalls -= 1;
 
                 // Move results into place.
                 let first_result = self.top - n_results as usize;
@@ -620,10 +640,7 @@ fn call_tm_res(
     state.stack_set(call_base + 2, arg2);
     state.top = call_base + 3;
 
-    match state.precall(call_base, 1)? {
-        CallResult::Lua => execute(state)?,
-        CallResult::Rust => {}
-    }
+    state.call_function(call_base, 1)?;
 
     // Read the result (poscall placed it at call_base).
     let result = state.stack_get(call_base);
@@ -643,10 +660,7 @@ fn call_tm_void(state: &mut LuaState, tm: Val, arg1: Val, arg2: Val, arg3: Val) 
     state.stack_set(call_base + 3, arg3);
     state.top = call_base + 4;
 
-    match state.precall(call_base, 0)? {
-        CallResult::Lua => execute(state)?,
-        CallResult::Rust => {}
-    }
+    state.call_function(call_base, 0)?;
 
     Ok(())
 }

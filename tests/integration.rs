@@ -2252,3 +2252,629 @@ fn io_read_all_empty() {
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "0");
 }
+
+// ---------------------------------------------------------------------------
+// package library tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn package_table_exists() {
+    let (stdout, _, code) = run_rilua("print(type(package))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn package_loaded_is_table() {
+    let (stdout, _, code) = run_rilua("print(type(package.loaded))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn package_preload_is_table() {
+    let (stdout, _, code) = run_rilua("print(type(package.preload))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn package_loaders_is_table() {
+    let (stdout, _, code) = run_rilua("print(type(package.loaders))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn package_loaders_count() {
+    let (stdout, _, code) = run_rilua(
+        "local count = 0 \
+         for i = 1, 100 do \
+           if package.loaders[i] then count = count + 1 else break end \
+         end \
+         print(count)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "4\n");
+}
+
+#[test]
+fn package_path_is_string() {
+    let (stdout, _, code) = run_rilua("print(type(package.path))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "string\n");
+}
+
+#[test]
+fn package_cpath_is_string() {
+    let (stdout, _, code) = run_rilua("print(type(package.cpath))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "string\n");
+}
+
+#[test]
+fn package_config_value() {
+    let (stdout, _, code) = run_rilua("print(package.config)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "/\n;\n?\n!\n-\n\n");
+}
+
+#[test]
+fn require_returns_string_lib() {
+    let (stdout, _, code) = run_rilua("print(require('string') == string)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn require_returns_math_lib() {
+    let (stdout, _, code) = run_rilua("print(require('math') == math)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn require_returns_table_lib() {
+    let (stdout, _, code) = run_rilua("print(require('table') == table)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn require_returns_os_lib() {
+    let (stdout, _, code) = run_rilua("print(require('os') == os)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn require_returns_io_lib() {
+    let (stdout, _, code) = run_rilua("print(require('io') == io)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn require_returns_package_lib() {
+    let (stdout, _, code) = run_rilua("print(require('package') == package)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn require_caching() {
+    let (stdout, _, code) = run_rilua(
+        "local a = require('string') \
+         local b = require('string') \
+         print(a == b)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn require_not_found_error() {
+    let (_, stderr, code) = run_rilua("require('nonexistent_module_xyz')");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("module 'nonexistent_module_xyz' not found"));
+}
+
+#[test]
+fn require_not_found_error_has_search_details() {
+    let (_, stderr, code) = run_rilua("require('nonexistent_module_xyz')");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("no field package.preload"));
+    assert!(stderr.contains("no file"));
+}
+
+#[test]
+fn package_preload_custom_loader() {
+    let (stdout, _, code) = run_rilua(
+        "package.preload['mymod'] = function(name) \
+           local t = {} \
+           t.greeting = 'hello from ' .. name \
+           return t \
+         end \
+         local m = require('mymod') \
+         print(m.greeting)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello from mymod\n");
+}
+
+#[test]
+fn package_preload_module_cached() {
+    let (stdout, _, code) = run_rilua(
+        "local count = 0 \
+         package.preload['counter'] = function() \
+           count = count + 1 \
+           return count \
+         end \
+         local a = require('counter') \
+         local b = require('counter') \
+         print(a, b, a == b)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\t1\ttrue\n");
+}
+
+#[test]
+fn require_function_is_global() {
+    let (stdout, _, code) = run_rilua("print(type(require))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "function\n");
+}
+
+#[test]
+fn module_function_is_global() {
+    let (stdout, _, code) = run_rilua("print(type(module))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "function\n");
+}
+
+#[test]
+fn package_loadlib_returns_nil() {
+    let (stdout, _, code) = run_rilua(
+        "local f, err, kind = package.loadlib('foo', 'bar') \
+         print(f, kind)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "nil\tabsent\n");
+}
+
+#[test]
+fn package_seeall_enables_globals() {
+    let (stdout, _, code) = run_rilua(
+        "local t = {} \
+         package.seeall(t) \
+         print(t.type('hello'))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "string\n");
+}
+
+#[test]
+fn require_lua_file() {
+    // Create a temp Lua file, load via preload + dofile, and require it.
+    let (stdout, stderr, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('local M = {} M.value = 42 return M') \
+         f:close() \
+         package.preload['tmpmod'] = function() \
+           return dofile(name) \
+         end \
+         local m = require('tmpmod') \
+         print(m.value) \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn require_lua_file_from_path() {
+    // Create a temp directory with a lua file and require it via package.path.
+    let (stdout, stderr, code) = run_rilua(
+        "local dir = os.tmpname() \
+         os.remove(dir) \
+         os.execute('mkdir -p ' .. dir) \
+         local f = io.open(dir .. '/testmod.lua', 'w') \
+         f:write('local M = {} M.x = 99 return M') \
+         f:close() \
+         package.path = dir .. '/?.lua' \
+         local m = require('testmod') \
+         print(m.x) \
+         os.remove(dir .. '/testmod.lua') \
+         os.execute('rmdir ' .. dir)",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "99\n");
+}
+
+#[test]
+fn package_loaded_prepopulated() {
+    let (stdout, _, code) = run_rilua(
+        "print(package.loaded.string == string, \
+         package.loaded.math == math, \
+         package.loaded.table == table, \
+         package.loaded.os == os, \
+         package.loaded.io == io, \
+         package.loaded.package == package)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\ttrue\ttrue\ttrue\ttrue\ttrue\n");
+}
+
+#[test]
+fn module_creates_global() {
+    let (stdout, _, code) = run_rilua(
+        "local dir = os.tmpname() \
+         os.remove(dir) \
+         os.execute('mkdir -p ' .. dir) \
+         local f = io.open(dir .. '/mylib.lua', 'w') \
+         f:write('module(\"mylib\") function greet() return \"hi\" end') \
+         f:close() \
+         package.path = dir .. '/?.lua' \
+         require('mylib') \
+         print(mylib.greet()) \
+         os.remove(dir .. '/mylib.lua') \
+         os.execute('rmdir ' .. dir)",
+    );
+    assert_eq!(code, 0, "stderr: {}", {
+        let (_, stderr, _) = run_rilua(
+            "local dir = os.tmpname() \
+             os.remove(dir) \
+             os.execute('mkdir -p ' .. dir) \
+             local f = io.open(dir .. '/mylib.lua', 'w') \
+             f:write('module(\"mylib\") function greet() return \"hi\" end') \
+             f:close() \
+             package.path = dir .. '/?.lua' \
+             require('mylib') \
+             print(mylib.greet()) \
+             os.remove(dir .. '/mylib.lua') \
+             os.execute('rmdir ' .. dir)",
+        );
+        stderr
+    });
+    assert_eq!(stdout, "hi\n");
+}
+
+#[test]
+fn module_sets_name_fields() {
+    let (stdout, _, code) = run_rilua(
+        "local dir = os.tmpname() \
+         os.remove(dir) \
+         os.execute('mkdir -p ' .. dir) \
+         local f = io.open(dir .. '/mymod.lua', 'w') \
+         f:write('module(\"mymod\") -- sets _NAME, _M, _PACKAGE') \
+         f:close() \
+         package.path = dir .. '/?.lua' \
+         require('mymod') \
+         print(mymod._NAME) \
+         print(type(mymod._M)) \
+         print(mymod._PACKAGE) \
+         os.remove(dir .. '/mymod.lua') \
+         os.execute('rmdir ' .. dir)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "mymod\ntable\n\n");
+}
+
+#[test]
+fn require_returns_true_when_no_return_value() {
+    let (stdout, _, code) = run_rilua(
+        "package.preload['noreturn'] = function() end \
+         local r = require('noreturn') \
+         print(r)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+// ---------------------------------------------------------------------------
+// Coroutine library tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn coroutine_table_exists() {
+    let (stdout, _, code) = run_rilua("print(type(coroutine))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn coroutine_create_returns_thread() {
+    let (stdout, _, code) =
+        run_rilua("local co = coroutine.create(function() end) print(type(co))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "thread\n");
+}
+
+#[test]
+fn coroutine_simple_resume_return() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() return 42 end) \
+         local ok, val = coroutine.resume(co) \
+         print(ok, val)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\t42\n");
+}
+
+#[test]
+fn coroutine_resume_with_args() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function(a, b) return a + b end) \
+         local ok, val = coroutine.resume(co, 10, 20) \
+         print(ok, val)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\t30\n");
+}
+
+#[test]
+fn coroutine_yield_basic() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() \
+           coroutine.yield(1) \
+           coroutine.yield(2) \
+           return 3 \
+         end) \
+         local ok1, v1 = coroutine.resume(co) \
+         local ok2, v2 = coroutine.resume(co) \
+         local ok3, v3 = coroutine.resume(co) \
+         print(ok1, v1) \
+         print(ok2, v2) \
+         print(ok3, v3)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\t1\ntrue\t2\ntrue\t3\n");
+}
+
+#[test]
+fn coroutine_yield_multiple_values() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() \
+           coroutine.yield(10, 20, 30) \
+         end) \
+         local ok, a, b, c = coroutine.resume(co) \
+         print(ok, a, b, c)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\t10\t20\t30\n");
+}
+
+#[test]
+fn coroutine_resume_passes_values_to_yield() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() \
+           local x = coroutine.yield() \
+           return x * 2 \
+         end) \
+         coroutine.resume(co) \
+         local ok, val = coroutine.resume(co, 21) \
+         print(ok, val)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\t42\n");
+}
+
+#[test]
+fn coroutine_status_initial() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() end) \
+         print(coroutine.status(co))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "suspended\n");
+}
+
+#[test]
+fn coroutine_status_dead() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() end) \
+         coroutine.resume(co) \
+         print(coroutine.status(co))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "dead\n");
+}
+
+#[test]
+fn coroutine_status_suspended() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() coroutine.yield() end) \
+         coroutine.resume(co) \
+         print(coroutine.status(co))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "suspended\n");
+}
+
+#[test]
+fn coroutine_status_running() {
+    let (stdout, _, code) = run_rilua(
+        "local co \
+         co = coroutine.create(function() print(coroutine.status(co)) end) \
+         coroutine.resume(co)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "running\n");
+}
+
+#[test]
+fn coroutine_resume_dead_fails() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() end) \
+         coroutine.resume(co) \
+         local ok, msg = coroutine.resume(co) \
+         print(ok, msg)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "false\tcannot resume dead coroutine\n");
+}
+
+#[test]
+fn coroutine_error_in_body() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() error('oops') end) \
+         local ok, msg = coroutine.resume(co) \
+         print(ok) \
+         print(type(msg))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "false\nstring\n");
+}
+
+#[test]
+fn coroutine_wrap_basic() {
+    let (stdout, _, code) = run_rilua(
+        "local f = coroutine.wrap(function() \
+           coroutine.yield(1) \
+           coroutine.yield(2) \
+           return 3 \
+         end) \
+         print(f()) \
+         print(f()) \
+         print(f())",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n2\n3\n");
+}
+
+#[test]
+fn coroutine_wrap_with_args() {
+    let (stdout, _, code) = run_rilua(
+        "local f = coroutine.wrap(function(a) \
+           return a + 1 \
+         end) \
+         print(f(10))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "11\n");
+}
+
+#[test]
+fn coroutine_wrap_error_propagates() {
+    let (_, stderr, code) = run_rilua(
+        "local f = coroutine.wrap(function() error('wrapped error') end) \
+         f()",
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("wrapped error"), "stderr: {stderr}");
+}
+
+#[test]
+fn coroutine_running_main_thread() {
+    let (stdout, _, code) = run_rilua("print(coroutine.running())");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "\n"); // nil prints as empty line
+}
+
+#[test]
+fn coroutine_running_inside_coroutine() {
+    let (stdout, _, code) = run_rilua(
+        "local co \
+         co = coroutine.create(function() \
+           print(coroutine.running() == co) \
+         end) \
+         coroutine.resume(co)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn coroutine_yield_no_values() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() \
+           coroutine.yield() \
+           return 'done' \
+         end) \
+         local ok1 = coroutine.resume(co) \
+         local ok2, val = coroutine.resume(co) \
+         print(ok1, ok2, val)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\ttrue\tdone\n");
+}
+
+#[test]
+fn coroutine_return_multiple_values() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() return 1, 2, 3 end) \
+         local ok, a, b, c = coroutine.resume(co) \
+         print(ok, a, b, c)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\t1\t2\t3\n");
+}
+
+#[test]
+fn coroutine_no_return_value() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() end) \
+         local ok = coroutine.resume(co) \
+         print(ok)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn coroutine_producer_consumer() {
+    let (stdout, _, code) = run_rilua(
+        "local producer = coroutine.create(function() \
+           for i = 1, 3 do coroutine.yield(i) end \
+         end) \
+         local results = {} \
+         while true do \
+           local ok, val = coroutine.resume(producer) \
+           if not ok or val == nil then break end \
+           results[#results + 1] = val \
+         end \
+         print(table.concat(results, ','))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1,2,3\n");
+}
+
+#[test]
+fn coroutine_yield_across_pcall_boundary() {
+    let (stdout, _, code) = run_rilua(
+        "local co = coroutine.create(function() \
+           pcall(function() coroutine.yield() end) \
+         end) \
+         local ok, msg = coroutine.resume(co) \
+         print(ok) \
+         print(coroutine.status(co))",
+    );
+    assert_eq!(code, 0);
+    // pcall catches the yield boundary error, coroutine returns normally
+    assert_eq!(stdout, "true\ndead\n");
+}
+
+#[test]
+fn coroutine_require_loaded() {
+    let (stdout, _, code) = run_rilua("print(type(package.loaded.coroutine))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn coroutine_functions_exist() {
+    let (stdout, _, code) = run_rilua(
+        "print(type(coroutine.create)) \
+         print(type(coroutine.resume)) \
+         print(type(coroutine.yield)) \
+         print(type(coroutine.wrap)) \
+         print(type(coroutine.status)) \
+         print(type(coroutine.running))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        "function\nfunction\nfunction\nfunction\nfunction\nfunction\n"
+    );
+}

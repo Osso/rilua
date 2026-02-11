@@ -22,6 +22,7 @@ use super::callinfo::{CallInfo, LUA_MULTRET};
 use super::closure::{Closure, Upvalue};
 use super::gc::Color;
 use super::gc::arena::{Arena, GcRef};
+use super::gc::trace::Trace;
 use super::metatable::{NUM_TYPE_TAGS, TM_N, TM_NAMES};
 use super::string::{LuaString, StringTable};
 use super::table::Table;
@@ -44,7 +45,7 @@ pub const LUA_MINSTACK: usize = 20;
 const BASIC_STACK_SIZE: usize = 2 * LUA_MINSTACK;
 
 /// Initial CallInfo array capacity.
-const BASIC_CI_SIZE: usize = 8;
+pub(crate) const BASIC_CI_SIZE: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Gc (garbage collector state -- allocation only, no sweep yet)
@@ -135,6 +136,11 @@ impl Gc {
         self.userdata.alloc(userdata, self.current_white)
     }
 
+    /// Allocates a new thread (coroutine) in the GC arena.
+    pub fn alloc_thread(&mut self, thread: LuaThread) -> GcRef<LuaThread> {
+        self.threads.alloc(thread, self.current_white)
+    }
+
     /// Returns the interned string GcRef for a metamethod name.
     #[inline]
     pub fn tm_name(&self, event: super::metatable::TMS) -> Option<GcRef<LuaString>> {
@@ -149,13 +155,114 @@ impl Default for Gc {
 }
 
 // ---------------------------------------------------------------------------
-// LuaThread (coroutine placeholder)
+// ThreadStatus
+// ---------------------------------------------------------------------------
+
+/// Status of a coroutine thread.
+///
+/// Maps to PUC-Rio's thread status values:
+/// - 0 = initial (function loaded, not yet started) or finished ok
+/// - `LUA_YIELD` = suspended (yielded)
+/// - Any error status = dead (errored)
+///
+/// We split the 0 case into `Initial` (has function, no frames) and
+/// `Dead` (finished or errored) for clarity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadStatus {
+    /// Function loaded, not yet started. Stack has the function + args.
+    Initial,
+    /// Currently being executed (state is in `LuaState`, not in this struct).
+    Running,
+    /// Yielded, waiting to be resumed. Stack has yielded values.
+    Suspended,
+    /// Resumed another coroutine and waiting for it to yield/finish.
+    Normal,
+    /// Finished execution (returned) or errored. Cannot be resumed.
+    Dead,
+}
+
+// ---------------------------------------------------------------------------
+// LuaThread (coroutine)
 // ---------------------------------------------------------------------------
 
 /// A Lua thread (coroutine) with its own stack and call stack.
 ///
-/// Placeholder -- full coroutine support is Phase 9.
-pub struct LuaThread;
+/// Each coroutine has independent per-thread state but shares the GC
+/// heap (`Gc`) with all other threads. When a coroutine is not running,
+/// its state is stored here. When running, its state is swapped into
+/// `LuaState` (the "swap model") and this struct holds the resumer's
+/// saved state or default values.
+///
+/// Reference: `lua_State` in `lstate.h` (per-thread fields).
+pub struct LuaThread {
+    /// Value stack.
+    pub stack: Vec<Val>,
+    /// Base of current function's frame.
+    pub base: usize,
+    /// First free slot in the value stack.
+    pub top: usize,
+    /// Call stack.
+    pub call_stack: Vec<CallInfo>,
+    /// Current call stack index.
+    pub ci: usize,
+    /// Nested C-call boundary depth (for yield boundary check).
+    pub n_ccalls: u16,
+    /// Open upvalues.
+    pub open_upvalues: Vec<GcRef<Upvalue>>,
+    /// Error object for error propagation.
+    pub error_object: Option<Val>,
+    /// Thread status.
+    pub status: ThreadStatus,
+}
+
+impl LuaThread {
+    /// Creates a new thread with an initial stack and the given function.
+    ///
+    /// The function is placed at stack[0], with base=1 and top=1.
+    /// Status is `Initial` (ready to be resumed for the first time).
+    pub fn new(func_val: Val) -> Self {
+        let mut stack = vec![Val::Nil; BASIC_STACK_SIZE];
+        stack[0] = func_val;
+
+        let initial_ci = CallInfo::new(0, 1, 1 + LUA_MINSTACK, LUA_MULTRET);
+        let mut call_stack = Vec::with_capacity(BASIC_CI_SIZE);
+        call_stack.push(initial_ci);
+
+        Self {
+            stack,
+            base: 1,
+            top: 1,
+            call_stack,
+            ci: 0,
+            n_ccalls: 0,
+            open_upvalues: Vec::new(),
+            error_object: None,
+            status: ThreadStatus::Initial,
+        }
+    }
+}
+
+impl Default for LuaThread {
+    fn default() -> Self {
+        Self {
+            stack: Vec::new(),
+            base: 0,
+            top: 0,
+            call_stack: Vec::new(),
+            ci: 0,
+            n_ccalls: 0,
+            open_upvalues: Vec::new(),
+            error_object: None,
+            status: ThreadStatus::Dead,
+        }
+    }
+}
+
+impl Trace for LuaThread {
+    fn trace(&self) {
+        // Phase 7: mark all Val references in the stack, open upvalues, etc.
+    }
+}
 
 // ---------------------------------------------------------------------------
 // LuaState
@@ -212,6 +319,14 @@ pub struct LuaState {
     /// implementations (glibc constants). State is initialized as if
     /// `srand(1)` was called, per the C standard default.
     pub rng_state: u64,
+
+    /// Currently running coroutine thread, or `None` if this is the main
+    /// thread's direct execution context.
+    ///
+    /// Used by `coroutine.running()` and `coroutine.status()` to identify
+    /// which thread is active. When `Some(ref)`, the `LuaState`'s per-thread
+    /// fields (stack, call_stack, etc.) belong to that coroutine.
+    pub current_thread: Option<GcRef<LuaThread>>,
 }
 
 impl LuaState {
@@ -251,6 +366,7 @@ impl LuaState {
             gc,
             error_object: None,
             rng_state: 1, // C standard: default as if srand(1) was called.
+            current_thread: None,
         }
     }
 
@@ -360,6 +476,86 @@ impl LuaState {
         } else {
             0
         }
+    }
+
+    // ----- Coroutine thread swap -----
+
+    /// Saves the current per-thread state into a `LuaThread`.
+    ///
+    /// Used by `coroutine.resume()` to save the resumer's state before
+    /// loading the coroutine's state into `LuaState`.
+    pub fn save_thread_state(&mut self) -> LuaThread {
+        LuaThread {
+            stack: std::mem::take(&mut self.stack),
+            base: self.base,
+            top: self.top,
+            call_stack: std::mem::take(&mut self.call_stack),
+            ci: self.ci,
+            n_ccalls: self.n_ccalls,
+            open_upvalues: std::mem::take(&mut self.open_upvalues),
+            error_object: self.error_object.take(),
+            status: ThreadStatus::Normal,
+        }
+    }
+
+    /// Loads per-thread state from a GC-managed `LuaThread` into this
+    /// `LuaState`, and sets the thread's status.
+    ///
+    /// The thread's fields are moved into `LuaState` via `mem::take`
+    /// (the thread is left in a default/empty state). This method takes
+    /// a `GcRef` to avoid borrow conflicts -- the arena access happens
+    /// inside `&mut self`, so the borrow checker sees a single mutable
+    /// reference.
+    ///
+    /// Used to activate a coroutine for execution.
+    pub fn load_thread_by_ref(&mut self, co_ref: GcRef<LuaThread>, new_status: ThreadStatus) {
+        if let Some(thread) = self.gc.threads.get_mut(co_ref) {
+            thread.status = new_status;
+            self.stack = std::mem::take(&mut thread.stack);
+            self.base = thread.base;
+            self.top = thread.top;
+            self.call_stack = std::mem::take(&mut thread.call_stack);
+            self.ci = thread.ci;
+            self.n_ccalls = thread.n_ccalls;
+            self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
+            self.error_object = thread.error_object.take();
+        }
+    }
+
+    /// Saves the current per-thread state into a GC-managed `LuaThread`
+    /// (with a given status), then restores this `LuaState` from the
+    /// saved resumer state.
+    ///
+    /// Takes a `GcRef` to avoid borrow conflicts. Used after coroutine
+    /// execution completes (return, yield, or error).
+    pub fn save_and_restore_by_ref(
+        &mut self,
+        co_ref: GcRef<LuaThread>,
+        co_status: ThreadStatus,
+        resumer: LuaThread,
+    ) {
+        // Save current state into the coroutine.
+        if let Some(co_thread) = self.gc.threads.get_mut(co_ref) {
+            co_thread.stack = std::mem::take(&mut self.stack);
+            co_thread.base = self.base;
+            co_thread.top = self.top;
+            co_thread.call_stack = std::mem::take(&mut self.call_stack);
+            co_thread.ci = self.ci;
+            co_thread.n_ccalls = self.n_ccalls;
+            co_thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
+            co_thread.error_object = self.error_object.take();
+            co_thread.status = co_status;
+        }
+
+        // Restore resumer's state.
+        self.stack = resumer.stack;
+        self.base = resumer.base;
+        self.top = resumer.top;
+        self.call_stack = resumer.call_stack;
+        self.ci = resumer.ci;
+        self.n_ccalls = resumer.n_ccalls;
+        self.open_upvalues = resumer.open_upvalues;
+        self.error_object = resumer.error_object;
     }
 }
 

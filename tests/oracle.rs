@@ -1242,3 +1242,201 @@ fn oracle_io_type_closed() {
 fn oracle_io_input_output_type() {
     oracle::assert_matches_reference("print(io.type(io.input()), io.type(io.output()))");
 }
+
+// ---------------------------------------------------------------------------
+// Package library oracle tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_package_loaded_type() {
+    oracle::assert_matches_reference("print(type(package.loaded))");
+}
+
+#[test]
+fn oracle_package_preload_type() {
+    oracle::assert_matches_reference("print(type(package.preload))");
+}
+
+#[test]
+fn oracle_package_loaders_type() {
+    oracle::assert_matches_reference("print(type(package.loaders))");
+}
+
+#[test]
+fn oracle_require_string_identity() {
+    oracle::assert_matches_reference("print(require('string') == string)");
+}
+
+#[test]
+fn oracle_require_math_identity() {
+    oracle::assert_matches_reference("print(require('math') == math)");
+}
+
+#[test]
+fn oracle_require_table_identity() {
+    oracle::assert_matches_reference("print(require('table') == table)");
+}
+
+#[test]
+fn oracle_package_config_lines() {
+    oracle::assert_matches_reference(
+        "local lines = {} \
+         for line in package.config:gmatch('[^\\n]+') do \
+           lines[#lines + 1] = line \
+         end \
+         print(#lines) \
+         print(lines[1]) \
+         print(lines[2]) \
+         print(lines[3])",
+    );
+}
+
+#[test]
+fn oracle_require_not_found_message() {
+    // Match error behavior: both should fail with similar message format.
+    oracle::assert_matches_reference(
+        "local ok, err = pcall(require, 'nonexistent_xyz_module') \
+         print(ok) \
+         print(err:find('not found') ~= nil)",
+    );
+}
+
+#[test]
+fn oracle_require_caching() {
+    oracle::assert_matches_reference(
+        "local a = require('string') \
+         local b = require('string') \
+         print(a == b)",
+    );
+}
+
+#[test]
+fn oracle_package_loadlib_returns_three_values() {
+    // PUC-Rio returns (nil, errormsg, "open") because it has dlopen.
+    // rilua returns (nil, errormsg, "absent") because it lacks C loading.
+    // Only test that 3 values are returned and first is nil.
+    oracle::assert_matches_reference(
+        "local f, err, kind = package.loadlib('foo', 'bar') \
+         print(type(f), type(err), type(kind))",
+    );
+}
+
+#[test]
+fn oracle_require_type() {
+    oracle::assert_matches_reference("print(type(require))");
+}
+
+#[test]
+fn oracle_module_type() {
+    oracle::assert_matches_reference("print(type(module))");
+}
+
+// ---------------------------------------------------------------------------
+// Coroutine library oracle tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_coroutine_table_type() {
+    oracle::assert_matches_reference("print(type(coroutine))");
+}
+
+#[test]
+fn oracle_coroutine_create_type() {
+    oracle::assert_matches_reference("print(type(coroutine.create))");
+}
+
+#[test]
+fn oracle_coroutine_resume_return() {
+    oracle::assert_matches_reference(
+        "local co = coroutine.create(function() return 42 end) \
+         print(coroutine.resume(co))",
+    );
+}
+
+#[test]
+fn oracle_coroutine_yield_values() {
+    oracle::assert_matches_reference(
+        "local co = coroutine.create(function() coroutine.yield(1,2,3) end) \
+         print(coroutine.resume(co))",
+    );
+}
+
+#[test]
+fn oracle_coroutine_dead_resume() {
+    oracle::assert_matches_reference(
+        "local co = coroutine.create(function() end) \
+         coroutine.resume(co) \
+         print(coroutine.resume(co))",
+    );
+}
+
+#[test]
+fn oracle_coroutine_status_cycle() {
+    oracle::assert_matches_reference(
+        "local co = coroutine.create(function() coroutine.yield() end) \
+         print(coroutine.status(co)) \
+         coroutine.resume(co) \
+         print(coroutine.status(co)) \
+         coroutine.resume(co) \
+         print(coroutine.status(co))",
+    );
+}
+
+#[test]
+fn oracle_coroutine_running_main() {
+    oracle::assert_matches_reference("print(coroutine.running())");
+}
+
+#[test]
+fn oracle_coroutine_wrap_basic() {
+    oracle::assert_matches_reference(
+        "local f = coroutine.wrap(function() \
+           coroutine.yield(10) \
+           coroutine.yield(20) \
+           return 30 \
+         end) \
+         print(f()) print(f()) print(f())",
+    );
+}
+
+#[test]
+fn oracle_coroutine_resume_passes_args() {
+    oracle::assert_matches_reference(
+        "local co = coroutine.create(function(a,b) return a+b end) \
+         print(coroutine.resume(co, 10, 20))",
+    );
+}
+
+#[test]
+fn oracle_coroutine_resume_to_yield() {
+    oracle::assert_matches_reference(
+        "local co = coroutine.create(function() \
+           local x = coroutine.yield() \
+           return x * 2 \
+         end) \
+         coroutine.resume(co) \
+         print(coroutine.resume(co, 21))",
+    );
+}
+
+#[test]
+fn oracle_coroutine_multiple_return() {
+    oracle::assert_matches_reference(
+        "local co = coroutine.create(function() return 1,2,3 end) \
+         print(coroutine.resume(co))",
+    );
+}
+
+#[test]
+fn oracle_coroutine_error_in_body() {
+    oracle::assert_matches_reference(
+        "local co = coroutine.create(function() error('oops') end) \
+         local ok, msg = coroutine.resume(co) \
+         print(ok, type(msg))",
+    );
+}
+
+#[test]
+fn oracle_coroutine_require_loaded() {
+    oracle::assert_matches_reference("print(require('coroutine') == coroutine)");
+}

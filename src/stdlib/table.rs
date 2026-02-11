@@ -3,7 +3,6 @@
 //! Reference: `ltablib.c` in PUC-Rio Lua 5.1.1.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
-use crate::vm::execute::{self, CallResult};
 use crate::vm::gc::arena::GcRef;
 use crate::vm::metatable::{TMS, gettmbyobj, val_raw_equal};
 use crate::vm::state::LuaState;
@@ -337,10 +336,7 @@ pub fn tab_foreach(state: &mut LuaState) -> LuaResult<u32> {
         state.stack_set(call_base + 2, v);
         state.top = call_base + 3;
 
-        match state.precall(call_base, 1)? {
-            CallResult::Lua => execute::execute(state)?,
-            CallResult::Rust => {}
-        }
+        state.call_function(call_base, 1)?;
 
         let result = state.stack_get(call_base);
         state.top = call_base;
@@ -384,10 +380,7 @@ pub fn tab_foreachi(state: &mut LuaState) -> LuaResult<u32> {
         state.stack_set(call_base + 2, v);
         state.top = call_base + 3;
 
-        match state.precall(call_base, 1)? {
-            CallResult::Lua => execute::execute(state)?,
-            CallResult::Rust => {}
-        }
+        state.call_function(call_base, 1)?;
 
         let result = state.stack_get(call_base);
         state.top = call_base;
@@ -445,10 +438,7 @@ fn sort_comp(state: &mut LuaState, a: Val, b: Val, comp: Option<Val>) -> LuaResu
         state.stack_set(call_base + 2, b);
         state.top = call_base + 3;
 
-        match state.precall(call_base, 1)? {
-            CallResult::Lua => execute::execute(state)?,
-            CallResult::Rust => {}
-        }
+        state.call_function(call_base, 1)?;
 
         let result = state.stack_get(call_base);
         state.top = call_base;
@@ -519,10 +509,7 @@ fn default_less_than(state: &mut LuaState, a: Val, b: Val) -> LuaResult<bool> {
                     state.stack_set(call_base + 2, b);
                     state.top = call_base + 3;
 
-                    match state.precall(call_base, 1)? {
-                        CallResult::Lua => execute::execute(state)?,
-                        CallResult::Rust => {}
-                    }
+                    state.call_function(call_base, 1)?;
 
                     let result = state.stack_get(call_base);
                     state.top = call_base;

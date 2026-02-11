@@ -6,7 +6,7 @@ use std::io::Write;
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::vm::callinfo::LUA_MULTRET;
-use crate::vm::execute::{self, CallResult, execute};
+use crate::vm::execute;
 use crate::vm::metatable::{self, val_raw_equal};
 use crate::vm::state::LuaState;
 use crate::vm::table::Table;
@@ -177,10 +177,7 @@ pub fn lua_tostring(state: &mut LuaState) -> LuaResult<u32> {
         state.stack_set(call_base + 1, val);
         state.top = call_base + 2;
 
-        match state.precall(call_base, 1)? {
-            CallResult::Lua => execute(state)?,
-            CallResult::Rust => {}
-        }
+        state.call_function(call_base, 1)?;
 
         // Result is at call_base (poscall put it there).
         let result = state.stack_get(call_base);
@@ -413,13 +410,8 @@ pub fn lua_pcall(state: &mut LuaState) -> LuaResult<u32> {
     // Set top to include function and its arguments.
     state.top = func_pos + 1 + n_call_args;
 
-    // Attempt the call.
-    let call_result = (|| -> LuaResult<()> {
-        match state.precall(func_pos, LUA_MULTRET)? {
-            CallResult::Lua => execute(state),
-            CallResult::Rust => Ok(()),
-        }
-    })();
+    // Attempt the call (through call_function for C-call boundary tracking).
+    let call_result = state.call_function(func_pos, LUA_MULTRET);
 
     match call_result {
         Ok(()) => {
@@ -491,13 +483,8 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
     state.stack_set(func_pos, func_val);
     state.top = func_pos + 1;
 
-    // Attempt the call.
-    let call_result = (|| -> LuaResult<()> {
-        match state.precall(func_pos, LUA_MULTRET)? {
-            CallResult::Lua => execute(state),
-            CallResult::Rust => Ok(()),
-        }
-    })();
+    // Attempt the call (through call_function for C-call boundary tracking).
+    let call_result = state.call_function(func_pos, LUA_MULTRET);
 
     match call_result {
         Ok(()) => {
@@ -532,12 +519,7 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
             state.stack_set(func_pos + 1, error_val);
             state.top = func_pos + 2;
 
-            let handler_result = (|| -> LuaResult<()> {
-                match state.precall(func_pos, 1)? {
-                    CallResult::Lua => execute(state),
-                    CallResult::Rust => Ok(()),
-                }
-            })();
+            let handler_result = state.call_function(func_pos, 1);
 
             if handler_result.is_ok() {
                 // Handler returned. Result at func_pos.
@@ -1092,10 +1074,7 @@ pub fn lua_dofile(state: &mut LuaState) -> LuaResult<u32> {
     state.stack_set(call_base, Val::Function(closure_ref));
     state.top = call_base + 1;
 
-    match state.precall(call_base, LUA_MULTRET)? {
-        CallResult::Lua => execute(state)?,
-        CallResult::Rust => {}
-    }
+    state.call_function(call_base, LUA_MULTRET)?;
 
     // Return all results.
     let n_results = state.top - call_base;
@@ -1135,10 +1114,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
         state.stack_set(call_base, func_val);
         state.top = call_base + 1;
 
-        match state.precall(call_base, 1)? {
-            CallResult::Lua => execute(state)?,
-            CallResult::Rust => {}
-        }
+        state.call_function(call_base, 1)?;
 
         let result = state.stack_get(call_base);
         state.top = call_base; // Clean up.

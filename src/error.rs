@@ -42,6 +42,18 @@ pub enum LuaError {
     ///
     /// Wraps `std::io::Error` for file loading and the I/O library.
     Io(std::io::Error),
+
+    /// Coroutine yield signal (`LUA_YIELD`).
+    ///
+    /// Not a real error -- used to propagate yield through the Rust call
+    /// stack back to the resume handler. The `u32` is the number of
+    /// yielded values on the coroutine's stack.
+    ///
+    /// Must NOT be caught by `pcall`/`xpcall`. The `n_ccalls > 0` check
+    /// in `coroutine.yield()` prevents yield from inside C-call boundaries
+    /// (metamethods, pcall, etc.), so this variant only appears in the
+    /// resume path.
+    Yield(u32),
 }
 
 /// Syntax error with source location.
@@ -103,6 +115,7 @@ impl fmt::Display for LuaError {
             Self::Memory => write!(f, "not enough memory"),
             Self::ErrorHandler => write!(f, "error in error handling"),
             Self::Io(e) => write!(f, "{e}"),
+            Self::Yield(_) => write!(f, "cannot resume dead coroutine"),
         }
     }
 }
@@ -133,7 +146,11 @@ impl std::error::Error for LuaError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            _ => None,
+            Self::Syntax(_)
+            | Self::Runtime(_)
+            | Self::Memory
+            | Self::ErrorHandler
+            | Self::Yield(_) => None,
         }
     }
 }

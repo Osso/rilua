@@ -1831,12 +1831,7 @@ fn get_gsub_replacement(
             }
 
             let _n_args = state.top - call_base - 1;
-            match state.precall(call_base, 1)? {
-                crate::vm::execute::CallResult::Lua => {
-                    crate::vm::execute::execute(state)?;
-                }
-                crate::vm::execute::CallResult::Rust => {}
-            }
+            state.call_function(call_base, 1)?;
 
             let result_val = state.stack_get(call_base);
             state.top = call_base;
