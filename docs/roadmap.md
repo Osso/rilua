@@ -13,7 +13,7 @@ integrated at every step.
 | 2: Compilation Pipeline | Done | 354 unit tests + 10 oracle, bytecode matches `luac -l` |
 | 3: Core VM | Done | 466 total (431 unit + 16 integration + 19 oracle) |
 | 4: Language Features | Done | 521 total (439 unit + 43 integration + 39 oracle) |
-| 5: Standard Libraries | In progress (5a-5c done) | 701 total (439 unit + 147 integration + 115 oracle) |
+| 5: Standard Libraries | In progress (5a-5d done) | 789 total (452 unit + 190 integration + 147 oracle) |
 | 6: Coroutines | Not started | -- |
 | 7: GC Collector | Not started | -- |
 | 8: Public API + CLI | Not started | -- |
@@ -28,15 +28,54 @@ classes, quantifiers, captures, balanced match, frontier patterns).
 String metatable enables method syntax (`("hello"):upper()`). Phase 5c
 added the table library with all 9 functions (concat, insert, remove,
 sort, maxn, getn, setn, foreach, foreachi). Sort implements PUC-Rio's
-median-of-three quicksort (`auxsort`). 701 total tests pass (439 unit +
-147 integration + 115 oracle). All oracle test cases match PUC-Rio Lua
-5.1.1. The full quality gate passes clean.
+median-of-three quicksort (`auxsort`). Phase 5d added the math library
+with all 28 functions (abs through tanh), 2 constants (math.pi,
+math.huge), and the math.mod alias. frexp/ldexp use IEEE 754 bit
+manipulation. RNG uses glibc-compatible LCG. 789 total tests pass (452
+unit + 190 integration + 147 oracle). All oracle test cases match PUC-Rio
+Lua 5.1.1. The full quality gate passes clean.
 
 Known issues deferred to later phases:
 - `{...}` vararg table constructor captures only first argument (VM bug)
 - Mixed named parameters + varargs register misassignment (VM bug)
 - `newproxy()` returns table instead of userdata (stub, pending Phase 8)
 - `load(func_reader)` hangs when reader never returns nil
+
+### Execution order corrections
+
+The phase numbering (5e-5h) describes logical grouping, not execution
+order. Several phases have infrastructure dependencies that require a
+different execution sequence:
+
+- **5e (I/O)** needs userdata with `__gc` finalizers (file handles).
+  Userdata is currently a placeholder (Phase 8b). A minimal userdata
+  arena must be built before 5e can start.
+- **5g (Package)** needs file I/O for `require()` and userdata for
+  dynamic library handles. Depends on 5e infrastructure.
+- **5h (Debug)** needs per-thread hook state (`hook_fn`, `hook_mask`,
+  `hook_count`) and debug stack introspection (`getstack`, `getinfo`,
+  `getlocal`). These require `LuaThread` to be fully defined, which
+  happens in Phase 6.
+- **5f (OS)** has no special infrastructure needs. It wraps libc/std
+  functions and can proceed immediately.
+
+Corrected execution order:
+
+```text
+5d (math)  [done]
+  |
+5f (os)    <- no blockers, just libc/std wrappers
+  |
+Userdata infrastructure  <- extract from 8b: arena, alloc, __gc
+  |
+5e (I/O)   <- needs userdata for file handles
+  |
+5g (Package)  <- needs file I/O + userdata
+  |
+6 (Coroutines)  <- defines LuaThread with hook fields
+  |
+5h (Debug)  <- needs hooks + thread introspection from Phase 6
+```
 
 ## Reference Tools
 
@@ -852,8 +891,11 @@ Phase 0 (skeleton + test infra)
 ```
 
 Phases 1 and 2 can be developed in parallel (no shared code).
-Phases 5-7 can be developed in parallel once Phase 4 is complete.
-Phase 8 can start once Phase 5 is functional. Phase 9 is ongoing
+Within Phase 5, sub-phases have infrastructure constraints (see
+"Execution order corrections" above): 5f is independent, 5e/5g need
+userdata, 5h needs Phase 6 thread structure. Phase 7 (GC) can run in
+parallel with later stdlib phases. Phase 8 can start once Phase 5 is
+functional. Phase 9 is ongoing
 throughout but becomes the focus after Phase 8.
 
 ## Milestones

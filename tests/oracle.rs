@@ -698,3 +698,329 @@ fn oracle_table_insert_remove_sequence() {
         "local t = {1, 2, 3}; table.insert(t, 2, 99); table.remove(t, 3); print(table.concat(t, ', '))",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Math library oracle tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_math_pi() {
+    oracle::assert_matches_reference("print(math.pi)");
+}
+
+#[test]
+fn oracle_math_huge() {
+    oracle::assert_matches_reference("print(math.huge)");
+}
+
+#[test]
+fn oracle_math_huge_negative() {
+    oracle::assert_matches_reference("print(-math.huge)");
+}
+
+#[test]
+fn oracle_math_abs() {
+    oracle::assert_matches_reference("print(math.abs(-10), math.abs(5), math.abs(0))");
+}
+
+#[test]
+fn oracle_math_floor() {
+    oracle::assert_matches_reference("print(math.floor(4.5), math.floor(-2.3), math.floor(3))");
+}
+
+#[test]
+fn oracle_math_ceil() {
+    oracle::assert_matches_reference("print(math.ceil(4.5), math.ceil(-2.3), math.ceil(3))");
+}
+
+#[test]
+fn oracle_math_sin_cos() {
+    oracle::assert_matches_reference("print(math.sin(0), math.cos(0), math.sin(math.pi/2))");
+}
+
+#[test]
+fn oracle_math_tan() {
+    oracle::assert_matches_reference("print(math.sin(0), math.tan(0))");
+}
+
+#[test]
+fn oracle_math_asin_acos_atan() {
+    oracle::assert_matches_reference("print(math.asin(0), math.acos(1), math.atan(0))");
+}
+
+#[test]
+fn oracle_math_atan2() {
+    oracle::assert_matches_reference("print(math.atan2(1, 0), math.atan2(0, 1))");
+}
+
+#[test]
+fn oracle_math_sinh_cosh_tanh() {
+    oracle::assert_matches_reference("print(math.sinh(0), math.cosh(0), math.tanh(0))");
+}
+
+#[test]
+fn oracle_math_exp_log() {
+    oracle::assert_matches_reference("print(math.exp(0), math.exp(1), math.log(1))");
+}
+
+#[test]
+fn oracle_math_log10() {
+    oracle::assert_matches_reference("print(math.log10(1), math.log10(10), math.log10(100))");
+}
+
+#[test]
+fn oracle_math_sqrt() {
+    oracle::assert_matches_reference(
+        "print(math.sqrt(0), math.sqrt(1), math.sqrt(4), math.sqrt(16))",
+    );
+}
+
+#[test]
+fn oracle_math_pow() {
+    oracle::assert_matches_reference("print(math.pow(2, 0), math.pow(2, 10), math.pow(3, 3))");
+}
+
+#[test]
+fn oracle_math_deg_rad() {
+    oracle::assert_matches_reference("print(math.deg(math.pi), math.rad(180))");
+}
+
+#[test]
+fn oracle_math_fmod() {
+    oracle::assert_matches_reference("print(math.fmod(10, 3), math.fmod(7, 2))");
+}
+
+#[test]
+fn oracle_math_mod_alias() {
+    oracle::assert_matches_reference("print(math.mod(10, 3))");
+}
+
+#[test]
+fn oracle_math_modf() {
+    oracle::assert_matches_reference("print(math.modf(3.5))");
+}
+
+#[test]
+fn oracle_math_modf_negative() {
+    oracle::assert_matches_reference("print(math.modf(-3.5))");
+}
+
+#[test]
+fn oracle_math_frexp() {
+    oracle::assert_matches_reference("print(math.frexp(8))");
+}
+
+#[test]
+fn oracle_math_frexp_pi() {
+    oracle::assert_matches_reference("local v, e = math.frexp(math.pi); print(v, e)");
+}
+
+#[test]
+fn oracle_math_ldexp() {
+    oracle::assert_matches_reference("print(math.ldexp(0.5, 4))");
+}
+
+#[test]
+fn oracle_math_frexp_ldexp_roundtrip() {
+    oracle::assert_matches_reference("local v, e = math.frexp(math.pi); print(math.ldexp(v, e))");
+}
+
+#[test]
+fn oracle_math_min() {
+    oracle::assert_matches_reference("print(math.min(3, 1, 4, 1, 5))");
+}
+
+#[test]
+fn oracle_math_max() {
+    oracle::assert_matches_reference("print(math.max(3, 1, 4, 1, 5))");
+}
+
+#[test]
+fn oracle_math_min_single() {
+    oracle::assert_matches_reference("print(math.min(42))");
+}
+
+#[test]
+fn oracle_math_max_negative() {
+    oracle::assert_matches_reference("print(math.max(-5, -2, -8))");
+}
+
+#[test]
+fn oracle_math_pythagorean() {
+    oracle::assert_matches_reference(
+        "function eq(a,b) return math.abs(a-b) < 1e-10 end; print(eq(math.sin(-9.8)^2 + math.cos(-9.8)^2, 1))",
+    );
+}
+
+#[test]
+fn oracle_math_tanh_identity() {
+    oracle::assert_matches_reference(
+        "function eq(a,b) return math.abs(a-b) < 1e-10 end; print(eq(math.tanh(3.5), math.sinh(3.5)/math.cosh(3.5)))",
+    );
+}
+
+#[test]
+fn oracle_math_type() {
+    oracle::assert_matches_reference("print(type(math))");
+}
+
+#[test]
+fn oracle_math_function_types() {
+    oracle::assert_matches_reference("print(type(math.sin), type(math.random))");
+}
+
+// =========================================================================
+// OS library oracle tests
+// =========================================================================
+
+#[test]
+fn oracle_os_type() {
+    oracle::assert_matches_reference("print(type(os))");
+}
+
+#[test]
+fn oracle_os_function_types() {
+    oracle::assert_matches_reference("print(type(os.clock), type(os.date), type(os.difftime))");
+}
+
+#[test]
+fn oracle_os_function_types_2() {
+    oracle::assert_matches_reference("print(type(os.execute), type(os.exit), type(os.getenv))");
+}
+
+#[test]
+fn oracle_os_function_types_3() {
+    oracle::assert_matches_reference("print(type(os.remove), type(os.rename), type(os.setlocale))");
+}
+
+#[test]
+fn oracle_os_function_types_4() {
+    oracle::assert_matches_reference("print(type(os.time), type(os.tmpname))");
+}
+
+#[test]
+fn oracle_os_clock_type() {
+    oracle::assert_matches_reference("print(type(os.clock()))");
+}
+
+#[test]
+fn oracle_os_time_type() {
+    oracle::assert_matches_reference("print(type(os.time()))");
+}
+
+#[test]
+fn oracle_os_difftime() {
+    oracle::assert_matches_reference("print(os.difftime(100, 50))");
+}
+
+#[test]
+fn oracle_os_difftime_default() {
+    oracle::assert_matches_reference("print(os.difftime(100))");
+}
+
+#[test]
+fn oracle_os_date_utc_epoch() {
+    oracle::assert_matches_reference("print(os.date('!%Y-%m-%d %H:%M:%S', 0))");
+}
+
+#[test]
+fn oracle_os_date_utc_star_t() {
+    oracle::assert_matches_reference(
+        "local d = os.date('!*t', 0) \
+         print(d.year, d.month, d.day, d.hour, d.min, d.sec, d.wday, d.yday)",
+    );
+}
+
+#[test]
+fn oracle_os_date_utc_format() {
+    oracle::assert_matches_reference("print(os.date('!%H:%M:%S', 3661))");
+}
+
+#[test]
+fn oracle_os_date_utc_known_timestamp() {
+    // 2001-09-09 01:46:40 UTC (1 billion seconds)
+    oracle::assert_matches_reference("print(os.date('!%Y-%m-%d %H:%M:%S', 1000000000))");
+}
+
+#[test]
+fn oracle_os_date_star_t_roundtrip() {
+    oracle::assert_matches_reference(
+        "local t = os.time({year=2000, month=6, day=15, hour=12}) \
+         local d = os.date('*t', t) \
+         local t2 = os.time(d) \
+         print(t == t2)",
+    );
+}
+
+#[test]
+fn oracle_os_time_table() {
+    oracle::assert_matches_reference("print(type(os.time({year=2000, month=1, day=1})))");
+}
+
+#[test]
+fn oracle_os_time_table_missing_field() {
+    oracle::assert_matches_reference(
+        "local ok, err = pcall(os.time, {year=2000, month=1}) print(ok, err)",
+    );
+}
+
+#[test]
+fn oracle_os_getenv_path() {
+    oracle::assert_matches_reference("print(os.getenv('PATH') ~= nil)");
+}
+
+#[test]
+fn oracle_os_getenv_nonexistent() {
+    oracle::assert_matches_reference("print(os.getenv('RILUA_NONEXISTENT_12345'))");
+}
+
+#[test]
+fn oracle_os_execute_no_args() {
+    oracle::assert_matches_reference("print(os.execute() ~= 0)");
+}
+
+#[test]
+fn oracle_os_execute_true() {
+    oracle::assert_matches_reference("print(os.execute('true'))");
+}
+
+#[test]
+fn oracle_os_remove_nonexistent() {
+    oracle::assert_matches_reference(
+        "local a, b, c = os.remove('/tmp/rilua_nonexistent_xyz') \
+         print(type(a), type(b), type(c))",
+    );
+}
+
+#[test]
+fn oracle_os_rename_nonexistent() {
+    oracle::assert_matches_reference(
+        "local a, b, c = os.rename('/tmp/rilua_no_1', '/tmp/rilua_no_2') \
+         print(type(a), type(b), type(c))",
+    );
+}
+
+#[test]
+fn oracle_os_setlocale_c() {
+    oracle::assert_matches_reference("print(os.setlocale('C'))");
+}
+
+#[test]
+fn oracle_os_setlocale_query() {
+    oracle::assert_matches_reference("print(type(os.setlocale(nil)))");
+}
+
+#[test]
+fn oracle_os_setlocale_invalid() {
+    oracle::assert_matches_reference("print(os.setlocale('invalid_locale_xyz'))");
+}
+
+#[test]
+fn oracle_os_setlocale_category() {
+    oracle::assert_matches_reference("print(os.setlocale('C', 'numeric'))");
+}
+
+#[test]
+fn oracle_os_tmpname_type() {
+    oracle::assert_matches_reference("local n = os.tmpname() print(type(n)) os.remove(n)");
+}

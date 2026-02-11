@@ -59,6 +59,12 @@ pub fn open_libs(state: &mut LuaState) -> LuaResult<()> {
     // Table library.
     open_table_lib(state)?;
 
+    // Math library.
+    open_math_lib(state)?;
+
+    // OS library.
+    open_os_lib(state)?;
+
     Ok(())
 }
 
@@ -77,6 +83,93 @@ fn open_table_lib(state: &mut LuaState) -> LuaResult<()> {
     register_table_fn(state, table_table, "setn", table::tab_setn)?;
     register_table_fn(state, table_table, "sort", table::tab_sort)?;
     register_global_val(state, "table", Val::Table(table_table))?;
+    Ok(())
+}
+
+/// Registers the math library as `math` global.
+///
+/// Follows PUC-Rio's `luaopen_math` pattern from `lmathlib.c`:
+/// 28 functions + `math.pi` + `math.huge` + `math.mod` alias.
+fn open_math_lib(state: &mut LuaState) -> LuaResult<()> {
+    let math_table = state.gc.alloc_table(Table::new());
+
+    register_table_fn(state, math_table, "abs", math::math_abs)?;
+    register_table_fn(state, math_table, "acos", math::math_acos)?;
+    register_table_fn(state, math_table, "asin", math::math_asin)?;
+    register_table_fn(state, math_table, "atan", math::math_atan)?;
+    register_table_fn(state, math_table, "atan2", math::math_atan2)?;
+    register_table_fn(state, math_table, "ceil", math::math_ceil)?;
+    register_table_fn(state, math_table, "cos", math::math_cos)?;
+    register_table_fn(state, math_table, "cosh", math::math_cosh)?;
+    register_table_fn(state, math_table, "deg", math::math_deg)?;
+    register_table_fn(state, math_table, "exp", math::math_exp)?;
+    register_table_fn(state, math_table, "floor", math::math_floor)?;
+    register_table_fn(state, math_table, "fmod", math::math_fmod)?;
+    register_table_fn(state, math_table, "frexp", math::math_frexp)?;
+    register_table_fn(state, math_table, "ldexp", math::math_ldexp)?;
+    register_table_fn(state, math_table, "log", math::math_log)?;
+    register_table_fn(state, math_table, "log10", math::math_log10)?;
+    register_table_fn(state, math_table, "max", math::math_max)?;
+    register_table_fn(state, math_table, "min", math::math_min)?;
+    register_table_fn(state, math_table, "modf", math::math_modf)?;
+    register_table_fn(state, math_table, "pow", math::math_pow)?;
+    register_table_fn(state, math_table, "rad", math::math_rad)?;
+    register_table_fn(state, math_table, "random", math::math_random)?;
+    register_table_fn(state, math_table, "randomseed", math::math_randomseed)?;
+    register_table_fn(state, math_table, "sin", math::math_sin)?;
+    register_table_fn(state, math_table, "sinh", math::math_sinh)?;
+    register_table_fn(state, math_table, "sqrt", math::math_sqrt)?;
+    register_table_fn(state, math_table, "tan", math::math_tan)?;
+    register_table_fn(state, math_table, "tanh", math::math_tanh)?;
+
+    // Deprecated alias: mod = fmod (LUA_COMPAT_MOD, enabled by default).
+    register_table_fn(state, math_table, "mod", math::math_fmod)?;
+
+    // Constants: math.pi and math.huge.
+    let pi_key = state.gc.intern_string(b"pi");
+    let huge_key = state.gc.intern_string(b"huge");
+    let mt = state.gc.tables.get_mut(math_table).ok_or_else(|| {
+        crate::error::LuaError::Runtime(crate::error::RuntimeError {
+            message: "math table not found".into(),
+            level: 0,
+            traceback: vec![],
+        })
+    })?;
+    mt.raw_set(
+        Val::Str(pi_key),
+        Val::Num(std::f64::consts::PI),
+        &state.gc.string_arena,
+    )?;
+    mt.raw_set(
+        Val::Str(huge_key),
+        Val::Num(f64::INFINITY),
+        &state.gc.string_arena,
+    )?;
+
+    register_global_val(state, "math", Val::Table(math_table))?;
+    Ok(())
+}
+
+/// Registers the OS library as `os` global.
+///
+/// Follows PUC-Rio's `luaopen_os` pattern from `loslib.c`:
+/// 11 functions.
+fn open_os_lib(state: &mut LuaState) -> LuaResult<()> {
+    let os_table = state.gc.alloc_table(Table::new());
+
+    register_table_fn(state, os_table, "clock", os::os_clock)?;
+    register_table_fn(state, os_table, "date", os::os_date)?;
+    register_table_fn(state, os_table, "difftime", os::os_difftime)?;
+    register_table_fn(state, os_table, "execute", os::os_execute)?;
+    register_table_fn(state, os_table, "exit", os::os_exit)?;
+    register_table_fn(state, os_table, "getenv", os::os_getenv)?;
+    register_table_fn(state, os_table, "remove", os::os_remove)?;
+    register_table_fn(state, os_table, "rename", os::os_rename)?;
+    register_table_fn(state, os_table, "setlocale", os::os_setlocale)?;
+    register_table_fn(state, os_table, "time", os::os_time)?;
+    register_table_fn(state, os_table, "tmpname", os::os_tmpname)?;
+
+    register_global_val(state, "os", Val::Table(os_table))?;
     Ok(())
 }
 

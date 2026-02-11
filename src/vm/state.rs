@@ -197,6 +197,13 @@ pub struct LuaState {
     /// retrieve it. `None` for VM-generated errors (pcall uses the
     /// message string instead). Cleared after pcall reads it.
     pub error_object: Option<Val>,
+
+    /// Random number generator state for `math.random` / `math.randomseed`.
+    ///
+    /// Uses a linear congruential generator matching common C `rand()`
+    /// implementations (glibc constants). State is initialized as if
+    /// `srand(1)` was called, per the C standard default.
+    pub rng_state: u64,
 }
 
 impl LuaState {
@@ -235,6 +242,7 @@ impl LuaState {
             open_upvalues: Vec::new(),
             gc,
             error_object: None,
+            rng_state: 1, // C standard: default as if srand(1) was called.
         }
     }
 

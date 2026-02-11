@@ -1195,3 +1195,626 @@ fn table_foreach_early_return() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "string\n");
 }
+
+// ---------------------------------------------------------------------------
+// math library tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn math_global_type() {
+    let (stdout, _, code) = run_rilua("print(type(math))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn math_global_has_functions() {
+    let (stdout, _, code) = run_rilua("print(type(math.sin), type(math.cos), type(math.random))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "function\tfunction\tfunction\n");
+}
+
+// -- constants --
+
+#[test]
+fn math_pi() {
+    let (stdout, _, code) = run_rilua("print(math.pi)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3.1415926535898\n");
+}
+
+#[test]
+fn math_huge() {
+    let (stdout, _, code) = run_rilua("print(math.huge)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "inf\n");
+}
+
+#[test]
+fn math_huge_comparisons() {
+    let (stdout, _, code) = run_rilua("print(math.huge > 10e30, -math.huge < -10e30)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\ttrue\n");
+}
+
+// -- abs, floor, ceil --
+
+#[test]
+fn math_abs_positive() {
+    let (stdout, _, code) = run_rilua("print(math.abs(5))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5\n");
+}
+
+#[test]
+fn math_abs_negative() {
+    let (stdout, _, code) = run_rilua("print(math.abs(-10))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "10\n");
+}
+
+#[test]
+fn math_floor_basic() {
+    let (stdout, _, code) = run_rilua("print(math.floor(4.5))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "4\n");
+}
+
+#[test]
+fn math_ceil_basic() {
+    let (stdout, _, code) = run_rilua("print(math.ceil(4.5))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5\n");
+}
+
+#[test]
+fn math_floor_negative() {
+    let (stdout, _, code) = run_rilua("print(math.floor(-2.3))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "-3\n");
+}
+
+#[test]
+fn math_ceil_negative() {
+    let (stdout, _, code) = run_rilua("print(math.ceil(-2.3))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "-2\n");
+}
+
+// -- trig --
+
+#[test]
+fn math_sin_zero() {
+    let (stdout, _, code) = run_rilua("print(math.sin(0))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn math_cos_zero() {
+    let (stdout, _, code) = run_rilua("print(math.cos(0))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn math_tan_identity() {
+    let (stdout, _, code) =
+        run_rilua("local x = math.pi/4; print(math.abs(math.tan(x) - 1) < 1e-10)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn math_asin_acos_atan() {
+    let (stdout, _, code) = run_rilua(
+        "local eq = function(a,b) return math.abs(a-b) < 1e-10 end; print(eq(math.asin(1), math.pi/2), eq(math.acos(0), math.pi/2), eq(math.atan(1), math.pi/4))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\ttrue\ttrue\n");
+}
+
+#[test]
+fn math_atan2_basic() {
+    let (stdout, _, code) = run_rilua("print(math.abs(math.atan2(1, 0) - math.pi/2) < 1e-10)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+// -- hyperbolic --
+
+#[test]
+fn math_sinh_cosh_tanh_identity() {
+    let (stdout, _, code) = run_rilua(
+        "local x = 3.5; print(math.abs(math.tanh(x) - math.sinh(x)/math.cosh(x)) < 1e-10)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+// -- exp, log, log10, sqrt, pow --
+
+#[test]
+fn math_exp_zero() {
+    let (stdout, _, code) = run_rilua("print(math.exp(0))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn math_log_one() {
+    let (stdout, _, code) = run_rilua("print(math.log(1))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn math_log10_identity() {
+    let (stdout, _, code) =
+        run_rilua("print(math.abs(math.log10(2) - math.log(2)/math.log(10)) < 1e-10)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn math_sqrt_basic() {
+    let (stdout, _, code) = run_rilua("print(math.sqrt(16))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "4\n");
+}
+
+#[test]
+fn math_pow_basic() {
+    let (stdout, _, code) = run_rilua("print(math.pow(2, 10))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1024\n");
+}
+
+// -- deg, rad --
+
+#[test]
+fn math_deg_rad() {
+    let (stdout, _, code) = run_rilua(
+        "local eq = function(a,b) return math.abs(a-b) < 1e-10 end; print(eq(math.deg(math.pi/2), 90), eq(math.rad(90), math.pi/2))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\ttrue\n");
+}
+
+// -- fmod, mod alias --
+
+#[test]
+fn math_fmod_basic() {
+    let (stdout, _, code) = run_rilua("print(math.fmod(10, 3))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn math_mod_alias() {
+    let (stdout, _, code) = run_rilua("print(math.mod(10, 3))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n");
+}
+
+// -- modf --
+
+#[test]
+fn math_modf_positive() {
+    let (stdout, _, code) = run_rilua("local a, b = math.modf(3.5); print(a, b)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\t0.5\n");
+}
+
+#[test]
+fn math_modf_negative() {
+    let (stdout, _, code) = run_rilua("local a, b = math.modf(-3.5); print(a, b)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "-3\t-0.5\n");
+}
+
+// -- frexp, ldexp --
+
+#[test]
+fn math_frexp_basic() {
+    let (stdout, _, code) = run_rilua("local v, e = math.frexp(8); print(v, e)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0.5\t4\n");
+}
+
+#[test]
+fn math_frexp_ldexp_roundtrip() {
+    let (stdout, _, code) = run_rilua(
+        "local v, e = math.frexp(math.pi); print(math.abs(math.ldexp(v, e) - math.pi) < 1e-10)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn math_ldexp_basic() {
+    let (stdout, _, code) = run_rilua("print(math.ldexp(0.5, 4))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "8\n");
+}
+
+// -- min, max --
+
+#[test]
+fn math_min_basic() {
+    let (stdout, _, code) = run_rilua("print(math.min(3, 1, 4, 1, 5))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn math_max_basic() {
+    let (stdout, _, code) = run_rilua("print(math.max(3, 1, 4, 1, 5))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5\n");
+}
+
+#[test]
+fn math_min_single() {
+    let (stdout, _, code) = run_rilua("print(math.min(42))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn math_max_single() {
+    let (stdout, _, code) = run_rilua("print(math.max(42))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn math_min_negative() {
+    let (stdout, _, code) = run_rilua("print(math.min(-5, -2, -8))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "-8\n");
+}
+
+// -- random --
+
+#[test]
+fn math_random_no_args_range() {
+    let (stdout, _, code) =
+        run_rilua("math.randomseed(42); local r = math.random(); print(r >= 0 and r < 1)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn math_random_one_arg_range() {
+    let (stdout, _, code) = run_rilua(
+        "math.randomseed(42); local ok = true; for i=1,100 do local r = math.random(5); if r < 1 or r > 5 then ok = false end end; print(ok)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn math_random_two_arg_range() {
+    let (stdout, _, code) = run_rilua(
+        "math.randomseed(42); local ok = true; for i=1,100 do local r = math.random(-10, 10); if r < -10 or r > 10 then ok = false end end; print(ok)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+#[test]
+fn math_randomseed_deterministic() {
+    let (stdout, _, code) = run_rilua(
+        "math.randomseed(123); local a = math.random(); math.randomseed(123); local b = math.random(); print(a == b)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+// -- pythagorean identity (integration test from PUC-Rio suite) --
+
+#[test]
+fn math_pythagorean_identity() {
+    let (stdout, _, code) = run_rilua(
+        "local eq = function(a,b) return math.abs(a-b) < 1e-10 end; print(eq(math.sin(-9.8)^2 + math.cos(-9.8)^2, 1))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+}
+
+// -- error cases --
+
+#[test]
+fn math_abs_no_args() {
+    let (_, stderr, code) = run_rilua("math.abs()");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("number expected"), "stderr: {stderr}");
+}
+
+#[test]
+fn math_random_empty_interval() {
+    let (_, stderr, code) = run_rilua("math.random(0)");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("interval is empty"), "stderr: {stderr}");
+}
+
+#[test]
+fn math_random_wrong_args() {
+    let (_, stderr, code) = run_rilua("math.random(1, 2, 3)");
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("wrong number of arguments"),
+        "stderr: {stderr}"
+    );
+}
+
+// =========================================================================
+// OS library
+// =========================================================================
+
+#[test]
+fn os_global_is_table() {
+    let (stdout, _, code) = run_rilua("print(type(os))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "table");
+}
+
+#[test]
+fn os_functions_exist() {
+    let (stdout, _, code) = run_rilua(
+        "print(type(os.clock), type(os.date), type(os.difftime), type(os.execute), \
+         type(os.exit), type(os.getenv), type(os.remove), type(os.rename), \
+         type(os.setlocale), type(os.time), type(os.tmpname))",
+    );
+    assert_eq!(code, 0);
+    let parts: Vec<&str> = stdout.trim().split('\t').collect();
+    assert_eq!(parts.len(), 11);
+    for p in &parts {
+        assert_eq!(*p, "function", "expected function, got: {p}");
+    }
+}
+
+#[test]
+fn os_clock_returns_number() {
+    let (stdout, _, code) = run_rilua("print(type(os.clock()))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "number");
+}
+
+#[test]
+fn os_clock_nonnegative() {
+    let (stdout, _, code) = run_rilua("assert(os.clock() >= 0) print('ok')");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn os_time_returns_number() {
+    let (stdout, _, code) = run_rilua("print(type(os.time()))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "number");
+}
+
+#[test]
+fn os_time_reasonable_value() {
+    // After 2024-01-01 00:00:00 UTC (1704067200).
+    let (stdout, _, code) = run_rilua("assert(os.time() > 1704067200) print('ok')");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn os_time_with_table() {
+    let (stdout, _, code) = run_rilua(
+        "local t = os.time({year=2000, month=1, day=1, hour=0, min=0, sec=0}) \
+         print(type(t))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "number");
+}
+
+#[test]
+fn os_time_table_missing_required_field() {
+    let (_, stderr, code) = run_rilua("os.time({year=2000, month=1})");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("missing in date table"), "stderr: {stderr}");
+}
+
+#[test]
+fn os_date_default_format() {
+    // Default format is "%c", returns a non-empty string.
+    let (stdout, _, code) = run_rilua("local d = os.date() assert(#d > 0) print('ok')");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn os_date_star_t_returns_table() {
+    let (stdout, _, code) = run_rilua("print(type(os.date('*t')))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "table");
+}
+
+#[test]
+fn os_date_star_t_fields() {
+    let (stdout, _, code) = run_rilua(
+        "local d = os.date('!*t', 0) \
+         print(d.year, d.month, d.day, d.hour, d.min, d.sec)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "1970\t1\t1\t0\t0\t0");
+}
+
+#[test]
+fn os_date_star_t_wday_yday() {
+    // 1970-01-01 is a Thursday: wday=5 (1=Sunday), yday=1.
+    let (stdout, _, code) = run_rilua("local d = os.date('!*t', 0) print(d.wday, d.yday)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "5\t1");
+}
+
+#[test]
+fn os_date_utc_format() {
+    // "!" prefix forces UTC.
+    let (stdout, _, code) = run_rilua("print(os.date('!%Y-%m-%d', 0))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "1970-01-01");
+}
+
+#[test]
+fn os_date_strftime_format() {
+    let (stdout, _, code) = run_rilua("print(os.date('!%H:%M:%S', 3661))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "01:01:01");
+}
+
+#[test]
+fn os_date_time_roundtrip() {
+    // os.time(os.date("*t")) should approximately equal os.time().
+    let (stdout, _, code) = run_rilua(
+        "local t1 = os.time() \
+         local d = os.date('*t', t1) \
+         local t2 = os.time(d) \
+         assert(t1 == t2, 'roundtrip: ' .. t1 .. ' ~= ' .. t2) \
+         print('ok')",
+    );
+    assert_eq!(code, 0, "stderr should be empty");
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn os_difftime_basic() {
+    let (stdout, _, code) = run_rilua("print(os.difftime(100, 50))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "50");
+}
+
+#[test]
+fn os_difftime_default_t2() {
+    let (stdout, _, code) = run_rilua("print(os.difftime(100))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "100");
+}
+
+#[test]
+fn os_execute_no_args() {
+    // No args: returns non-zero if shell available.
+    let (stdout, _, code) = run_rilua("assert(os.execute() ~= 0) print('ok')");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn os_execute_true_command() {
+    let (stdout, _, code) = run_rilua("print(os.execute('true'))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "0");
+}
+
+#[test]
+fn os_execute_false_command() {
+    let (stdout, _, code) = run_rilua("local r = os.execute('false') assert(r ~= 0) print('ok')");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn os_getenv_path() {
+    // PATH is always set on POSIX systems.
+    let (stdout, _, code) = run_rilua("assert(os.getenv('PATH') ~= nil) print('ok')");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn os_getenv_nonexistent() {
+    let (stdout, _, code) = run_rilua("print(type(os.getenv('RILUA_NONEXISTENT_VAR_12345')))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "nil");
+}
+
+#[test]
+fn os_remove_nonexistent() {
+    let (stdout, _, code) = run_rilua(
+        "local ok, err, code = os.remove('/tmp/rilua_nonexistent_test_file') \
+         print(type(ok), type(err), type(code))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "nil\tstring\tnumber");
+}
+
+#[test]
+fn os_rename_nonexistent() {
+    let (stdout, _, code) = run_rilua(
+        "local ok, err, code = os.rename('/tmp/rilua_nonexistent_1', '/tmp/rilua_nonexistent_2') \
+         print(type(ok), type(err), type(code))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "nil\tstring\tnumber");
+}
+
+#[test]
+fn os_tmpname_returns_string() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         print(type(name)) \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "string");
+}
+
+#[test]
+fn os_tmpname_starts_with_slash() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         print(name:sub(1,1)) \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "/");
+}
+
+#[test]
+fn os_setlocale_query() {
+    // Query current locale (nil first arg).
+    let (stdout, _, code) = run_rilua("print(type(os.setlocale(nil)))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "string");
+}
+
+#[test]
+fn os_setlocale_c() {
+    let (stdout, _, code) = run_rilua("print(os.setlocale('C'))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "C");
+}
+
+#[test]
+fn os_setlocale_invalid() {
+    let (stdout, _, code) = run_rilua("print(os.setlocale('invalid_locale_xyz'))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "nil");
+}
+
+#[test]
+fn os_setlocale_category() {
+    let (stdout, _, code) = run_rilua("print(os.setlocale('C', 'numeric'))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "C");
+}
+
+#[test]
+fn os_remove_and_rename_file() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         os.execute('echo hello > ' .. name) \
+         local name2 = name .. '.renamed' \
+         assert(os.rename(name, name2)) \
+         assert(os.remove(name2)) \
+         print('ok')",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
