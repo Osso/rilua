@@ -16,7 +16,7 @@
 use super::gc::arena::{Arena, GcRef};
 use super::string::LuaString;
 use super::table::Table;
-use super::value::Val;
+use super::value::{Userdata, Val};
 
 // ---------------------------------------------------------------------------
 // TMS enum (tag method selector)
@@ -263,12 +263,13 @@ pub fn gettmbyobj(
     string_arena: &Arena<LuaString>,
     type_metatables: &[Option<GcRef<Table>>; NUM_TYPE_TAGS],
     tm_names: &[Option<GcRef<LuaString>>; TM_N],
+    userdata: &Arena<Userdata>,
 ) -> Option<Val> {
     let tm_name = tm_names[event as usize]?;
 
     let mt = match val {
         Val::Table(r) => tables.get(r).and_then(Table::metatable)?,
-        // Val::Userdata(r) => ..., // Phase 8b
+        Val::Userdata(r) => userdata.get(r).and_then(Userdata::metatable)?,
         _ => type_metatables[type_tag(val)]?,
     };
 

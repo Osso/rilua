@@ -1024,3 +1024,32 @@ fn oracle_os_setlocale_category() {
 fn oracle_os_tmpname_type() {
     oracle::assert_matches_reference("local n = os.tmpname() print(type(n)) os.remove(n)");
 }
+
+// ---------------------------------------------------------------------------
+// Userdata / newproxy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_newproxy_type() {
+    oracle::assert_matches_reference("print(type(newproxy()))");
+}
+
+#[test]
+fn oracle_newproxy_true_type() {
+    oracle::assert_matches_reference("print(type(newproxy(true)))");
+}
+
+#[test]
+fn oracle_newproxy_false_type() {
+    oracle::assert_matches_reference("print(type(newproxy(false)))");
+}
+
+#[test]
+fn oracle_newproxy_metatable() {
+    oracle::assert_matches_reference("local p = newproxy(true) print(type(getmetatable(p)))");
+}
+
+#[test]
+fn oracle_newproxy_no_metatable() {
+    oracle::assert_matches_reference("print(getmetatable(newproxy()))");
+}

@@ -21,7 +21,7 @@ use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
 use super::proto::{Proto, VARARG_ISVARARG};
 use super::state::{Gc, LUA_MINSTACK, LuaState, MAXCALLS, MAXCCALLS};
 use super::table::Table;
-use super::value::Val;
+use super::value::{Userdata, Val};
 
 // ---------------------------------------------------------------------------
 // Helper: RK resolution
@@ -598,6 +598,7 @@ fn get_tm_for_val(gc: &Gc, val: Val, event: TMS) -> Option<Val> {
         &gc.string_arena,
         &gc.type_metatables,
         &gc.tm_names,
+        &gc.userdata,
     )
 }
 
@@ -1122,11 +1123,23 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         false
                     } else {
                         // Same type, not raw-equal. Try __eq metamethod.
-                        // Only tables (and userdata, Phase 8b) support __eq.
+                        // Only tables and userdata support __eq.
                         let tm = match (b_val, c_val) {
                             (Val::Table(r1), Val::Table(r2)) => {
                                 let mt1 = state.gc.tables.get(r1).and_then(Table::metatable);
                                 let mt2 = state.gc.tables.get(r2).and_then(Table::metatable);
+                                get_comp_tm(
+                                    &state.gc.tables,
+                                    &state.gc.string_arena,
+                                    mt1,
+                                    mt2,
+                                    TMS::Eq,
+                                    &state.gc.tm_names,
+                                )
+                            }
+                            (Val::Userdata(r1), Val::Userdata(r2)) => {
+                                let mt1 = state.gc.userdata.get(r1).and_then(Userdata::metatable);
+                                let mt2 = state.gc.userdata.get(r2).and_then(Userdata::metatable);
                                 get_comp_tm(
                                     &state.gc.tables,
                                     &state.gc.string_arena,

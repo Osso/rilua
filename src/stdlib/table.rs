@@ -489,6 +489,7 @@ fn default_less_than(state: &mut LuaState, a: Val, b: Val) -> LuaResult<bool> {
                 &state.gc.string_arena,
                 &state.gc.type_metatables,
                 &state.gc.tm_names,
+                &state.gc.userdata,
             );
             let tm_b = gettmbyobj(
                 b,
@@ -497,6 +498,7 @@ fn default_less_than(state: &mut LuaState, a: Val, b: Val) -> LuaResult<bool> {
                 &state.gc.string_arena,
                 &state.gc.type_metatables,
                 &state.gc.tm_names,
+                &state.gc.userdata,
             );
 
             match (tm_a, tm_b) {

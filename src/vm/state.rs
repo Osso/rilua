@@ -25,7 +25,7 @@ use super::gc::arena::{Arena, GcRef};
 use super::metatable::{NUM_TYPE_TAGS, TM_N, TM_NAMES};
 use super::string::{LuaString, StringTable};
 use super::table::Table;
-use super::value::Val;
+use super::value::{Userdata, Val};
 
 // ---------------------------------------------------------------------------
 // Constants (match PUC-Rio limits)
@@ -65,6 +65,8 @@ pub struct Gc {
     pub closures: Arena<Closure>,
     /// Upvalue arena.
     pub upvalues: Arena<Upvalue>,
+    /// Userdata arena.
+    pub userdata: Arena<Userdata>,
     /// Thread arena (coroutines -- placeholder).
     pub threads: Arena<LuaThread>,
     /// Current white color for new allocations.
@@ -86,6 +88,7 @@ impl Gc {
             tables: Arena::new(),
             closures: Arena::new(),
             upvalues: Arena::new(),
+            userdata: Arena::new(),
             threads: Arena::new(),
             current_white: Color::White0,
             type_metatables: [None; NUM_TYPE_TAGS],
@@ -125,6 +128,11 @@ impl Gc {
     /// Allocates a new upvalue in the GC arena.
     pub fn alloc_upvalue(&mut self, upvalue: Upvalue) -> GcRef<Upvalue> {
         self.upvalues.alloc(upvalue, self.current_white)
+    }
+
+    /// Allocates a new userdata in the GC arena.
+    pub fn alloc_userdata(&mut self, userdata: Userdata) -> GcRef<Userdata> {
+        self.userdata.alloc(userdata, self.current_white)
     }
 
     /// Returns the interned string GcRef for a metamethod name.
@@ -412,6 +420,7 @@ mod tests {
         assert_eq!(state.gc.string_arena.len(), TM_N as u32);
         assert_eq!(state.gc.closures.len(), 0);
         assert_eq!(state.gc.upvalues.len(), 0);
+        assert_eq!(state.gc.userdata.len(), 0);
     }
 
     #[test]

@@ -21,11 +21,13 @@
 //! Numbers format using `"%.14g"` rules (14 significant digits, trailing
 //! zeros stripped) to match PUC-Rio's `luaO_str2d` / `lua_number2str`.
 
+use std::any::Any;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use super::closure::Closure;
 use super::gc::arena::GcRef;
+use super::gc::trace::Trace;
 use super::state::LuaThread;
 use super::string::LuaString;
 use super::table::Table;
@@ -37,8 +39,80 @@ use super::table::Table;
 /// Full userdata: a GC-managed block of user data with an optional
 /// metatable and environment table.
 ///
-/// Placeholder -- fields will be added in Phase 8b.
-pub struct Userdata;
+/// Stores an arbitrary Rust value (`Box<dyn Any>`) with optional metatable
+/// and environment. The I/O library stores file handles here; `newproxy()`
+/// stores `()`.
+///
+/// Reference: `Udata` in `lobject.h`, PUC-Rio Lua 5.1.1.
+pub struct Userdata {
+    /// The user-owned data. Type-erased; use `downcast_ref`/`downcast_mut`
+    /// to recover the concrete type.
+    data: Box<dyn Any>,
+    /// Per-instance metatable (same model as Table).
+    metatable: Option<GcRef<Table>>,
+    /// Per-instance environment table (fenv).
+    env: Option<GcRef<Table>>,
+}
+
+impl Userdata {
+    /// Creates a new userdata with the given data and no metatable.
+    pub fn new(data: Box<dyn Any>) -> Self {
+        Self {
+            data,
+            metatable: None,
+            env: None,
+        }
+    }
+
+    /// Creates a new userdata with data and a metatable.
+    pub fn with_metatable(data: Box<dyn Any>, mt: GcRef<Table>) -> Self {
+        Self {
+            data,
+            metatable: Some(mt),
+            env: None,
+        }
+    }
+
+    /// Returns a reference to the inner data, downcasting to `T`.
+    ///
+    /// Returns `None` if the stored type is not `T`.
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.data.downcast_ref::<T>()
+    }
+
+    /// Returns a mutable reference to the inner data, downcasting to `T`.
+    ///
+    /// Returns `None` if the stored type is not `T`.
+    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.data.downcast_mut::<T>()
+    }
+
+    /// Returns the per-instance metatable, if set.
+    pub fn metatable(&self) -> Option<GcRef<Table>> {
+        self.metatable
+    }
+
+    /// Sets the per-instance metatable.
+    pub fn set_metatable(&mut self, mt: Option<GcRef<Table>>) {
+        self.metatable = mt;
+    }
+
+    /// Returns the per-instance environment table, if set.
+    pub fn env(&self) -> Option<GcRef<Table>> {
+        self.env
+    }
+
+    /// Sets the per-instance environment table.
+    pub fn set_env(&mut self, env: Option<GcRef<Table>>) {
+        self.env = env;
+    }
+}
+
+impl Trace for Userdata {
+    fn trace(&self) {
+        // Phase 7: mark metatable and env if they contain GC references.
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Val
@@ -562,5 +636,96 @@ mod tests {
         assert!(Val::Nil.is_nil());
         assert!(!Val::Bool(false).is_nil());
         assert!(!Val::Num(0.0).is_nil());
+    }
+
+    // -- Userdata --
+
+    #[test]
+    fn userdata_new_unit() {
+        let ud = Userdata::new(Box::new(()));
+        assert!(ud.downcast_ref::<()>().is_some());
+        assert!(ud.metatable().is_none());
+        assert!(ud.env().is_none());
+    }
+
+    #[test]
+    fn userdata_new_i32() {
+        let ud = Userdata::new(Box::new(42_i32));
+        assert_eq!(ud.downcast_ref::<i32>(), Some(&42));
+        assert!(ud.downcast_ref::<String>().is_none());
+    }
+
+    #[test]
+    fn userdata_new_string() {
+        let ud = Userdata::new(Box::new(String::from("hello")));
+        assert_eq!(
+            ud.downcast_ref::<String>().map(String::as_str),
+            Some("hello")
+        );
+        assert!(ud.downcast_ref::<i32>().is_none());
+    }
+
+    #[test]
+    fn userdata_downcast_mut() {
+        let mut ud = Userdata::new(Box::new(10_i32));
+        if let Some(v) = ud.downcast_mut::<i32>() {
+            *v = 20;
+        }
+        assert_eq!(ud.downcast_ref::<i32>(), Some(&20));
+    }
+
+    #[test]
+    fn userdata_metatable() {
+        let mut table_arena: Arena<Table> = Arena::new();
+        let mt = table_arena.alloc(Table::new(), Color::White0);
+        let ud = Userdata::with_metatable(Box::new(()), mt);
+        assert_eq!(ud.metatable(), Some(mt));
+    }
+
+    #[test]
+    fn userdata_set_metatable() {
+        let mut table_arena: Arena<Table> = Arena::new();
+        let mt = table_arena.alloc(Table::new(), Color::White0);
+        let mut ud = Userdata::new(Box::new(()));
+        assert!(ud.metatable().is_none());
+        ud.set_metatable(Some(mt));
+        assert_eq!(ud.metatable(), Some(mt));
+        ud.set_metatable(None);
+        assert!(ud.metatable().is_none());
+    }
+
+    #[test]
+    fn userdata_env() {
+        let mut table_arena: Arena<Table> = Arena::new();
+        let env = table_arena.alloc(Table::new(), Color::White0);
+        let mut ud = Userdata::new(Box::new(()));
+        assert!(ud.env().is_none());
+        ud.set_env(Some(env));
+        assert_eq!(ud.env(), Some(env));
+        ud.set_env(None);
+        assert!(ud.env().is_none());
+    }
+
+    #[test]
+    fn userdata_type_name() {
+        let mut arena: Arena<Userdata> = Arena::new();
+        let r = arena.alloc(Userdata::new(Box::new(())), Color::White0);
+        assert_eq!(Val::Userdata(r).type_name(), "userdata");
+    }
+
+    #[test]
+    fn userdata_is_truthy() {
+        let mut arena: Arena<Userdata> = Arena::new();
+        let r = arena.alloc(Userdata::new(Box::new(())), Color::White0);
+        assert!(Val::Userdata(r).is_truthy());
+    }
+
+    #[test]
+    fn userdata_identity_equality() {
+        let mut arena: Arena<Userdata> = Arena::new();
+        let r1 = arena.alloc(Userdata::new(Box::new(1_i32)), Color::White0);
+        let r2 = arena.alloc(Userdata::new(Box::new(1_i32)), Color::White0);
+        assert_eq!(Val::Userdata(r1), Val::Userdata(r1));
+        assert_ne!(Val::Userdata(r1), Val::Userdata(r2));
     }
 }

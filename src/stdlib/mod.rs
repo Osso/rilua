@@ -10,12 +10,12 @@ pub mod package;
 pub mod string;
 pub mod table;
 
-use crate::error::LuaResult;
+use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::vm::closure::{Closure, RustClosure, RustFn};
 use crate::vm::gc::arena::GcRef;
 use crate::vm::state::LuaState;
 use crate::vm::table::Table;
-use crate::vm::value::Val;
+use crate::vm::value::{Userdata, Val};
 
 /// Registers all standard library functions into the global table.
 pub fn open_libs(state: &mut LuaState) -> LuaResult<()> {
@@ -129,7 +129,7 @@ fn open_math_lib(state: &mut LuaState) -> LuaResult<()> {
     let pi_key = state.gc.intern_string(b"pi");
     let huge_key = state.gc.intern_string(b"huge");
     let mt = state.gc.tables.get_mut(math_table).ok_or_else(|| {
-        crate::error::LuaError::Runtime(crate::error::RuntimeError {
+        LuaError::Runtime(RuntimeError {
             message: "math table not found".into(),
             level: 0,
             traceback: vec![],
@@ -206,7 +206,7 @@ fn open_string_lib(state: &mut LuaState) -> LuaResult<()> {
     let mt = state.gc.alloc_table(Table::new());
     let index_key = state.gc.intern_string(b"__index");
     let mt_table = state.gc.tables.get_mut(mt).ok_or_else(|| {
-        crate::error::LuaError::Runtime(crate::error::RuntimeError {
+        LuaError::Runtime(RuntimeError {
             message: "string metatable not found".into(),
             level: 0,
             traceback: vec![],
@@ -230,7 +230,7 @@ fn register_global_val(state: &mut LuaState, name: &str, val: Val) -> LuaResult<
     let key = Val::Str(key_ref);
     let global = state.global;
     let table = state.gc.tables.get_mut(global).ok_or_else(|| {
-        crate::error::LuaError::Runtime(crate::error::RuntimeError {
+        LuaError::Runtime(RuntimeError {
             message: "global table not found".into(),
             level: 0,
             traceback: vec![],
@@ -262,7 +262,7 @@ fn register_table_fn(
     let val = Val::Function(closure_ref);
 
     let table = state.gc.tables.get_mut(table_ref).ok_or_else(|| {
-        crate::error::LuaError::Runtime(crate::error::RuntimeError {
+        LuaError::Runtime(RuntimeError {
             message: "table not found for function registration".into(),
             level: 0,
             traceback: vec![],
@@ -271,4 +271,80 @@ fn register_table_fn(
     table.raw_set(key, val, &state.gc.string_arena)?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Registry helpers for named metatables (used by I/O library, etc.)
+// ---------------------------------------------------------------------------
+
+/// Creates or fetches a named metatable from the registry.
+///
+/// If the registry already has a table at `name`, returns it. Otherwise
+/// creates a new table, stores it in the registry at `name`, and returns it.
+///
+/// Matches PUC-Rio's `luaL_newmetatable` from `lauxlib.c`.
+pub fn new_metatable(state: &mut LuaState, name: &str) -> LuaResult<GcRef<Table>> {
+    // Check if the name is already in the registry.
+    if let Some(existing) = get_registry_metatable(state, name) {
+        return Ok(existing);
+    }
+
+    // Create a new table and store it in the registry.
+    let mt = state.gc.alloc_table(Table::new());
+    let key_ref = state.gc.intern_string(name.as_bytes());
+    let registry = state.registry;
+    let reg_table = state.gc.tables.get_mut(registry).ok_or_else(|| {
+        LuaError::Runtime(RuntimeError {
+            message: "registry not found".into(),
+            level: 0,
+            traceback: vec![],
+        })
+    })?;
+    reg_table.raw_set(Val::Str(key_ref), Val::Table(mt), &state.gc.string_arena)?;
+    Ok(mt)
+}
+
+/// Looks up a named metatable in the registry.
+///
+/// Returns `Some(table_ref)` if found, `None` otherwise. Uses `intern_string`
+/// to find the key (idempotent -- returns the existing interned string).
+///
+/// Matches PUC-Rio's `luaL_getmetatable` macro from `lauxlib.h`.
+pub fn get_registry_metatable(state: &mut LuaState, name: &str) -> Option<GcRef<Table>> {
+    let key_ref = state.gc.intern_string(name.as_bytes());
+    let registry = state.gc.tables.get(state.registry)?;
+    let val = registry.get_str(key_ref, &state.gc.string_arena);
+    match val {
+        Val::Table(r) => Some(r),
+        _ => None,
+    }
+}
+
+/// Validates that a userdata value has the named metatable from the registry.
+///
+/// Returns the userdata `GcRef` if the value is a userdata whose metatable
+/// matches (by identity) the named metatable in the registry. Returns an
+/// error otherwise.
+///
+/// Matches PUC-Rio's `luaL_checkudata` from `lauxlib.c`.
+pub fn check_userdata(state: &mut LuaState, val: Val, name: &str) -> LuaResult<GcRef<Userdata>> {
+    let Val::Userdata(ud_ref) = val else {
+        return Err(LuaError::Runtime(RuntimeError {
+            message: format!("{name} expected, got {}", val.type_name()),
+            level: 0,
+            traceback: vec![],
+        }));
+    };
+
+    let expected_mt = get_registry_metatable(state, name);
+    let actual_mt = state.gc.userdata.get(ud_ref).and_then(Userdata::metatable);
+
+    match (expected_mt, actual_mt) {
+        (Some(expected), Some(actual)) if expected == actual => Ok(ud_ref),
+        _ => Err(LuaError::Runtime(RuntimeError {
+            message: format!("{name} expected, got userdata"),
+            level: 0,
+            traceback: vec![],
+        })),
+    }
 }

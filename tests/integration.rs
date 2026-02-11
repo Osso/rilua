@@ -556,8 +556,14 @@ fn getfenv_returns_table() {
 fn newproxy_basic() {
     let (stdout, _, code) = run_rilua("local p = newproxy() print(type(p))");
     assert_eq!(code, 0);
-    // Our stub returns table since we don't have userdata yet.
-    assert_eq!(stdout, "table\n");
+    assert_eq!(stdout, "userdata\n");
+}
+
+#[test]
+fn newproxy_false() {
+    let (stdout, _, code) = run_rilua("local p = newproxy(false) print(type(p))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "userdata\n");
 }
 
 #[test]
@@ -565,6 +571,53 @@ fn newproxy_with_metatable() {
     let (stdout, _, code) = run_rilua("local p = newproxy(true) print(type(getmetatable(p)))");
     assert_eq!(code, 0);
     assert_eq!(stdout, "table\n");
+}
+
+#[test]
+fn newproxy_tostring_metamethod() {
+    let (stdout, _, code) = run_rilua(
+        "local p = newproxy(true) \
+         local mt = getmetatable(p) \
+         mt.__tostring = function() return 'proxy!' end \
+         print(tostring(p))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "proxy!\n");
+}
+
+#[test]
+fn newproxy_index_metamethod() {
+    let (stdout, _, code) = run_rilua(
+        "local p = newproxy(true) \
+         local mt = getmetatable(p) \
+         mt.__index = function(_, k) return k .. '!' end \
+         print(p.hello)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello!\n");
+}
+
+#[test]
+fn newproxy_shared_metatable() {
+    let (stdout, _, code) = run_rilua(
+        "local p1 = newproxy(true) \
+         getmetatable(p1).__index = function(_, k) return 42 end \
+         local p2 = newproxy(p1) \
+         print(p2.x)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn newproxy_type_is_userdata() {
+    let (stdout, _, code) = run_rilua(
+        "print(type(newproxy())) \
+         print(type(newproxy(true))) \
+         print(type(newproxy(false)))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "userdata\nuserdata\nuserdata\n");
 }
 
 #[test]

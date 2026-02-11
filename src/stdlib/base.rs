@@ -10,7 +10,7 @@ use crate::vm::execute::{self, CallResult, execute};
 use crate::vm::metatable::{self, val_raw_equal};
 use crate::vm::state::LuaState;
 use crate::vm::table::Table;
-use crate::vm::value::Val;
+use crate::vm::value::{Userdata, Val};
 
 // ---------------------------------------------------------------------------
 // Argument helpers
@@ -73,6 +73,7 @@ fn check_args(name: &str, state: &LuaState, min: usize) -> LuaResult<()> {
 fn get_metafield(gc: &mut crate::vm::state::Gc, val: Val, name: &[u8]) -> Option<Val> {
     let mt = match val {
         Val::Table(r) => gc.tables.get(r).and_then(Table::metatable)?,
+        Val::Userdata(r) => gc.userdata.get(r).and_then(Userdata::metatable)?,
         _ => gc.type_metatables[metatable::type_tag(val)]?,
     };
 
@@ -624,6 +625,7 @@ pub fn lua_getmetatable(state: &mut LuaState) -> LuaResult<u32> {
     // Get the actual metatable.
     let mt = match val {
         Val::Table(r) => state.gc.tables.get(r).and_then(Table::metatable),
+        Val::Userdata(r) => state.gc.userdata.get(r).and_then(Userdata::metatable),
         _ => state.gc.type_metatables[metatable::type_tag(val)],
     };
 
@@ -1408,25 +1410,36 @@ fn set_func_env(
 /// Creates a zero-size userdata. If `true` is passed, attaches an empty
 /// metatable. This is an undocumented but present function in Lua 5.1.1.
 ///
-/// Note: Full userdata support is not yet implemented, so this is a stub
-/// that creates a table as a proxy placeholder.
+/// Creates a zero-size userdata. With `true` argument, attaches an empty
+/// metatable. With another proxy as argument, shares its metatable.
 ///
 /// Reference: `luaB_newproxy` in `lbaselib.c`.
 pub fn lua_newproxy(state: &mut LuaState) -> LuaResult<u32> {
     let arg_val = arg(state, 0);
 
-    // Create a proxy table (placeholder for userdata).
-    let proxy = state.gc.alloc_table(Table::new());
+    // Create a zero-size userdata.
+    let ud = Userdata::new(Box::new(()));
+    let ud_ref = state.gc.alloc_userdata(ud);
 
     if arg_val == Val::Bool(true) {
         // Attach an empty metatable.
         let mt = state.gc.alloc_table(Table::new());
-        if let Some(t) = state.gc.tables.get_mut(proxy) {
-            t.set_metatable(Some(mt));
+        if let Some(u) = state.gc.userdata.get_mut(ud_ref) {
+            u.set_metatable(Some(mt));
+        }
+    } else if let Val::Userdata(other_ref) = arg_val {
+        // Share the metatable from an existing proxy.
+        let other_mt = state
+            .gc
+            .userdata
+            .get(other_ref)
+            .and_then(Userdata::metatable);
+        if let (Some(mt), Some(u)) = (other_mt, state.gc.userdata.get_mut(ud_ref)) {
+            u.set_metatable(Some(mt));
         }
     }
 
-    state.push(Val::Table(proxy));
+    state.push(Val::Userdata(ud_ref));
     Ok(1)
 }
 
@@ -1445,7 +1458,8 @@ pub fn lua_gcinfo(state: &mut LuaState) -> LuaResult<u32> {
     let kb = (f64::from(state.gc.string_arena.len())
         + f64::from(state.gc.tables.len())
         + f64::from(state.gc.closures.len())
-        + f64::from(state.gc.upvalues.len()))
+        + f64::from(state.gc.upvalues.len())
+        + f64::from(state.gc.userdata.len()))
         / 1024.0;
     // gcinfo returns an integer (floor).
     #[allow(clippy::cast_possible_truncation)]
