@@ -59,6 +59,43 @@ fn check_string(state: &LuaState, name: &str, n: usize) -> LuaResult<Vec<u8>> {
     }
 }
 
+/// Extracts a numeric argument, coercing strings to numbers.
+/// Matches PUC-Rio's `luaL_checknumber` behavior.
+fn check_number(state: &LuaState, name: &str, n: usize) -> LuaResult<f64> {
+    let val = arg(state, n);
+    match val {
+        Val::Num(v) => Ok(v),
+        Val::Str(r) => {
+            let data = state
+                .gc
+                .string_arena
+                .get(r)
+                .map(|s| s.data().to_vec())
+                .unwrap_or_default();
+            let text = String::from_utf8_lossy(&data);
+            crate::vm::execute::str_to_number(&data)
+                .ok_or_else(|| bad_argument(name, n + 1, &format!("number expected, got '{text}'")))
+        }
+        _ => Err(bad_argument(name, n + 1, "number expected")),
+    }
+}
+
+/// Extracts an integer argument (truncates float), coercing strings.
+/// Matches PUC-Rio's `luaL_checkinteger`.
+#[allow(clippy::cast_possible_truncation)]
+fn check_int(state: &LuaState, name: &str, n: usize) -> LuaResult<i64> {
+    Ok(check_number(state, name, n)? as i64)
+}
+
+/// Extracts an optional integer argument, defaulting to `default` if nil/absent.
+#[allow(clippy::cast_possible_truncation)]
+fn opt_int(state: &LuaState, name: &str, n: usize, default: i64) -> LuaResult<i64> {
+    if nargs(state) <= n || matches!(arg(state, n), Val::Nil) {
+        return Ok(default);
+    }
+    check_int(state, name, n)
+}
+
 /// Relative string position: negative means back from end.
 /// PUC-Rio's `posrelat`.
 fn posrelat(pos: i64, len: usize) -> i64 {
@@ -89,22 +126,8 @@ pub fn str_byte(state: &mut LuaState) -> LuaResult<u32> {
     let s = check_string(state, "string.byte", 0)?;
     let len = s.len();
 
-    let i_val = arg(state, 1);
-    let j_val = arg(state, 2);
-
-    #[allow(clippy::cast_possible_truncation)]
-    let posi = match i_val {
-        Val::Nil => 1i64,
-        Val::Num(n) => posrelat(n as i64, len),
-        _ => return Err(bad_argument("string.byte", 2, "number expected")),
-    };
-
-    #[allow(clippy::cast_possible_truncation)]
-    let pose = match j_val {
-        Val::Nil => posi,
-        Val::Num(n) => posrelat(n as i64, len),
-        _ => return Err(bad_argument("string.byte", 3, "number expected")),
-    };
+    let posi = opt_int(state, "string.byte", 1, 1).map(|i| posrelat(i, len))?;
+    let pose = opt_int(state, "string.byte", 2, posi).map(|j| posrelat(j, len))?;
 
     let posi = posi.max(1) as usize;
     let pose = pose.min(len as i64).max(0) as usize;
@@ -133,10 +156,7 @@ pub fn str_char(state: &mut LuaState) -> LuaResult<u32> {
     let mut buf = Vec::with_capacity(n);
 
     for i in 0..n {
-        let val = arg(state, i);
-        let Val::Num(c) = val else {
-            return Err(bad_argument("string.char", i + 1, "number expected"));
-        };
+        let c = check_number(state, "string.char", i)?;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let byte = c as u32;
         if byte > 255 {
@@ -161,21 +181,9 @@ pub fn str_sub(state: &mut LuaState) -> LuaResult<u32> {
     let s = check_string(state, "string.sub", 0)?;
     let len = s.len();
 
-    let i_val = arg(state, 1);
-    let j_val = arg(state, 2);
-
-    let Val::Num(i_f) = i_val else {
-        return Err(bad_argument("string.sub", 2, "number expected"));
-    };
-
+    let start = posrelat(check_int(state, "string.sub", 1)?, len);
     #[allow(clippy::cast_possible_truncation)]
-    let start = posrelat(i_f as i64, len);
-    #[allow(clippy::cast_possible_truncation)]
-    let end = match j_val {
-        Val::Nil => len as i64,
-        Val::Num(n) => posrelat(n as i64, len),
-        _ => return Err(bad_argument("string.sub", 3, "number expected")),
-    };
+    let end = opt_int(state, "string.sub", 2, len as i64).map(|j| posrelat(j, len))?;
 
     let start = start.max(1) as usize;
     let end = end.min(len as i64).max(0) as usize;
@@ -198,13 +206,7 @@ pub fn str_sub(state: &mut LuaState) -> LuaResult<u32> {
 pub fn str_rep(state: &mut LuaState) -> LuaResult<u32> {
     check_args("string.rep", state, 2)?;
     let s = check_string(state, "string.rep", 0)?;
-    let n_val = arg(state, 1);
-
-    let Val::Num(n_f) = n_val else {
-        return Err(bad_argument("string.rep", 2, "number expected"));
-    };
-    #[allow(clippy::cast_possible_truncation)]
-    let n = n_f as i64;
+    let n = check_int(state, "string.rep", 1)?;
 
     if n <= 0 {
         let r = state.gc.intern_string(b"");
@@ -1416,15 +1418,9 @@ pub fn str_find(state: &mut LuaState) -> LuaResult<u32> {
     let s = check_string(state, "string.find", 0)?;
     let pat = check_string(state, "string.find", 1)?;
 
-    let init_val = arg(state, 2);
     let plain_val = arg(state, 3);
 
-    #[allow(clippy::cast_possible_truncation)]
-    let init = match init_val {
-        Val::Nil => 1i64,
-        Val::Num(n) => posrelat(n as i64, s.len()),
-        _ => 1,
-    };
+    let init = opt_int(state, "string.find", 2, 1).map(|i| posrelat(i, s.len()))?;
     let init = (init.max(1) as usize).saturating_sub(1); // Convert to 0-based.
     let plain = plain_val.is_truthy();
 
@@ -1520,13 +1516,8 @@ pub fn str_match(state: &mut LuaState) -> LuaResult<u32> {
     let s = check_string(state, "string.match", 0)?;
     let pat = check_string(state, "string.match", 1)?;
 
-    let init_val = arg(state, 2);
-    #[allow(clippy::cast_possible_truncation)]
-    let init = match init_val {
-        Val::Nil => 1i64,
-        Val::Num(n) => posrelat(n as i64, s.len()),
-        _ => 1,
-    };
+    let init_raw = opt_int(state, "string.match", 2, 1)?;
+    let init = posrelat(init_raw, s.len());
     let init = (init.max(1) as usize).saturating_sub(1);
 
     let anchor = !pat.is_empty() && pat[0] == b'^';
@@ -1678,14 +1669,8 @@ pub fn str_gsub(state: &mut LuaState) -> LuaResult<u32> {
     let s = check_string(state, "string.gsub", 0)?;
     let pat = check_string(state, "string.gsub", 1)?;
     let repl_val = arg(state, 2);
-    let max_val = arg(state, 3);
-
-    #[allow(clippy::cast_possible_truncation)]
-    let max_replacements = match max_val {
-        Val::Nil => usize::MAX,
-        Val::Num(n) => n.max(0.0) as usize,
-        _ => usize::MAX,
-    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let max_replacements = opt_int(state, "string.gsub", 3, i64::MAX)?.max(0) as usize;
 
     let anchor = !pat.is_empty() && pat[0] == b'^';
     let pat_start = if anchor { 1 } else { 0 };

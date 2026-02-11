@@ -27,12 +27,25 @@ pub struct Lexer {
 }
 
 impl Lexer {
-    /// Creates a new lexer for the given source code.
-    pub fn new(source: &str, name: &str) -> Self {
+    /// Creates a new lexer for the given source bytes.
+    ///
+    /// Source is accepted as `&[u8]` because Lua files may contain arbitrary
+    /// byte sequences (e.g. `\0`, `\255` in string literals).
+    pub fn new(source: &[u8], name: &str) -> Self {
+        // Skip shebang line (PUC-Rio's luaL_loadfile skips leading `#` line).
+        let (start, start_line) = if source.starts_with(b"#") {
+            let end = source
+                .iter()
+                .position(|&b| b == b'\n' || b == b'\r')
+                .map_or(source.len(), |p| p + 1);
+            (end, 2)
+        } else {
+            (0, 1)
+        };
         Self {
-            source: source.as_bytes().to_vec(),
-            pos: 0,
-            line: 1,
+            source: source.to_vec(),
+            pos: start,
+            line: start_line,
             column: 1,
             source_name: name.to_string(),
             lookahead: None,
@@ -357,7 +370,7 @@ impl Lexer {
 
     // -- Strings --
 
-    fn read_short_string(&mut self, delimiter: u8) -> LuaResult<String> {
+    fn read_short_string(&mut self, delimiter: u8) -> LuaResult<Vec<u8>> {
         self.advance(); // consume opening delimiter
         let mut buf = Vec::new();
 
@@ -460,7 +473,7 @@ impl Lexer {
             }
         }
 
-        Ok(String::from_utf8_lossy(&buf).into_owned())
+        Ok(buf)
     }
 
     // -- Long strings and comments --
@@ -488,7 +501,7 @@ impl Lexer {
 
     /// Reads a long string `[=*[...]=*]` or long comment.
     /// `sep` is the number of `=` signs. If `is_comment`, discards the content.
-    fn read_long_string(&mut self, sep: i32, is_comment: bool) -> LuaResult<String> {
+    fn read_long_string(&mut self, sep: i32, is_comment: bool) -> LuaResult<Vec<u8>> {
         // Consume opening delimiter: '[' '='*sep '['
         let count = 2 + sep as usize;
         for _ in 0..count {
@@ -524,9 +537,9 @@ impl Lexer {
                             self.column += 1;
                         }
                         if is_comment {
-                            return Ok(String::new());
+                            return Ok(Vec::new());
                         }
-                        return Ok(String::from_utf8_lossy(&buf).into_owned());
+                        return Ok(buf);
                     }
                     self.advance();
                     if !is_comment {
@@ -564,7 +577,7 @@ mod tests {
     use super::*;
 
     fn lex_all(source: &str) -> LuaResult<Vec<(Token, Span)>> {
-        let mut lexer = Lexer::new(source, "test");
+        let mut lexer = Lexer::new(source.as_bytes(), "test");
         let mut tokens = Vec::new();
         loop {
             let (tok, span) = lexer.next()?;
@@ -701,21 +714,21 @@ mod tests {
     #[test]
     fn simple_strings() {
         let tokens = lex_tokens(r#""hello" 'world'"#).unwrap();
-        assert_eq!(tokens[0], Token::Str("hello".into()));
-        assert_eq!(tokens[1], Token::Str("world".into()));
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
+        assert_eq!(tokens[1], Token::Str(b"world".to_vec()));
     }
 
     #[test]
     fn string_escapes() {
         let tokens = lex_tokens(r#""\a\b\f\n\r\t\v\\\"\'""#).unwrap();
-        let expected = "\x07\x08\x0C\n\r\t\x0B\\\"'";
-        assert_eq!(tokens[0], Token::Str(expected.into()));
+        let expected = b"\x07\x08\x0C\n\r\t\x0B\\\"'";
+        assert_eq!(tokens[0], Token::Str(expected.to_vec()));
     }
 
     #[test]
     fn string_decimal_escape() {
         let tokens = lex_tokens(r#""\65\066\127""#).unwrap();
-        assert_eq!(tokens[0], Token::Str("AB\x7F".into()));
+        assert_eq!(tokens[0], Token::Str(b"AB\x7F".to_vec()));
     }
 
     #[test]
@@ -734,7 +747,7 @@ mod tests {
     fn string_newline_escape() {
         let source = "\"line1\\\nline2\"";
         let tokens = lex_tokens(source).unwrap();
-        assert_eq!(tokens[0], Token::Str("line1\nline2".into()));
+        assert_eq!(tokens[0], Token::Str(b"line1\nline2".to_vec()));
     }
 
     #[test]
@@ -752,43 +765,43 @@ mod tests {
     #[test]
     fn long_string_level_0() {
         let tokens = lex_tokens("[[hello]]").unwrap();
-        assert_eq!(tokens[0], Token::Str("hello".into()));
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
     }
 
     #[test]
     fn long_string_level_1() {
         let tokens = lex_tokens("[=[hello]=]").unwrap();
-        assert_eq!(tokens[0], Token::Str("hello".into()));
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
     }
 
     #[test]
     fn long_string_level_2() {
         let tokens = lex_tokens("[==[hello]==]").unwrap();
-        assert_eq!(tokens[0], Token::Str("hello".into()));
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
     }
 
     #[test]
     fn long_string_skips_first_newline() {
         let tokens = lex_tokens("[[\nhello]]").unwrap();
-        assert_eq!(tokens[0], Token::Str("hello".into()));
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
     }
 
     #[test]
     fn long_string_normalizes_newlines() {
         let tokens = lex_tokens("[[\r\nhello\r\nworld]]").unwrap();
-        assert_eq!(tokens[0], Token::Str("hello\nworld".into()));
+        assert_eq!(tokens[0], Token::Str(b"hello\nworld".to_vec()));
     }
 
     #[test]
     fn long_string_no_escapes() {
         let tokens = lex_tokens(r"[[hello\n]]").unwrap();
-        assert_eq!(tokens[0], Token::Str("hello\\n".into()));
+        assert_eq!(tokens[0], Token::Str(b"hello\\n".to_vec()));
     }
 
     #[test]
     fn long_string_nested_brackets() {
         let tokens = lex_tokens("[=[hello]world]=]").unwrap();
-        assert_eq!(tokens[0], Token::Str("hello]world".into()));
+        assert_eq!(tokens[0], Token::Str(b"hello]world".to_vec()));
     }
 
     #[test]
@@ -859,7 +872,7 @@ mod tests {
 
     #[test]
     fn lookahead_does_not_consume() {
-        let mut lexer = Lexer::new("x y", "test");
+        let mut lexer = Lexer::new(b"x y", "test");
         let la = lexer.lookahead().unwrap().clone();
         assert_eq!(la, Token::Name("x".into()));
         let (tok, _) = lexer.next().unwrap();
@@ -904,11 +917,18 @@ mod tests {
 
     #[test]
     fn shebang_line() {
-        // Lua 5.1 skips the first line if it starts with '#'
-        // Our lexer treats '#' as a single char token;
-        // the shebang is handled at a higher level.
-        let tokens = lex_tokens("# x").unwrap();
-        assert_eq!(tokens[0], Token::Char(b'#'));
+        // Lua 5.1 skips the first line if it starts with '#'.
+        // The lexer skips from '#' to end of line, then resumes on the next line.
+        let tokens = lex_tokens("#!/usr/bin/lua\nreturn 1").unwrap();
+        assert_eq!(tokens[0], Token::Return);
+        assert_eq!(tokens[1], Token::Number(1.0));
+    }
+
+    #[test]
+    fn shebang_line_only() {
+        // A file containing only a shebang line produces just EOS.
+        let tokens = lex_tokens("#!/usr/bin/env lua").unwrap();
+        assert!(tokens.is_empty() || tokens[0] == Token::Eos);
     }
 
     // -- Mixed tokens --
@@ -928,7 +948,7 @@ mod tests {
         let tokens = lex_tokens("print(\"hello\")").unwrap();
         assert_eq!(tokens[0], Token::Name("print".into()));
         assert_eq!(tokens[1], Token::Char(b'('));
-        assert_eq!(tokens[2], Token::Str("hello".into()));
+        assert_eq!(tokens[2], Token::Str(b"hello".to_vec()));
         assert_eq!(tokens[3], Token::Char(b')'));
     }
 

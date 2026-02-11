@@ -67,7 +67,7 @@ fn check_int(state: &LuaState, name: &str, n: usize) -> LuaResult<i32> {
 // ---------------------------------------------------------------------------
 
 #[inline]
-#[allow(clippy::unnecessary_wrapping)]
+#[allow(clippy::unnecessary_wraps)]
 fn push_num(state: &mut LuaState, n: f64) -> LuaResult<u32> {
     state.stack_set(state.base, Val::Num(n));
     state.top = state.base + 1;

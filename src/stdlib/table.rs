@@ -262,6 +262,8 @@ pub fn tab_insert(state: &mut LuaState) -> LuaResult<u32> {
             return Err(simple_error("wrong number of arguments to 'insert'".into()));
         }
     }
+    // Write barrier: table was mutated.
+    state.gc.barrier_back(tref);
 
     state.top = state.base;
     Ok(0)
@@ -299,6 +301,8 @@ pub fn tab_remove(state: &mut LuaState) -> LuaResult<u32> {
     }
     // Set last element to nil.
     set_raw(state, tref, e, Val::Nil)?;
+    // Write barrier: table was mutated.
+    state.gc.barrier_back(tref);
 
     state.stack_set(state.base, removed);
     state.top = state.base + 1;
@@ -418,6 +422,8 @@ pub fn tab_sort(state: &mut LuaState) -> LuaResult<u32> {
 
     if n > 1 {
         auxsort(state, tref, 1, n, comp)?;
+        // Write barrier: table was mutated during sort.
+        state.gc.barrier_back(tref);
     }
 
     state.top = state.base;

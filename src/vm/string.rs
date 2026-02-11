@@ -276,6 +276,32 @@ impl StringTable {
         }
     }
 
+    /// Retains only entries for which `predicate` returns `true`.
+    ///
+    /// Used by the GC sweep phase to remove entries whose arena slots
+    /// have been freed.
+    pub fn retain<F>(&mut self, predicate: F)
+    where
+        F: Fn(GcRef<LuaString>) -> bool,
+    {
+        let mut removed = 0usize;
+        for bucket in &mut self.buckets {
+            let before = bucket.len();
+            bucket.retain(|&r| predicate(r));
+            removed += before - bucket.len();
+        }
+        self.count = self.count.saturating_sub(removed);
+    }
+
+    /// Removes intern table entries that reference dead (freed) strings.
+    ///
+    /// After the GC sweep frees dead strings from the arena, those GcRefs
+    /// become stale. This method removes them from the intern table so
+    /// future lookups won't find freed slots.
+    pub fn sweep_dead(&mut self, arena: &Arena<LuaString>) {
+        self.retain(|r| arena.get(r).is_some());
+    }
+
     /// Rehashes all entries into a new bucket array of the given size.
     fn rehash(&mut self, new_size: usize, arena: &Arena<LuaString>) {
         let mut new_buckets = vec![Vec::new(); new_size];

@@ -352,8 +352,8 @@ fn loader_lua(state: &mut LuaState) -> LuaResult<u32> {
         return Ok(1);
     };
 
-    // Read and compile the file.
-    let source = match std::fs::read_to_string(&filename) {
+    // Read and compile the file (as bytes to support binary string literals).
+    let source = match std::fs::read(&filename) {
         Ok(s) => s,
         Err(e) => {
             return Err(simple_error(format!(

@@ -21,8 +21,8 @@ pub struct Parser {
 }
 
 impl Parser {
-    /// Creates a new parser for the given source code.
-    pub fn new(source: &str, name: &str) -> LuaResult<Self> {
+    /// Creates a new parser for the given source bytes.
+    pub fn new(source: &[u8], name: &str) -> LuaResult<Self> {
         let mut lexer = Lexer::new(source, name);
         let (current, span) = lexer.next()?;
         Ok(Self {
@@ -815,7 +815,7 @@ fn binary_priority(op: BinOp) -> (u8, u8) {
 }
 
 /// Parses a Lua source string into an AST block.
-pub fn parse(source: &str, name: &str) -> LuaResult<Block> {
+pub fn parse(source: &[u8], name: &str) -> LuaResult<Block> {
     let mut parser = Parser::new(source, name)?;
     parser.parse_chunk()
 }
@@ -827,11 +827,11 @@ mod tests {
     // -- Helper --
 
     fn parse_ok(source: &str) -> Block {
-        parse(source, "test").unwrap()
+        parse(source.as_bytes(), "test").unwrap()
     }
 
     fn parse_err(source: &str) -> String {
-        parse(source, "test").unwrap_err().to_string()
+        parse(source.as_bytes(), "test").unwrap_err().to_string()
     }
 
     // -- Block and empty program --
@@ -1262,7 +1262,7 @@ mod tests {
         if let Stat::ExprStat { expr, .. } = &block[0] {
             if let Expr::Call { args, .. } = expr {
                 assert_eq!(args.len(), 1);
-                assert!(matches!(&args[0], Expr::Str(s, _) if s == "hello"));
+                assert!(matches!(&args[0], Expr::Str(s, _) if s == b"hello"));
             } else {
                 panic!("expected Call");
             }
@@ -1387,7 +1387,7 @@ mod tests {
             assert!(matches!(values[1], Expr::True(_)));
             assert!(matches!(values[2], Expr::False(_)));
             assert!(matches!(values[3], Expr::Number(n, _) if n == 42.0));
-            assert!(matches!(&values[4], Expr::Str(s, _) if s == "hello"));
+            assert!(matches!(&values[4], Expr::Str(s, _) if s == b"hello"));
         } else {
             panic!("expected Return");
         }

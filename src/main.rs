@@ -18,7 +18,7 @@ fn main() {
                 eprintln!("rilua: '-e' needs argument");
                 process::exit(1);
             }
-            if let Err(e) = rilua::exec_with_name(&args[2], "=(command line)") {
+            if let Err(e) = rilua::exec_with_name(args[2].as_bytes(), "=(command line)") {
                 eprintln!("{e}");
                 process::exit(1);
             }
@@ -27,8 +27,9 @@ fn main() {
             println!("Lua 5.1.1  Copyright (C) 1994-2006 Lua.org, PUC-Rio");
         }
         other => {
-            // Treat as a script file.
-            let source = match std::fs::read_to_string(other) {
+            // Treat as a script file. Read as bytes to support binary
+            // string literals (Lua source is a byte stream, not UTF-8).
+            let source = match std::fs::read(other) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("rilua: {other}: {e}");

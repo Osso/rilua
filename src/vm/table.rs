@@ -232,6 +232,79 @@ impl Table {
         self.flags = 0; // Invalidate metamethod cache
     }
 
+    /// Returns a slice of the array part for GC traversal.
+    ///
+    /// The collector uses this to mark all values in the array part.
+    #[inline]
+    pub fn array_slice(&self) -> &[Val] {
+        &self.array
+    }
+
+    /// Collects all occupied key-value pairs from the hash part.
+    ///
+    /// Used by the GC collector to mark hash entries. Returns only non-nil
+    /// key entries (skips free nodes).
+    pub fn hash_entries(&self) -> Vec<(Val, Val)> {
+        let mut entries = Vec::new();
+        for node in &self.nodes {
+            if !node.key.is_nil() {
+                entries.push((node.key, node.value));
+            }
+        }
+        entries
+    }
+
+    /// Returns indices of hash nodes that contain dead references in weak tables.
+    ///
+    /// For `weak_keys`: a node is dead if its key is dead.
+    /// For `weak_values`: a node is dead if its value is dead.
+    /// The `is_dead` predicate checks whether a given Val is a dead collectable.
+    pub fn find_dead_hash_entries<F>(
+        &self,
+        weak_keys: bool,
+        weak_values: bool,
+        is_dead: F,
+    ) -> Vec<usize>
+    where
+        F: Fn(Val, bool) -> bool,
+    {
+        let mut dead = Vec::new();
+        for (i, node) in self.nodes.iter().enumerate() {
+            if node.key.is_nil() {
+                continue;
+            }
+            if (weak_keys && is_dead(node.key, true)) || (weak_values && is_dead(node.value, false))
+            {
+                dead.push(i);
+            }
+        }
+        dead
+    }
+
+    /// Sets the array element at `idx` to Nil (for weak-table clearing).
+    pub fn nil_array_entry(&mut self, idx: usize) {
+        if idx < self.array.len() {
+            self.array[idx] = Val::Nil;
+        }
+    }
+
+    /// Nils out hash entries at the given node indices (for weak-table clearing).
+    ///
+    /// Sets both key and value to Nil and clears the next pointer, effectively
+    /// removing the entries from the hash chain.
+    pub fn nil_hash_entries(&mut self, indices: &[usize]) {
+        for &idx in indices {
+            if idx < self.nodes.len() {
+                // Only nil the value, keeping the key and chain intact.
+                // This matches PUC-Rio's removeentry() which sets the key
+                // type to LUA_TDEADKEY but preserves the GC pointer so
+                // that next() can still find the entry position during
+                // iteration. Our next() skips entries with nil values.
+                self.nodes[idx].value = Val::Nil;
+            }
+        }
+    }
+
     /// Returns the flags byte (metamethod absence cache).
     #[inline]
     pub fn flags(&self) -> u8 {

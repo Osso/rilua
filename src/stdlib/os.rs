@@ -154,7 +154,7 @@ fn opt_string(state: &LuaState, name: &str, n: usize) -> LuaResult<Option<Vec<u8
 
 /// Pushes `true` and returns 1 (success pattern for remove/rename).
 #[inline]
-#[allow(clippy::unnecessary_wrapping)]
+#[allow(clippy::unnecessary_wraps)]
 fn push_true(state: &mut LuaState) -> LuaResult<u32> {
     state.push(Val::Bool(true));
     Ok(1)

@@ -588,6 +588,8 @@ pub fn lua_setmetatable(state: &mut LuaState) -> LuaResult<u32> {
     if let Some(t) = state.gc.tables.get_mut(table_ref) {
         t.set_metatable(new_mt);
     }
+    // Write barrier: table was mutated (metatable field changed).
+    state.gc.barrier_back(table_ref);
 
     // Return the table.
     state.push(table_val);
@@ -674,6 +676,8 @@ pub fn lua_rawset(state: &mut LuaState) -> LuaResult<u32> {
         .get_mut(table_ref)
         .ok_or_else(|| bad_argument("rawset", 1, "invalid table"))?;
     table.raw_set(key, value, &state.gc.string_arena)?;
+    // Write barrier: table was mutated.
+    state.gc.barrier_back(table_ref);
 
     // Return the table.
     state.push(table_val);
@@ -959,17 +963,17 @@ pub fn lua_loadstring(state: &mut LuaState) -> LuaResult<u32> {
         .gc
         .string_arena
         .get(src_ref)
-        .map(|s| String::from_utf8_lossy(s.data()).to_string())
+        .map(|s| s.data().to_vec())
         .unwrap_or_default();
 
     // Chunk name: defaults to the source string itself.
     let chunk_name = if let Val::Str(r) = name_val {
         state.gc.string_arena.get(r).map_or_else(
-            || source.clone(),
-            |s| String::from_utf8_lossy(s.data()).to_string(),
+            || String::from_utf8_lossy(&source).into_owned(),
+            |s| String::from_utf8_lossy(s.data()).into_owned(),
         )
     } else {
-        source.clone()
+        String::from_utf8_lossy(&source).into_owned()
     };
 
     load_string_impl(state, &source, &chunk_name)
@@ -985,10 +989,10 @@ pub fn lua_loadfile(state: &mut LuaState) -> LuaResult<u32> {
     let filename_val = arg(state, 0);
 
     let source = if filename_val.is_nil() {
-        // Read from stdin.
+        // Read from stdin as bytes.
         use std::io::Read;
-        let mut buf = String::new();
-        if std::io::stdin().read_to_string(&mut buf).is_err() {
+        let mut buf = Vec::new();
+        if std::io::stdin().read_to_end(&mut buf).is_err() {
             state.push(Val::Nil);
             let msg = state.gc.intern_string(b"cannot read stdin");
             state.push(Val::Str(msg));
@@ -1003,10 +1007,10 @@ pub fn lua_loadfile(state: &mut LuaState) -> LuaResult<u32> {
             .gc
             .string_arena
             .get(r)
-            .map(|s| String::from_utf8_lossy(s.data()).to_string())
+            .map(|s| String::from_utf8_lossy(s.data()).into_owned())
             .unwrap_or_default();
 
-        match std::fs::read_to_string(&filename) {
+        match std::fs::read(&filename) {
             Ok(contents) => (contents, format!("@{filename}")),
             Err(e) => {
                 state.push(Val::Nil);
@@ -1033,9 +1037,9 @@ pub fn lua_dofile(state: &mut LuaState) -> LuaResult<u32> {
 
     let (source, chunk_name) = if filename_val.is_nil() {
         use std::io::Read;
-        let mut buf = String::new();
+        let mut buf = Vec::new();
         std::io::stdin()
-            .read_to_string(&mut buf)
+            .read_to_end(&mut buf)
             .map_err(|e| simple_error(format!("cannot read stdin: {e}")))?;
         (buf, "=stdin".to_string())
     } else {
@@ -1046,10 +1050,10 @@ pub fn lua_dofile(state: &mut LuaState) -> LuaResult<u32> {
             .gc
             .string_arena
             .get(r)
-            .map(|s| String::from_utf8_lossy(s.data()).to_string())
+            .map(|s| String::from_utf8_lossy(s.data()).into_owned())
             .unwrap_or_default();
 
-        let contents = std::fs::read_to_string(&filename)
+        let contents = std::fs::read(&filename)
             .map_err(|e| simple_error(format!("cannot open {filename}: {e}")))?;
         (contents, format!("@{filename}"))
     };
@@ -1106,8 +1110,8 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
         "=(load)".to_string()
     };
 
-    // Call the reader function repeatedly to collect source.
-    let mut collected = String::new();
+    // Call the reader function repeatedly to collect source bytes.
+    let mut collected: Vec<u8> = Vec::new();
     loop {
         let call_base = state.top;
         state.ensure_stack(call_base + 2);
@@ -1126,12 +1130,12 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
                     .gc
                     .string_arena
                     .get(r)
-                    .map(|s| String::from_utf8_lossy(s.data()).to_string())
+                    .map(|s| s.data().to_vec())
                     .unwrap_or_default();
                 if chunk.is_empty() {
                     break; // Empty string also signals end.
                 }
-                collected.push_str(&chunk);
+                collected.extend_from_slice(&chunk);
             }
             _ => {
                 return Err(simple_error(
@@ -1147,7 +1151,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
 /// Shared implementation for loadstring/loadfile/load: compiles source
 /// and pushes either the function or nil+error.
 #[allow(clippy::unnecessary_wraps)]
-fn load_string_impl(state: &mut LuaState, source: &str, name: &str) -> LuaResult<u32> {
+fn load_string_impl(state: &mut LuaState, source: &[u8], name: &str) -> LuaResult<u32> {
     match crate::compiler::compile(source, name) {
         Ok(proto) => {
             let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
@@ -1204,30 +1208,96 @@ pub fn lua_collectgarbage(state: &mut LuaState) -> LuaResult<u32> {
 
 fn collectgarbage_dispatch(state: &mut LuaState, opt: &str) -> LuaResult<u32> {
     match opt {
-        "collect" | "stop" | "restart" => {
-            // Stubs until Phase 7.
+        "collect" => {
+            state.full_gc()?;
+            state.push(Val::Num(0.0));
+            Ok(1)
+        }
+        "stop" => {
+            state.gc.gc_state.gc_enabled = false;
+            state.push(Val::Num(0.0));
+            Ok(1)
+        }
+        "restart" => {
+            state.gc.gc_state.gc_enabled = true;
             state.push(Val::Num(0.0));
             Ok(1)
         }
         "count" => {
-            // Return approximate memory usage in KB.
-            // Stub: report sum of arena sizes as rough estimate.
-            let kb = (f64::from(state.gc.string_arena.len())
-                + f64::from(state.gc.tables.len())
-                + f64::from(state.gc.closures.len())
-                + f64::from(state.gc.upvalues.len()))
-                / 1024.0;
+            let bytes = state.gc.gc_state.total_bytes;
+            let kb = bytes as f64 / 1024.0;
+            // PUC-Rio returns KB as first result, remainder bytes as second.
             state.push(Val::Num(kb));
-            Ok(1)
+            state.push(Val::Num((bytes % 1024) as f64));
+            Ok(2)
         }
         "step" => {
-            // Stub: report cycle not completed (matches PUC-Rio default behavior).
-            state.push(Val::Bool(false));
+            // Perform incremental GC work. The argument (data) controls how
+            // much work: `(data << 10)` bytes worth of allocation are simulated.
+            // Returns true if a full cycle completed.
+            //
+            // Reference: `lua_gc(LUA_GCSTEP)` in `lapi.c`.
+            use crate::vm::gc::collector::{GCSTEPSIZE, GcPhase};
+
+            let data_val = arg(state, 1);
+            let data = match data_val {
+                Val::Num(n) => n as u64,
+                _ => 0,
+            };
+
+            // Simulate allocation debt: (data << 10) bytes.
+            let simulated_alloc = data << 10;
+            if simulated_alloc <= state.gc.gc_state.total_bytes as u64 {
+                state.gc.gc_state.gc_threshold =
+                    state.gc.gc_state.total_bytes - simulated_alloc as usize;
+            } else {
+                state.gc.gc_state.gc_threshold = 0;
+            }
+
+            // Run luaC_step-equivalent while threshold is exceeded.
+            while state.gc.gc_state.gc_threshold <= state.gc.gc_state.total_bytes {
+                // Compute budget: (GCSTEPSIZE/100) * stepmul.
+                let stepmul = state.gc.gc_state.gc_stepmul as i64;
+                let budget = if stepmul == 0 {
+                    i64::MAX / 2
+                } else {
+                    (GCSTEPSIZE as i64 / 100) * stepmul
+                };
+                // Accumulate debt (PUC-Rio: gcdept += totalbytes - GCthreshold).
+                state.gc.gc_state.gc_debt +=
+                    state.gc.gc_state.total_bytes as i64 - state.gc.gc_state.gc_threshold as i64;
+                let completed = state.gc_step(budget)?;
+                if completed {
+                    break;
+                }
+                // gc_step already adjusted gc_threshold on partial cycle,
+                // so the while condition will exit.
+            }
+
+            let completed = state.gc.gc_state.phase == GcPhase::Pause;
+            state.push(Val::Bool(completed));
             Ok(1)
         }
-        "setpause" | "setstepmul" => {
-            // Stub: return previous value (0).
-            state.push(Val::Num(0.0));
+        "setpause" => {
+            let arg_val = arg(state, 1);
+            let new_pause = match arg_val {
+                Val::Num(n) => n as u32,
+                _ => 200,
+            };
+            let old = state.gc.gc_state.gc_pause;
+            state.gc.gc_state.gc_pause = new_pause;
+            state.push(Val::Num(f64::from(old)));
+            Ok(1)
+        }
+        "setstepmul" => {
+            let arg_val = arg(state, 1);
+            let new_mul = match arg_val {
+                Val::Num(n) => n as u32,
+                _ => 200,
+            };
+            let old = state.gc.gc_state.gc_stepmul;
+            state.gc.gc_state.gc_stepmul = new_mul;
+            state.push(Val::Num(f64::from(old)));
             Ok(1)
         }
         _ => Err(bad_argument(
@@ -1430,14 +1500,8 @@ pub fn lua_newproxy(state: &mut LuaState) -> LuaResult<u32> {
 ///
 /// Reference: `luaB_gcinfo` in `lbaselib.c`.
 pub fn lua_gcinfo(state: &mut LuaState) -> LuaResult<u32> {
-    // Stub: report approximate arena object count / 1024.
-    let kb = (f64::from(state.gc.string_arena.len())
-        + f64::from(state.gc.tables.len())
-        + f64::from(state.gc.closures.len())
-        + f64::from(state.gc.upvalues.len())
-        + f64::from(state.gc.userdata.len()))
-        / 1024.0;
-    // gcinfo returns an integer (floor).
+    let bytes = state.gc.estimate_memory();
+    let kb = bytes as f64 / 1024.0;
     #[allow(clippy::cast_possible_truncation)]
     state.push(Val::Num(f64::from(kb.floor() as i32)));
     Ok(1)

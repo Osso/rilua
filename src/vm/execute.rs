@@ -510,10 +510,24 @@ impl LuaState {
                 break;
             }
 
-            // Close the upvalue.
+            // Close the upvalue: captures current stack value.
             if let Some(uv) = self.gc.upvalues.get_mut(uv_ref) {
                 uv.close(&self.stack);
             }
+
+            // Write barrier: upvalue now holds the captured value.
+            // Read back the closed value for the barrier check.
+            let captured_val = self
+                .gc
+                .upvalues
+                .get(uv_ref)
+                .map_or(Val::Nil, |uv| uv.get(&self.stack));
+            let uv_color = self
+                .gc
+                .upvalues
+                .color(uv_ref)
+                .unwrap_or(crate::vm::gc::Color::White0);
+            self.gc.barrier_forward_val(uv_color, captured_val);
 
             self.open_upvalues.remove(0);
         }
@@ -940,6 +954,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 }
 
                 OpCode::NewTable => {
+                    state.gc_check()?;
                     let narray = fb2int(instr.b()) as usize;
                     let nhash = fb2int(instr.c()) as usize;
                     let t = state.gc.alloc_table(Table::with_sizes(narray, nhash));
@@ -1114,6 +1129,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 }
 
                 OpCode::Concat => {
+                    state.gc_check()?;
                     let b = instr.b() as usize;
                     let c = instr.c() as usize;
                     state.call_stack[state.ci].saved_pc = pc;
@@ -1486,8 +1502,13 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     if let Closure::Lua(lcl) = cl {
                         if b < lcl.upvalues.len() {
                             let uv_ref = lcl.upvalues[b];
+                            let uv_color = state.gc.upvalues.color(uv_ref);
                             if let Some(uv) = state.gc.upvalues.get_mut(uv_ref) {
                                 uv.set(&mut state.stack, val);
+                            }
+                            // Forward barrier: mark child if upvalue is black.
+                            if let Some(color) = uv_color {
+                                state.gc.barrier_forward_val(color, val);
                             }
                         }
                     }
@@ -1495,6 +1516,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
 
                 // ----- Closure creation -----
                 OpCode::Closure => {
+                    state.gc_check()?;
                     let bx = instr.bx() as usize;
                     let child_proto = Rc::clone(&proto.protos[bx]);
                     let nups = child_proto.num_upvalues as usize;
@@ -1630,14 +1652,16 @@ fn table_get(state: &LuaState, table_ref: GcRef<Table>, key: Val) -> LuaResult<V
     Ok(table.get(key, &state.gc.string_arena))
 }
 
-/// Raw table set.
+/// Raw table set with write barrier.
 fn table_set(state: &mut LuaState, table_ref: GcRef<Table>, key: Val, value: Val) -> LuaResult<()> {
     let table = state
         .gc
         .tables
         .get_mut(table_ref)
         .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-    table.raw_set(key, value, &state.gc.string_arena)
+    table.raw_set(key, value, &state.gc.string_arena)?;
+    state.gc.barrier_back(table_ref);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1761,7 +1785,9 @@ fn vm_settable(
                     .tables
                     .get_mut(table_ref)
                     .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-                return table.raw_set(key, value, &state.gc.string_arena);
+                table.raw_set(key, value, &state.gc.string_arena)?;
+                state.gc.barrier_back(table_ref);
+                return Ok(());
             }
 
             // Key not found. Check for __newindex metamethod.
@@ -1786,7 +1812,9 @@ fn vm_settable(
                         .tables
                         .get_mut(table_ref)
                         .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-                    return table.raw_set(key, value, &state.gc.string_arena);
+                    table.raw_set(key, value, &state.gc.string_arena)?;
+                    state.gc.barrier_back(table_ref);
+                    return Ok(());
                 }
                 Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
                     // __newindex is a function: call with (table, key, value).

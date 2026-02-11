@@ -291,6 +291,99 @@ impl<T> Arena<T> {
             }
         }
     }
+
+    /// Sweeps the arena: frees objects with `dead_color`, resets survivors
+    /// to `new_color`. Returns the number of freed objects.
+    ///
+    /// This is the core GC sweep operation. Dead objects (still bearing the
+    /// "other white" from the previous cycle) are freed. Live objects
+    /// (marked during the current cycle) are reset to the new current white.
+    pub fn sweep(&mut self, dead_color: Color, new_color: Color) -> u32 {
+        let mut freed = 0u32;
+        for i in 0..self.entries.len() {
+            let is_dead = matches!(
+                &self.entries[i].state,
+                EntryState::Occupied { color, .. } if *color == dead_color
+            );
+
+            if is_dead {
+                let entry = &mut self.entries[i];
+                // Replace the occupied state with Free, dropping the value.
+                let _old = std::mem::replace(
+                    &mut entry.state,
+                    EntryState::Free {
+                        next_free: self.free_head,
+                    },
+                );
+                entry.generation = entry.generation.wrapping_add(1);
+                self.free_head = Some(i as u32);
+                self.len -= 1;
+                freed += 1;
+            } else if let EntryState::Occupied { color, .. } = &mut self.entries[i].state {
+                // Live object: reset to new white for next cycle.
+                *color = new_color;
+            }
+        }
+        freed
+    }
+
+    /// Sweeps up to `max_count` slots starting from `start`, freeing dead
+    /// objects and resetting survivors to `new_color`.
+    ///
+    /// Returns `(freed_count, next_position, is_done)`:
+    /// - `freed_count`: number of objects freed in this batch
+    /// - `next_position`: slot to resume from on the next call
+    /// - `is_done`: `true` if the entire arena has been swept
+    ///
+    /// Used by the incremental GC to spread sweep work across multiple steps.
+    pub fn sweep_partial(
+        &mut self,
+        dead_color: Color,
+        new_color: Color,
+        start: u32,
+        max_count: u32,
+    ) -> (u32, u32, bool) {
+        let total = self.entries.len() as u32;
+        let mut freed = 0u32;
+        let mut occupied_seen = 0u32;
+        let mut i = start;
+
+        // Only count Occupied entries toward max_count. Free entries are
+        // skipped at near-zero cost, matching PUC-Rio's linked-list sweep
+        // which never visits already-freed objects.
+        while i < total && occupied_seen < max_count {
+            match &self.entries[i as usize].state {
+                EntryState::Occupied { color, .. } if *color == dead_color => {
+                    let entry = &mut self.entries[i as usize];
+                    let _old = std::mem::replace(
+                        &mut entry.state,
+                        EntryState::Free {
+                            next_free: self.free_head,
+                        },
+                    );
+                    entry.generation = entry.generation.wrapping_add(1);
+                    self.free_head = Some(i);
+                    self.len -= 1;
+                    freed += 1;
+                    occupied_seen += 1;
+                }
+                EntryState::Occupied { .. } => {
+                    if let EntryState::Occupied { color, .. } = &mut self.entries[i as usize].state
+                    {
+                        *color = new_color;
+                    }
+                    occupied_seen += 1;
+                }
+                EntryState::Free { .. } => {
+                    // Skip free entries -- no cost.
+                }
+            }
+            i += 1;
+        }
+
+        let is_done = i >= total;
+        (freed, i, is_done)
+    }
 }
 
 impl<T> Default for Arena<T> {

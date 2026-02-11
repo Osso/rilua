@@ -95,8 +95,8 @@ pub enum Expr {
     False(Span),
     /// Numeric literal.
     Number(f64, Span),
-    /// String literal.
-    Str(String, Span),
+    /// String literal (raw bytes; Lua strings may contain arbitrary bytes).
+    Str(Vec<u8>, Span),
     /// `...` (vararg expression).
     VarArg(Span),
     /// Variable name reference.
@@ -346,7 +346,7 @@ mod tests {
     fn table_field_variants() {
         let _idx = TableField::IndexField {
             key: Expr::Number(1.0, Span::new(1, 2)),
-            value: Expr::Str("a".into(), Span::new(1, 7)),
+            value: Expr::Str(b"a".to_vec(), Span::new(1, 7)),
             span: Span::new(1, 1),
         };
         let _name = TableField::NameField {
@@ -364,7 +364,7 @@ mod tests {
     fn call_expr() {
         let e = Expr::Call {
             func: Box::new(Expr::Name("print".into(), Span::new(1, 1))),
-            args: vec![Expr::Str("hello".into(), Span::new(1, 7))],
+            args: vec![Expr::Str(b"hello".to_vec(), Span::new(1, 7))],
             span: Span::new(1, 1),
         };
         assert_eq!(e.span(), Span::new(1, 1));

@@ -515,9 +515,18 @@ fn collectgarbage_collect() {
 
 #[test]
 fn collectgarbage_step() {
-    let (stdout, _, code) = run_rilua("print(collectgarbage('step'))");
+    // step(0) does not complete a full cycle in one step (returns false).
+    // This matches PUC-Rio: the budget (GCSTEPSIZE/100 * stepmul = 2000) is
+    // not enough to propagate through the main thread + global table + all
+    // stdlib tables in a single luaC_step call.
+    let (stdout, _, code) = run_rilua("print(collectgarbage('step', 0))");
     assert_eq!(code, 0);
     assert_eq!(stdout, "false\n");
+
+    // A larger step argument completes the cycle: step(1000) returns true.
+    let (stdout, _, code) = run_rilua("print(collectgarbage('step', 1000))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
 }
 
 #[test]

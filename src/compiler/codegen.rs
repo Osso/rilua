@@ -487,13 +487,12 @@ impl Compiler {
     /// Deduplicates by comparing raw byte content in `proto.string_pool`.
     /// Stores `Val::Nil` as a placeholder in the constant pool; the real
     /// `Val::Str` is patched in by `patch_string_constants` before execution.
-    pub(crate) fn string_constant(&mut self, s: &str) -> LuaResult<u32> {
-        let bytes = s.as_bytes();
+    pub(crate) fn string_constant(&mut self, s: &[u8]) -> LuaResult<u32> {
         let fs = self.fs();
 
         // Check existing string constants for byte-equal match.
         for &(idx, ref existing) in &fs.proto.string_pool {
-            if existing == bytes {
+            if existing == s {
                 return Ok(idx);
             }
         }
@@ -508,7 +507,7 @@ impl Compiler {
         fs.proto.constants.push(Val::Nil);
         #[allow(clippy::cast_possible_truncation)]
         let idx = idx as u32;
-        fs.proto.string_pool.push((idx, bytes.to_vec()));
+        fs.proto.string_pool.push((idx, s.to_vec()));
         Ok(idx)
     }
 
@@ -535,12 +534,17 @@ impl Compiler {
     }
 
     /// Frees a register if it's a temporary (not a local variable).
+    ///
+    /// Matches PUC-Rio `freereg` in `lcode.c`: only decrements `freereg`
+    /// when `reg` is the top temporary register. If `reg` is below `freereg`
+    /// it is silently ignored (the register is already effectively free).
     pub(crate) fn free_reg(&mut self, reg: u32) {
         let fs = self.fs();
         if reg >= u32::from(fs.num_active_vars) && !is_k(reg) {
             let fs = self.fs_mut();
-            fs.free_reg -= 1;
-            debug_assert_eq!(u32::from(fs.free_reg), reg);
+            if u32::from(fs.free_reg) > 0 && reg == u32::from(fs.free_reg) - 1 {
+                fs.free_reg -= 1;
+            }
         }
     }
 
@@ -636,7 +640,7 @@ impl Compiler {
         }
 
         // 4. Global: add name to constants, return Global kind
-        let k = self.string_constant(name)?;
+        let k = self.string_constant(name.as_bytes())?;
         Ok(ExprContext {
             kind: ExprKind::Global,
             info: k as i32,
@@ -661,7 +665,10 @@ impl Compiler {
         for i in (0..parent_fs.num_active_vars).rev() {
             let var_idx = parent_fs.active_vars[i as usize];
             if parent_fs.proto.local_vars[var_idx as usize].name == name {
-                // Found in parent's locals: capture as upvalue
+                // Found in parent's locals: capture as upvalue.
+                // Mark the enclosing block so CLOSE is emitted when it ends.
+                // PUC-Rio: markupval(fs, level) in lparser.c.
+                Self::mark_upval(&mut self.func_states[parent_idx], i);
                 let uv_idx = self.add_upvalue(fs_idx, name, true, i)?;
                 return Ok(Some(uv_idx));
             }
@@ -769,6 +776,23 @@ impl Compiler {
             if block.is_breakable {
                 let pc = self.fs().pc();
                 self.patch_list(block.break_list, pc);
+            }
+        }
+    }
+
+    /// Marks the block that needs CLOSE when a local at `level` is captured.
+    ///
+    /// Walks the block stack from innermost to outermost, stopping at the
+    /// first block whose `num_active_vars <= level`. That block is the one
+    /// entered just before the local was created, so it must emit CLOSE when
+    /// it ends to capture the upvalue.
+    ///
+    /// Reference: `markupval(fs, level)` in PUC-Rio `lparser.c`.
+    fn mark_upval(fs: &mut FuncState, level: u8) {
+        for block in fs.blocks.iter_mut().rev() {
+            if block.num_active_vars <= level {
+                block.has_upval = true;
+                return;
             }
         }
     }
@@ -1541,7 +1565,7 @@ fn constants_equal(a: &Val, b: &Val) -> bool {
 }
 
 /// Compiles a Lua source string into a Proto (function prototype).
-pub fn compile(source: &str, name: &str) -> LuaResult<Rc<Proto>> {
+pub fn compile(source: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
     let block = parser::parse(source, name)?;
     let mut compiler = Compiler::new(name);
 
@@ -1943,7 +1967,7 @@ fn compile_func_decl(
     // Handle dotted path: a.b.c -> index chain
     for part in &name.parts[1..] {
         compiler.exp2anyreg(&mut var, line)?;
-        let k = compiler.string_constant(part)?;
+        let k = compiler.string_constant(part.as_bytes())?;
         let mut key = ExprContext::new(ExprKind::K, k as i32);
         compiler.set_indexed(&mut var, &mut key, line)?;
     }
@@ -1951,7 +1975,7 @@ fn compile_func_decl(
     // Handle method: a.b:c -> index + self
     if let Some(method) = &name.method {
         compiler.exp2anyreg(&mut var, line)?;
-        let k = compiler.string_constant(method)?;
+        let k = compiler.string_constant(method.as_bytes())?;
         let mut key = ExprContext::new(ExprKind::K, k as i32);
         compiler.set_indexed(&mut var, &mut key, line)?;
     }
@@ -2094,9 +2118,13 @@ fn adjust_assign(
             }
             compiler.set_instruction(last.info as usize, instr);
         }
-        if needed > 0 {
+        if needed > 1 {
+            // Reserve extra result registers beyond the call position.
+            // The call position itself is already at free_reg (allocated
+            // by exp2nextreg), so we only need `needed - 1` more slots.
+            // Matches PUC-Rio: `if (extra > 1) luaK_reserveregs(fs, extra - 1);`
             #[allow(clippy::cast_possible_truncation)]
-            compiler.reserve_regs(needed as u32)?;
+            compiler.reserve_regs((needed - 1) as u32)?;
         }
     } else {
         if last.kind != ExprKind::Void {
@@ -2244,7 +2272,7 @@ fn compile_expr(compiler: &mut Compiler, expr: &super::ast::Expr) -> LuaResult<E
         Expr::Field { table, field, .. } => {
             let mut t = compile_expr(compiler, table)?;
             compiler.exp2anyreg(&mut t, line)?;
-            let k_idx = compiler.string_constant(field)?;
+            let k_idx = compiler.string_constant(field.as_bytes())?;
             let mut k = ExprContext::new(ExprKind::K, k_idx as i32);
             compiler.set_indexed(&mut t, &mut k, line)?;
             Ok(t)
@@ -2258,7 +2286,7 @@ fn compile_expr(compiler: &mut Compiler, expr: &super::ast::Expr) -> LuaResult<E
         } => {
             let mut obj = compile_expr(compiler, table)?;
             compiler.exp2anyreg(&mut obj, line)?;
-            let k = compiler.string_constant(method)?;
+            let k = compiler.string_constant(method.as_bytes())?;
             let mut key = ExprContext::new(ExprKind::K, k as i32);
             compiler.code_self(&mut obj, &mut key, line)?;
             compile_funcargs(compiler, &mut obj, args, line)?;
@@ -2350,7 +2378,7 @@ fn compile_table_ctor(
             TableField::NameField { name, value, .. } => {
                 // Hash field: name = value
                 nh += 1;
-                let k = compiler.string_constant(name)?;
+                let k = compiler.string_constant(name.as_bytes())?;
                 let key_rk = k | BITRK;
                 let mut val_e = compile_expr(compiler, value)?;
                 let val_rk = compiler.exp2rk(&mut val_e, line)?;
@@ -2408,7 +2436,7 @@ mod tests {
 
     #[test]
     fn empty_program_compiles() {
-        let proto = compile("", "test").unwrap();
+        let proto = compile(b"", "test").unwrap();
         assert_eq!(proto.num_params, 0);
         assert_eq!(proto.is_vararg, 2);
         // Should have at least the final RETURN
@@ -2417,7 +2445,7 @@ mod tests {
 
     #[test]
     fn return_no_values() {
-        let proto = compile("return", "test").unwrap();
+        let proto = compile(b"return", "test").unwrap();
         // Should have RETURN 0,1 (from the return) + RETURN 0,1 (from finish_main)
         assert!(!proto.code.is_empty());
         let instr = Instruction::from_raw(proto.code[0]);
@@ -2610,7 +2638,7 @@ mod tests {
 
     #[test]
     fn compile_return_number() {
-        let proto = compile("return 42", "test").unwrap();
+        let proto = compile(b"return 42", "test").unwrap();
         // Should have: LOADK, RETURN (from return stmt), RETURN (from finish)
         assert!(proto.code.len() >= 2);
         // Check constant pool has 42.0
@@ -2624,7 +2652,7 @@ mod tests {
 
     #[test]
     fn compile_return_nil() {
-        let proto = compile("return nil", "test").unwrap();
+        let proto = compile(b"return nil", "test").unwrap();
         // Should have: LOADNIL, RETURN, RETURN
         let instr = Instruction::from_raw(proto.code[0]);
         assert_eq!(instr.opcode(), OpCode::LoadNil);
@@ -2632,7 +2660,7 @@ mod tests {
 
     #[test]
     fn compile_return_bool() {
-        let proto = compile("return true", "test").unwrap();
+        let proto = compile(b"return true", "test").unwrap();
         let instr = Instruction::from_raw(proto.code[0]);
         assert_eq!(instr.opcode(), OpCode::LoadBool);
         assert_eq!(instr.b(), 1); // true
@@ -2640,7 +2668,7 @@ mod tests {
 
     #[test]
     fn compile_return_multiple() {
-        let proto = compile("return 1, 2, 3", "test").unwrap();
+        let proto = compile(b"return 1, 2, 3", "test").unwrap();
         // Should have 3 LOADKs + RETURN + final RETURN
         let mut loadk_count = 0;
         for &code in &proto.code {
@@ -2666,14 +2694,14 @@ mod tests {
 
     #[test]
     fn compile_local_decl() {
-        let proto = compile("local x = 42", "test").unwrap();
+        let proto = compile(b"local x = 42", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::LoadK));
     }
 
     #[test]
     fn compile_local_nil_init() {
-        let proto = compile("local x, y", "test").unwrap();
+        let proto = compile(b"local x, y", "test").unwrap();
         let ops = opcodes(&proto);
         // Locals without init get nil (LOADNIL)
         assert!(ops.contains(&OpCode::LoadNil));
@@ -2681,7 +2709,7 @@ mod tests {
 
     #[test]
     fn compile_global_assign() {
-        let proto = compile("x = 1", "test").unwrap();
+        let proto = compile(b"x = 1", "test").unwrap();
         let ops = opcodes(&proto);
         // Assignment to a global: SETGLOBAL
         assert!(ops.contains(&OpCode::SetGlobal));
@@ -2689,7 +2717,7 @@ mod tests {
 
     #[test]
     fn compile_local_assign() {
-        let proto = compile("local x; x = 1", "test").unwrap();
+        let proto = compile(b"local x; x = 1", "test").unwrap();
         let ops = opcodes(&proto);
         // Assignment to a local: LOADK into the local's register (MOVE or direct LOADK)
         assert!(ops.contains(&OpCode::LoadK));
@@ -2698,7 +2726,7 @@ mod tests {
     #[test]
     fn compile_do_block() {
         // 'do' block creates a scope; locals inside are freed
-        let proto = compile("do local x = 1 end; return", "test").unwrap();
+        let proto = compile(b"do local x = 1 end; return", "test").unwrap();
         assert!(proto.code.len() >= 2);
     }
 
@@ -2706,7 +2734,7 @@ mod tests {
 
     #[test]
     fn compile_while_loop() {
-        let proto = compile("local x = true; while x do x = false end", "test").unwrap();
+        let proto = compile(b"local x = true; while x do x = false end", "test").unwrap();
         let ops = opcodes(&proto);
         // Should contain a JMP (back edge of while loop)
         assert!(ops.contains(&OpCode::Jmp));
@@ -2714,7 +2742,7 @@ mod tests {
 
     #[test]
     fn compile_repeat_until() {
-        let proto = compile("local x = 0; repeat x = x + 1 until x", "test").unwrap();
+        let proto = compile(b"local x = 0; repeat x = x + 1 until x", "test").unwrap();
         let ops = opcodes(&proto);
         // Repeat-until has a conditional jump and arithmetic
         assert!(ops.contains(&OpCode::Add));
@@ -2722,7 +2750,7 @@ mod tests {
 
     #[test]
     fn compile_if_then() {
-        let proto = compile("local x = true; if x then return 1 end", "test").unwrap();
+        let proto = compile(b"local x = true; if x then return 1 end", "test").unwrap();
         let ops = opcodes(&proto);
         // If generates TEST + JMP
         assert!(
@@ -2734,7 +2762,7 @@ mod tests {
     #[test]
     fn compile_if_else() {
         let proto = compile(
-            "local x = true; if x then return 1 else return 2 end",
+            b"local x = true; if x then return 1 else return 2 end",
             "test",
         )
         .unwrap();
@@ -2746,7 +2774,7 @@ mod tests {
 
     #[test]
     fn compile_numeric_for() {
-        let proto = compile("for i = 1, 10 do end", "test").unwrap();
+        let proto = compile(b"for i = 1, 10 do end", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::ForPrep));
         assert!(ops.contains(&OpCode::ForLoop));
@@ -2754,7 +2782,7 @@ mod tests {
 
     #[test]
     fn compile_numeric_for_with_step() {
-        let proto = compile("for i = 1, 10, 2 do end", "test").unwrap();
+        let proto = compile(b"for i = 1, 10, 2 do end", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::ForPrep));
         assert!(ops.contains(&OpCode::ForLoop));
@@ -2769,7 +2797,7 @@ mod tests {
 
     #[test]
     fn compile_generic_for() {
-        let proto = compile("for k, v in next, t do end", "test").unwrap();
+        let proto = compile(b"for k, v in next, t do end", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::TForLoop));
         assert!(ops.contains(&OpCode::Jmp));
@@ -2777,7 +2805,7 @@ mod tests {
 
     #[test]
     fn compile_break() {
-        let proto = compile("while true do break end", "test").unwrap();
+        let proto = compile(b"while true do break end", "test").unwrap();
         let ops = opcodes(&proto);
         // Break emits a JMP that gets patched to loop exit
         assert!(ops.contains(&OpCode::Jmp));
@@ -2787,14 +2815,14 @@ mod tests {
 
     #[test]
     fn compile_arithmetic() {
-        let proto = compile("return 1 + 2", "test").unwrap();
+        let proto = compile(b"return 1 + 2", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Add));
     }
 
     #[test]
     fn compile_comparison() {
-        let proto = compile("return 1 < 2", "test").unwrap();
+        let proto = compile(b"return 1 < 2", "test").unwrap();
         let ops = opcodes(&proto);
         // Comparisons emit EQ/LT/LE + JMP + LoadBool pair
         assert!(ops.contains(&OpCode::Lt));
@@ -2802,21 +2830,21 @@ mod tests {
 
     #[test]
     fn compile_concat() {
-        let proto = compile("return 'a' .. 'b'", "test").unwrap();
+        let proto = compile(b"return 'a' .. 'b'", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Concat));
     }
 
     #[test]
     fn compile_unary_neg() {
-        let proto = compile("local x = 1; return -x", "test").unwrap();
+        let proto = compile(b"local x = 1; return -x", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Unm));
     }
 
     #[test]
     fn compile_unary_not() {
-        let proto = compile("return not true", "test").unwrap();
+        let proto = compile(b"return not true", "test").unwrap();
         let ops = opcodes(&proto);
         // 'not true' is constant-folded to false at compile time
         assert!(ops.contains(&OpCode::LoadBool));
@@ -2824,7 +2852,7 @@ mod tests {
 
     #[test]
     fn compile_unary_len() {
-        let proto = compile("local x = {}; return #x", "test").unwrap();
+        let proto = compile(b"local x = {}; return #x", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Len));
     }
@@ -2833,7 +2861,7 @@ mod tests {
     fn compile_string_constant() {
         // String constants are stored as Val::Nil placeholders until GC integration.
         // Verify the code compiles and emits a LOADK to reference the constant.
-        let proto = compile("return 'hello'", "test").unwrap();
+        let proto = compile(b"return 'hello'", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::LoadK));
         // Constant pool should have at least one entry (the string placeholder)
@@ -2842,7 +2870,7 @@ mod tests {
 
     #[test]
     fn compile_and_short_circuit() {
-        let proto = compile("local a, b; return a and b", "test").unwrap();
+        let proto = compile(b"local a, b; return a and b", "test").unwrap();
         let ops = opcodes(&proto);
         // 'and' uses TEST + JMP (short-circuit)
         assert!(
@@ -2853,7 +2881,7 @@ mod tests {
 
     #[test]
     fn compile_or_short_circuit() {
-        let proto = compile("local a, b; return a or b", "test").unwrap();
+        let proto = compile(b"local a, b; return a or b", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(
             ops.contains(&OpCode::Test) || ops.contains(&OpCode::TestSet),
@@ -2865,7 +2893,7 @@ mod tests {
 
     #[test]
     fn compile_function_call() {
-        let proto = compile("print(42)", "test").unwrap();
+        let proto = compile(b"print(42)", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::GetGlobal));
         assert!(ops.contains(&OpCode::Call));
@@ -2873,7 +2901,7 @@ mod tests {
 
     #[test]
     fn compile_method_call() {
-        let proto = compile("local t = {}; t:foo(1)", "test").unwrap();
+        let proto = compile(b"local t = {}; t:foo(1)", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::OpSelf));
         assert!(ops.contains(&OpCode::Call));
@@ -2881,7 +2909,7 @@ mod tests {
 
     #[test]
     fn compile_function_def() {
-        let proto = compile("local f = function(x) return x end", "test").unwrap();
+        let proto = compile(b"local f = function(x) return x end", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Closure));
         // Should have a child proto
@@ -2892,7 +2920,7 @@ mod tests {
 
     #[test]
     fn compile_local_function() {
-        let proto = compile("local function f(a, b) return a + b end", "test").unwrap();
+        let proto = compile(b"local function f(a, b) return a + b end", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Closure));
         assert_eq!(proto.protos.len(), 1);
@@ -2902,7 +2930,7 @@ mod tests {
 
     #[test]
     fn compile_named_function() {
-        let proto = compile("function f(x) return x end", "test").unwrap();
+        let proto = compile(b"function f(x) return x end", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Closure));
         assert!(ops.contains(&OpCode::SetGlobal));
@@ -2910,7 +2938,7 @@ mod tests {
 
     #[test]
     fn compile_vararg_function() {
-        let proto = compile("local f = function(...) return ... end", "test").unwrap();
+        let proto = compile(b"local f = function(...) return ... end", "test").unwrap();
         let child = &proto.protos[0];
         assert!(child.is_vararg & 2 != 0); // VARARG_ISVARARG
     }
@@ -2919,14 +2947,14 @@ mod tests {
 
     #[test]
     fn compile_empty_table() {
-        let proto = compile("return {}", "test").unwrap();
+        let proto = compile(b"return {}", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::NewTable));
     }
 
     #[test]
     fn compile_array_table() {
-        let proto = compile("return {1, 2, 3}", "test").unwrap();
+        let proto = compile(b"return {1, 2, 3}", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::NewTable));
         assert!(ops.contains(&OpCode::SetList));
@@ -2934,7 +2962,7 @@ mod tests {
 
     #[test]
     fn compile_hash_table() {
-        let proto = compile("return {x = 1, y = 2}", "test").unwrap();
+        let proto = compile(b"return {x = 1, y = 2}", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::NewTable));
         assert!(ops.contains(&OpCode::SetTable));
@@ -2942,7 +2970,7 @@ mod tests {
 
     #[test]
     fn compile_index_table() {
-        let proto = compile("return {[1] = 'a'}", "test").unwrap();
+        let proto = compile(b"return {[1] = 'a'}", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::NewTable));
         assert!(ops.contains(&OpCode::SetTable));
@@ -2952,14 +2980,14 @@ mod tests {
 
     #[test]
     fn compile_table_field_access() {
-        let proto = compile("local t = {}; return t.x", "test").unwrap();
+        let proto = compile(b"local t = {}; return t.x", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::GetTable));
     }
 
     #[test]
     fn compile_table_index_access() {
-        let proto = compile("local t = {}; return t[1]", "test").unwrap();
+        let proto = compile(b"local t = {}; return t[1]", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::GetTable));
     }
@@ -2968,7 +2996,7 @@ mod tests {
 
     #[test]
     fn compile_tail_call() {
-        let proto = compile("local function f(x) return f(x) end", "test").unwrap();
+        let proto = compile(b"local function f(x) return f(x) end", "test").unwrap();
         let child = &proto.protos[0];
         let child_ops: Vec<OpCode> = child
             .code
@@ -2985,7 +3013,7 @@ mod tests {
 
     #[test]
     fn compile_line_info() {
-        let proto = compile("return 42", "test").unwrap();
+        let proto = compile(b"return 42", "test").unwrap();
         assert_eq!(proto.code.len(), proto.line_info.len());
     }
 
@@ -2993,7 +3021,7 @@ mod tests {
 
     #[test]
     fn compile_return_string() {
-        let proto = compile("return 'hello'", "test").unwrap();
+        let proto = compile(b"return 'hello'", "test").unwrap();
         let instr = Instruction::from_raw(proto.code[0]);
         assert_eq!(instr.opcode(), OpCode::LoadK);
     }
@@ -3001,7 +3029,7 @@ mod tests {
     #[test]
     fn compile_expr_stat_call() {
         // Expression statement with function call should discard results
-        let proto = compile("print(1)", "test").unwrap();
+        let proto = compile(b"print(1)", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Call));
         // The CALL should have C=1 (0 results)
@@ -3021,7 +3049,7 @@ mod tests {
     #[test]
     fn compile_single_global_assign() {
         // Single global assignment
-        let proto = compile("x = 42", "test").unwrap();
+        let proto = compile(b"x = 42", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::SetGlobal));
     }
@@ -3029,7 +3057,7 @@ mod tests {
     #[test]
     fn compile_nested_function() {
         let proto = compile(
-            "local function f() local function g() return 1 end return g end",
+            b"local function f() local function g() return 1 end return g end",
             "test",
         )
         .unwrap();
@@ -3056,7 +3084,7 @@ mod tests {
 
     #[test]
     fn compile_syntax_error() {
-        let result = compile("if", "test");
+        let result = compile(b"if", "test");
         assert!(result.is_err());
     }
 }

@@ -51,10 +51,10 @@ pub(crate) const BASIC_CI_SIZE: usize = 8;
 // Gc (garbage collector state -- allocation only, no sweep yet)
 // ---------------------------------------------------------------------------
 
-/// GC state: holds all typed arenas and the string table.
+/// GC state: holds all typed arenas, string table, and collection state.
 ///
-/// Phase 3: allocation only. The mark-sweep collector (Phase 6)
-/// adds the collection cycle, gray stack, and GC pacing.
+/// The `gc_state` field holds mark-sweep pacing parameters, gray lists,
+/// and memory tracking. Collection runs stop-the-world via `full_gc()`.
 pub struct Gc {
     /// Interned strings.
     pub strings: StringTable,
@@ -68,7 +68,7 @@ pub struct Gc {
     pub upvalues: Arena<Upvalue>,
     /// Userdata arena.
     pub userdata: Arena<Userdata>,
-    /// Thread arena (coroutines -- placeholder).
+    /// Thread arena (coroutines).
     pub threads: Arena<LuaThread>,
     /// Current white color for new allocations.
     pub current_white: Color,
@@ -78,6 +78,8 @@ pub struct Gc {
     /// Interned metamethod name strings (one per TMS event).
     /// Initialized once during state creation.
     pub tm_names: [Option<GcRef<LuaString>>; TM_N],
+    /// GC collection state: gray lists, pacing, memory tracking.
+    pub gc_state: super::gc::collector::GcState,
 }
 
 impl Gc {
@@ -94,6 +96,7 @@ impl Gc {
             current_white: Color::White0,
             type_metatables: [None; NUM_TYPE_TAGS],
             tm_names: [None; TM_N],
+            gc_state: super::gc::collector::GcState::new(),
         };
         gc.init_tm_names();
         gc
@@ -111,33 +114,53 @@ impl Gc {
     }
 
     /// Interns a string, returning a GcRef to the interned LuaString.
+    ///
+    /// Tracks memory: adds estimated size to `total_bytes` only when a
+    /// new string is actually created (not on dedup hit). Debt is NOT
+    /// accumulated here; PUC-Rio's `gcdept` only changes in `luaC_step`.
     pub fn intern_string(&mut self, data: &[u8]) -> GcRef<LuaString> {
-        self.strings
-            .intern(data, &mut self.string_arena, self.current_white)
+        let old_count = self.string_arena.len();
+        let r = self
+            .strings
+            .intern(data, &mut self.string_arena, self.current_white);
+        // Only track memory if a new string was actually allocated.
+        if self.string_arena.len() > old_count {
+            let est = super::gc::collector::EST_STRING_SIZE + data.len();
+            self.gc_state.total_bytes += est;
+        }
+        r
     }
 
     /// Allocates a new table in the GC arena.
     pub fn alloc_table(&mut self, table: Table) -> GcRef<Table> {
+        let est = super::gc::collector::EST_TABLE_SIZE
+            + table.array_slice().len() * 16
+            + table.hash_size() as usize * 32;
+        self.gc_state.total_bytes += est;
         self.tables.alloc(table, self.current_white)
     }
 
     /// Allocates a new closure in the GC arena.
     pub fn alloc_closure(&mut self, closure: Closure) -> GcRef<Closure> {
+        self.gc_state.total_bytes += super::gc::collector::EST_CLOSURE_SIZE;
         self.closures.alloc(closure, self.current_white)
     }
 
     /// Allocates a new upvalue in the GC arena.
     pub fn alloc_upvalue(&mut self, upvalue: Upvalue) -> GcRef<Upvalue> {
+        self.gc_state.total_bytes += super::gc::collector::EST_UPVALUE_SIZE;
         self.upvalues.alloc(upvalue, self.current_white)
     }
 
     /// Allocates a new userdata in the GC arena.
     pub fn alloc_userdata(&mut self, userdata: Userdata) -> GcRef<Userdata> {
+        self.gc_state.total_bytes += super::gc::collector::EST_USERDATA_SIZE;
         self.userdata.alloc(userdata, self.current_white)
     }
 
     /// Allocates a new thread (coroutine) in the GC arena.
     pub fn alloc_thread(&mut self, thread: LuaThread) -> GcRef<LuaThread> {
+        self.gc_state.total_bytes += super::gc::collector::EST_THREAD_SIZE;
         self.threads.alloc(thread, self.current_white)
     }
 

@@ -25,19 +25,22 @@ use vm::proto::Proto;
 use vm::state::{Gc, LuaState};
 use vm::value::Val;
 
-/// Executes a Lua source string as `"=(string)"`.
+/// Executes Lua source bytes as `"=(string)"`.
 ///
 /// Compiles the source, registers the standard library, and runs the
 /// resulting chunk. Equivalent to `exec_with_name(source, "=(string)")`.
-pub fn exec(source: &str) -> LuaResult<()> {
+pub fn exec(source: &[u8]) -> LuaResult<()> {
     exec_with_name(source, "=(string)")
 }
 
-/// Executes a Lua source string with the given chunk name.
+/// Executes Lua source bytes with the given chunk name.
+///
+/// Source is accepted as `&[u8]` because Lua files may contain arbitrary
+/// byte sequences (e.g. `\0`, `\255` in string literals).
 ///
 /// Pipeline: compile -> patch string constants -> create state ->
 /// register stdlib -> create main closure -> precall -> execute.
-pub fn exec_with_name(source: &str, name: &str) -> LuaResult<()> {
+pub fn exec_with_name(source: &[u8], name: &str) -> LuaResult<()> {
     // 1. Compile source to Proto.
     let proto = compiler::compile(source, name)?;
 

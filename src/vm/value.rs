@@ -52,6 +52,9 @@ pub struct Userdata {
     metatable: Option<GcRef<Table>>,
     /// Per-instance environment table (fenv).
     env: Option<GcRef<Table>>,
+    /// Whether `__gc` has already been called on this object.
+    /// Prevents double-finalization across GC cycles.
+    finalized: bool,
 }
 
 impl Userdata {
@@ -61,6 +64,7 @@ impl Userdata {
             data,
             metatable: None,
             env: None,
+            finalized: false,
         }
     }
 
@@ -70,6 +74,7 @@ impl Userdata {
             data,
             metatable: Some(mt),
             env: None,
+            finalized: false,
         }
     }
 
@@ -105,6 +110,16 @@ impl Userdata {
     /// Sets the per-instance environment table.
     pub fn set_env(&mut self, env: Option<GcRef<Table>>) {
         self.env = env;
+    }
+
+    /// Returns whether `__gc` has already been called on this object.
+    pub fn finalized(&self) -> bool {
+        self.finalized
+    }
+
+    /// Sets the finalized flag (prevents double-finalization).
+    pub fn set_finalized(&mut self, finalized: bool) {
+        self.finalized = finalized;
     }
 }
 

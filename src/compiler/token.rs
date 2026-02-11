@@ -94,8 +94,9 @@ pub enum Token {
     Number(f64),
     /// Identifier.
     Name(String),
-    /// String literal (after escape processing).
-    Str(String),
+    /// String literal (after escape processing). Stored as raw bytes
+    /// because Lua strings can contain arbitrary byte values including `\0`.
+    Str(Vec<u8>),
 
     // -- Single-character tokens --
     /// Any single-character token (e.g., `+`, `-`, `(`, `)`, `=`, etc.).
@@ -227,7 +228,11 @@ impl fmt::Display for Token {
             Self::Le => write!(f, "<="),
             Self::Ne => write!(f, "~="),
             Self::Number(n) => write!(f, "{n}"),
-            Self::Name(s) | Self::Str(s) => write!(f, "{s}"),
+            Self::Name(s) => write!(f, "{s}"),
+            Self::Str(s) => {
+                let lossy = String::from_utf8_lossy(s);
+                write!(f, "{lossy}")
+            }
             Self::Char(c) => write!(f, "{}", char::from(*c)),
             Self::Eos => write!(f, "<eof>"),
         }
@@ -266,7 +271,7 @@ mod tests {
     fn literal_display_names() {
         assert_eq!(Token::Number(3.0).display_name(), "<number>");
         assert_eq!(Token::Name("foo".into()).display_name(), "<name>");
-        assert_eq!(Token::Str("hello".into()).display_name(), "<string>");
+        assert_eq!(Token::Str(b"hello".to_vec()).display_name(), "<string>");
     }
 
     #[test]
