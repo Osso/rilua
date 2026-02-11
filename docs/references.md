@@ -107,3 +107,15 @@ management, and API surface.
   Not a from-scratch implementation. Provides batteries-included stdlib
   (HTTP, SQLite, WebSocket, etc.) over the C VM.
 - **Not applicable**: Everything. This wraps C Lua, not implements it.
+
+### hematita (Rust, Lua 5.3)
+
+- **Local path**: `~/Repos/github.com/danii/hematita`
+- **GitHub**: <https://github.com/danii/hematita>
+- **Role**: Reference for hardened Lua interpreter patterns in Rust.
+- **Architecture**: From-scratch Lua interpreter in Rust targeting 5.3.
+  Focuses on safety and correctness. Useful for comparing implementation
+  approaches for parsing, value representation, and standard library.
+- **What we take**: Comparison point for implementation patterns and
+  edge case handling.
+- **Differences**: Targets Lua 5.3 (not 5.1.1), different design goals.

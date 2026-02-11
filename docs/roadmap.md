@@ -15,9 +15,9 @@ integrated at every step.
 | 4: Language Features | Done | 521 total (439 unit + 43 integration + 39 oracle) |
 | 5: Standard Libraries | Done (5a-5h) | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
-| 7: GC Collector | 7a done, 7b pending | 1079 total (489 unit + 342 integration + 248 oracle) |
+| 7: GC Collector | Done | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Not started | -- |
-| 9: Compatibility | Not started (0/23 PUC-Rio tests pass; see notes) | -- |
+| 9: Compatibility | In progress (7/23 PUC-Rio tests pass; see notes) | -- |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -57,8 +57,13 @@ Phase 6 added coroutines (create, resume, yield, wrap, status, running)
 with cooperative threading via LuaThread. Phase 7a added mark-sweep GC
 with tri-color marking, two-white-generation flipping, Proto constant
 marking, weak table clearing, and wired `collectgarbage()` to the real
-collector. 1079 total tests pass (489 unit + 342 integration + 248
-oracle). The full quality gate passes.
+collector. Phase 7b replaced stop-the-world with PUC-Rio's 5-state
+incremental collector (Pause/Propagate/SweepString/Sweep/Finalize),
+added memory tracking on allocation, write barriers (backward for tables,
+forward for upvalues), `__gc` finalizers with error propagation, and
+automatic GC triggering at allocation points. 1080 total tests pass
+(490 unit + 342 integration + 248 oracle). PUC-Rio gc.lua test passes.
+The full quality gate passes.
 
 ### Known issues
 
@@ -71,21 +76,13 @@ All must be resolved before the project is considered complete.
   assign to local first. Reference: `lcode.c` `luaK_exp2RK`.
 - `{...}` vararg table constructor captures only first argument.
 - Mixed named parameters + varargs register misassignment.
-- `debug_assert_eq` in `free_register` (codegen.rs:543) trips on
-  several PUC-Rio test files (api.lua, checktable.lua, code.lua, etc.)
-  with assertion like `left: 0, right: 56`. This causes all PUC-Rio
-  test files to panic in debug builds. Likely a register tracking bug
-  in complex expression compilation.
+- `debug_assert_eq` in `free_register` (codegen.rs) trips on complex
+  expressions. Relaxed to match PUC-Rio behavior (silently ignores
+  frees below freereg). Root cause still needs investigation.
 
 **VM bugs (Phase 9d)**:
 - `load(func_reader)` hangs when the reader function never returns nil
   (should detect end-of-input).
-
-**Architecture (Phase 9a)**:
-- Source files containing non-UTF-8 bytes (e.g. `"\255"` in string
-  literals) fail to load: `std::fs::read_to_string` rejects them.
-  Blocks 6 of 23 PUC-Rio test files. Requires lexer to operate on
-  `&[u8]` instead of `&str`.
 
 **Missing features (Phase 9b)**:
 - `string.dump` is a stub. Binary chunk loading (`\27Lua` header in
@@ -97,51 +94,33 @@ All must be resolved before the project is considered complete.
   vs PUC-Rio's `attempt to call local 'x' (a number value)`).
 - No automatic stack tracebacks on unhandled errors.
 
-**GC (Phase 7b)**:
-- No write barriers (forward/back). Currently stop-the-world only.
-- No incremental collection (step/pause/stepmul tuning is placeholder).
-- No `__gc` finalizer execution during sweep.
-- Weak table clearing works but is not tested against PUC-Rio behavior.
-- `collectgarbage("step")` uses threshold check instead of actual
-  incremental steps.
-
 **Debug library (Phase 5h, stubs)**:
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (0 / 23 pass)
+### PUC-Rio test suite status (7 / 23 pass)
 
-Re-baselined after Phase 7a. All 23 individual test files currently
-fail due to `debug_assert_eq` panic in `free_register` (codegen.rs:543)
-when run in debug builds. This register tracking assertion trips on
-complex expressions present in every PUC-Rio test file. The 4 files
-that previously passed (api, checktable, code, math) now also fail
-because the codegen assertion fires on code paths they exercise.
+Re-baselined after Phase 7b. Seven test files pass in release builds.
+The `free_register` assertion in debug builds has been relaxed to match
+PUC-Rio behavior (silently ignores frees below freereg).
 
-**Root cause**: The `free_register` function asserts that the register
-being freed equals `free_reg - 1`, but complex expression compilation
-(e.g. deeply nested table constructors, multi-assignment) can free
-registers out of order. PUC-Rio's `luaK_freereg` does not assert
-ordering--it silently ignores frees of registers below `freereg`.
+| Result | Count | Files |
+|--------|-------|-------|
+| Pass | 7 | api, checktable, code, files, gc, locals, sort |
+| Timeout | 3 | constructs, nextvar, verybig |
+| Fail | 13 | attrib, big, calls, closure, db, errors, events, literals, main, math, pm, strings, vararg |
 
-**Blocked by**: Fix must be done in Phase 9d (compiler bug fixes).
-Once the assertion is fixed or relaxed, the previous passing tests
-should pass again, and additional tests will be unblocked.
+**Timeout details**:
+- `constructs`: or-in-EQ codegen bug causes jump cycle (Phase 9d)
+- `nextvar`: unknown hang, needs investigation
+- `verybig`: fails quickly (not a timeout), likely large-code limitation
 
-| Blocker | Count | Files |
-|---------|-------|-------|
-| codegen free_register assertion | 23 | all files |
-
-After fixing the codegen assertion, the expected status based on
-feature analysis:
-
-| Expected Result | Count | Files |
-|-----------------|-------|-------|
-| Should pass | 4+ | api, checktable, code, math (previously passing) |
-| Blocked by UTF-8 source encoding (9a) | 6 | db, files, literals, pm, sort, strings |
-| Blocked by shebang line support (8d) | 1 | main |
-| Blocked by codegen bug or-in-EQ (9d) | 1 | constructs |
-| Blocked by feature bugs / missing features | 11 | attrib, big, calls, closure, errors, events, gc, locals, nextvar, vararg, verybig |
+**Fail details** (common blockers):
+- Missing C module support: math (requires `checktable` C module)
+- Codegen bugs: various expression compilation issues (Phase 9d)
+- Missing features: `string.dump`, binary chunk loading (Phase 9b),
+  variable names in error messages (Phase 9c), debug hooks (Phase 5h)
+- Pattern matching edge cases: pm, strings (Phase 9d)
 
 ### Execution order corrections
 
@@ -911,28 +890,46 @@ retain), `src/vm/state.rs` (GcState field), `src/stdlib/base.rs`
 sweep, closure collection, stack preservation, threshold update).
 All 1079 tests pass (489 unit + 342 integration + 248 oracle).
 
-### 7b. Incremental collection, weak tables, finalizers
+### 7b. Incremental collection, write barriers, finalizers [Done]
 
-What remains from 7a (stop-the-world) to reach full PUC-Rio GC parity:
+Replaced stop-the-world with PUC-Rio's 5-state incremental GC.
 
-- Write barriers (forward/back) for incremental invariant
-- Incremental collection: actual step-based work (not full cycle)
-- GC debt tracking for pacing
-- Finalizer processing (`__gc`): separate finalization list, run
-  finalizers during sweep, mark finalized objects for resurrection
-- Finalizer ordering: LIFO (last created, first finalized)
-- `collectgarbage("step", N)` with actual step size semantics
-- Verify weak table clearing against PUC-Rio behavior (especially
-  with finalizers and resurrection)
+- GC state machine: Pause -> Propagate -> SweepString -> Sweep ->
+  Finalize -> Pause, with gc_singlestep/gc_step/full_gc drivers
+- Memory tracking on allocation (total_bytes, gc_debt, gc_threshold)
+- Automatic GC triggering via gc_check() at NEWTABLE, CONCAT, CLOSURE
+- Write barriers: backward barrier for tables (demote black -> gray,
+  re-traverse in atomic via grayagain); forward barrier for upvalues
+  (mark white child when black parent writes)
+- `__gc` finalizers: separate_userdata in atomic phase identifies dead
+  userdata with __gc, marks them for resurrection; call_gc_finalizer
+  runs __gc during Finalize phase; errors propagate to caller (PUC-Rio
+  5.1.1 behavior, uses luaD_call not pcall for GCTM)
+- sweep_partial for incremental arena sweeping with cursor tracking
+- Weak table clearing handles finalized userdata (PUC-Rio iscleared:
+  finalized userdata cleared from weak values but not weak keys)
+- collectgarbage("step") with incremental step semantics matching
+  PUC-Rio's luaC_step debt-based model
 
-Files: `src/vm/gc/collector.rs` (extends 7a).
+**Key bugs found and fixed during implementation**:
+- Compiler CLOSE instruction never emitted: mark_upval was missing from
+  resolve_var_aux (BlockContext.has_upval never set true)
+- mark_tmudata must directly mark metatable/env of tmudata entries, not
+  delegate to mark_userdata (which bails on non-white colors)
+- iscleared must treat finalized userdata values as dead in weak tables
+  (PUC-Rio lgc.c line 343-344 special case)
+- __gc errors must propagate, not be silently discarded (call_gc_finalizer
+  returns LuaResult, cascades through gc_singlestep/gc_step/full_gc)
 
-**Tests**: Weak table clearing with `__mode` variations, finalizer
-execution order, resurrection, incremental step correctness,
-collectgarbage API options. Oracle comparison for GC-observable
-behavior.
+Files: `src/vm/gc/collector.rs`, `src/vm/gc/arena.rs` (sweep_partial),
+`src/vm/table.rs` (is_key parameter), `src/vm/value.rs` (finalized
+flag), `src/vm/execute.rs` (gc_check calls, write barriers),
+`src/compiler/codegen.rs` (mark_upval fix), `src/stdlib/base.rs`
+(collectgarbage dispatch).
 
-**Unlocks**: `gc.lua` from PUC-Rio suite.
+**Tests**: 8 unit tests (collector), integration tests for weak tables
+and finalizers, PUC-Rio gc.lua passes. 1080 total tests pass
+(490 unit + 342 integration + 248 oracle).
 
 ## Phase 8: Public API + CLI
 
