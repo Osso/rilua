@@ -13,7 +13,7 @@ integrated at every step.
 | 2: Compilation Pipeline | Done | 354 unit tests + 10 oracle, bytecode matches `luac -l` |
 | 3: Core VM | Done | 466 total (431 unit + 16 integration + 19 oracle) |
 | 4: Language Features | Done | 521 total (439 unit + 43 integration + 39 oracle) |
-| 5: Standard Libraries | In progress (5a-5d done) | 789 total (452 unit + 190 integration + 147 oracle) |
+| 5: Standard Libraries | In progress (5a-5e, 5f done) | 940 total (481 unit + 256 integration + 203 oracle) |
 | 6: Coroutines | Not started | -- |
 | 7: GC Collector | Not started | -- |
 | 8: Public API + CLI | Not started | -- |
@@ -31,14 +31,22 @@ sort, maxn, getn, setn, foreach, foreachi). Sort implements PUC-Rio's
 median-of-three quicksort (`auxsort`). Phase 5d added the math library
 with all 28 functions (abs through tanh), 2 constants (math.pi,
 math.huge), and the math.mod alias. frexp/ldexp use IEEE 754 bit
-manipulation. RNG uses glibc-compatible LCG. 789 total tests pass (452
-unit + 190 integration + 147 oracle). All oracle test cases match PUC-Rio
-Lua 5.1.1. The full quality gate passes clean.
+manipulation. RNG uses glibc-compatible LCG. Phase 5f added the OS library
+with all 11 functions (clock, date, difftime, execute, exit, getenv,
+remove, rename, setlocale, time, tmpname) via libc FFI. Userdata
+infrastructure added: arena, alloc, __gc support, registry metatable
+helpers. Phase 5e added the I/O library with 11 library functions
+(close, flush, input, lines, open, output, popen, read, tmpfile, type,
+write), 7 file methods (close, flush, lines, read, seek, setvbuf,
+write), 2 metamethods (__gc, __tostring), 3 standard file handles
+(stdin, stdout, stderr), and a lines iterator with auto-close. Uses
+libc FFI for C stdio operations. 940 total tests pass (481 unit + 256
+integration + 203 oracle). All oracle test cases match PUC-Rio Lua
+5.1.1. The full quality gate passes clean.
 
 Known issues deferred to later phases:
 - `{...}` vararg table constructor captures only first argument (VM bug)
 - Mixed named parameters + varargs register misassignment (VM bug)
-- `newproxy()` returns table instead of userdata (stub, pending Phase 8)
 - `load(func_reader)` hangs when reader never returns nil
 
 ### Execution order corrections
@@ -64,11 +72,11 @@ Corrected execution order:
 ```text
 5d (math)  [done]
   |
-5f (os)    <- no blockers, just libc/std wrappers
+5f (os)    [done]
   |
-Userdata infrastructure  <- extract from 8b: arena, alloc, __gc
+Userdata infrastructure  [done]
   |
-5e (I/O)   <- needs userdata for file handles
+5e (I/O)   [done]
   |
 5g (Package)  <- needs file I/O + userdata
   |
@@ -823,7 +831,19 @@ Files: `src/lib.rs` (extends 8a).
 **Tests**: Custom UserData types, method calls from Lua, GC of
 UserData, metatable operations.
 
-### 8c. CLI: standalone interpreter
+### 8c. Binary restructuring
+
+Move binaries from `src/main.rs` to `src/bin/` with explicit
+`[[bin]]` entries in `Cargo.toml`. Two binaries, both thin wrappers
+around the library crate (mirrors PUC-Rio's `lua.c` + `luac.c`
+linking against the same `liblua`):
+
+- `rilua` -- standalone interpreter (equivalent to PUC-Rio `lua`)
+- `riluac` -- bytecode compiler/lister (equivalent to PUC-Rio `luac`)
+
+Files: `src/bin/rilua.rs`, `src/bin/riluac.rs`, `Cargo.toml`.
+
+### 8d. CLI: standalone interpreter
 
 Implement the `rilua` binary matching PUC-Rio `lua.c` behavior.
 
@@ -840,7 +860,7 @@ Implement the `rilua` binary matching PUC-Rio `lua.c` behavior.
 - SIGINT handling via debug hook
 - Error reporting to stderr with program name prefix
 
-Files: `src/main.rs`.
+Files: `src/bin/rilua.rs`.
 
 **Tests**: CLI flag parsing, `-e` execution, `-v` output,
 `LUA_INIT` handling, `arg` table construction, error output format.
@@ -848,6 +868,25 @@ Oracle comparison: same CLI invocations produce same output in both
 `rilua` and PUC-Rio `lua`.
 
 **Unlocks**: `main.lua` from PUC-Rio suite.
+
+### 8e. CLI: bytecode compiler/lister
+
+Implement the `riluac` binary matching PUC-Rio `luac` behavior.
+
+- Compile Lua source files to bytecode
+- `-l`: list bytecode (instruction disassembly)
+- `-l -l`: detailed listing with constants and local variable info
+- `-o file`: output file name
+- `-p`: parse only (syntax check)
+- `-s`: strip debug information
+- `-v`: version information
+- `-`: compile stdin
+- Multiple input files (compiled as separate functions)
+
+Files: `src/bin/riluac.rs`.
+
+**Tests**: Bytecode listing output matches PUC-Rio `luac -l`.
+Round-trip: compile with `riluac`, execute with `rilua`.
 
 ## Phase 9: Compatibility
 
@@ -910,12 +949,12 @@ throughout but becomes the focus after Phase 8.
 | Stdlib complete | All 9 standard libraries implemented | 5a-5h | -- |
 | Coroutines | resume/yield work, `closure.lua` passes | 6 | -- |
 | GC functional | Incremental collection, `gc.lua` passes | 7a-7b | -- |
-| Embeddable | Rust API functional, CLI matches PUC-Rio | 8a-8c | -- |
+| Embeddable | Rust API functional, CLI matches PUC-Rio | 8a-8e | -- |
 | Compatible | PUC-Rio test suite passing | 9 | -- |
 
 ## Chunk Summary
 
-Total: 40 chunks across 10 phases.
+Total: 42 chunks across 10 phases.
 
 | Phase | Chunks | Description |
 |-------|--------|-------------|
@@ -927,5 +966,5 @@ Total: 40 chunks across 10 phases.
 | 5 | 5a-5h | 9 standard libraries |
 | 6 | 6 | Coroutines |
 | 7 | 7a-7b | GC mark/sweep, incremental collection |
-| 8 | 8a-8c | Public API, UserData, CLI |
+| 8 | 8a-8e | Public API, UserData, binaries, interpreter CLI, compiler CLI |
 | 9 | 9 | PUC-Rio compatibility |

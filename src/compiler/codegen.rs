@@ -754,6 +754,8 @@ impl Compiler {
     pub(crate) fn leave_block(&mut self) {
         if let Some(block) = self.fs_mut().blocks.pop() {
             self.remove_locals(block.num_active_vars);
+            // Reset free register to match active vars (PUC-Rio: lparser.c:305)
+            self.fs_mut().free_reg = self.fs().num_active_vars;
             if block.has_upval {
                 // Emit OP_CLOSE to close upvalues
                 let level = u32::from(block.num_active_vars);

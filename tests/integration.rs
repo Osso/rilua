@@ -1871,3 +1871,384 @@ fn os_remove_and_rename_file() {
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "ok");
 }
+
+// ---------------------------------------------------------------------------
+// I/O library tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn io_global_is_table() {
+    let (stdout, _, code) = run_rilua("print(type(io))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "table");
+}
+
+#[test]
+fn io_functions_exist() {
+    let (stdout, _, code) = run_rilua(
+        "print(type(io.close), type(io.flush), type(io.input), type(io.lines), \
+         type(io.open), type(io.output), type(io.popen), type(io.read), \
+         type(io.tmpfile), type(io.type), type(io.write))",
+    );
+    assert_eq!(code, 0);
+    let parts: Vec<&str> = stdout.trim().split('\t').collect();
+    assert_eq!(parts.len(), 11);
+    for p in &parts {
+        assert_eq!(*p, "function", "expected function, got: {p}");
+    }
+}
+
+#[test]
+fn io_type_stdin() {
+    let (stdout, _, code) = run_rilua("print(io.type(io.stdin))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "file");
+}
+
+#[test]
+fn io_type_stdout() {
+    let (stdout, _, code) = run_rilua("print(io.type(io.stdout))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "file");
+}
+
+#[test]
+fn io_type_stderr() {
+    let (stdout, _, code) = run_rilua("print(io.type(io.stderr))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "file");
+}
+
+#[test]
+fn io_type_not_file() {
+    let (stdout, _, code) = run_rilua("print(io.type('not a file'))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "nil");
+}
+
+#[test]
+fn io_type_nil() {
+    let (stdout, _, code) = run_rilua("print(io.type(42))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "nil");
+}
+
+#[test]
+fn io_tostring_stdin() {
+    let (stdout, _, code) = run_rilua("print(tostring(io.stdin))");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.trim().starts_with("file (0x"),
+        "got: {}",
+        stdout.trim()
+    );
+}
+
+#[test]
+fn io_open_read_close() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('hello world\\n') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         print(f:read('*l')) \
+         f:close() \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "hello world");
+}
+
+#[test]
+fn io_open_nonexistent() {
+    let (stdout, _, code) = run_rilua(
+        "local f, msg = io.open('/tmp/__rilua_nonexistent__', 'r') \
+         print(f) \
+         print(type(msg))",
+    );
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "nil");
+    assert_eq!(lines[1], "string");
+}
+
+#[test]
+fn io_write_string() {
+    let (stdout, _, code) = run_rilua("io.write('hello') io.write(' world\\n')");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello world\n");
+}
+
+#[test]
+fn io_write_number() {
+    let (stdout, _, code) = run_rilua("io.write(42)");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42");
+}
+
+#[test]
+fn io_read_line() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('line1\\nline2\\n') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         print(f:read('*l')) \
+         print(f:read('*l')) \
+         f:close() \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "line1");
+    assert_eq!(lines[1], "line2");
+}
+
+#[test]
+fn io_read_all() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('abc\\ndef\\n') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         local s = f:read('*a') \
+         print(#s) \
+         f:close() \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "8"); // "abc\ndef\n" = 8 bytes
+}
+
+#[test]
+fn io_read_number() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('3.14 42\\n') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         print(f:read('*n')) \
+         print(f:read('*n')) \
+         f:close() \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "3.14");
+    assert_eq!(lines[1], "42");
+}
+
+#[test]
+fn io_read_n_bytes() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('hello world') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         print(f:read(5)) \
+         print(f:read(6)) \
+         f:close() \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "hello");
+    assert_eq!(lines[1], " world");
+}
+
+#[test]
+fn io_lines_file() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('a\\nb\\nc\\n') \
+         f:close() \
+         local result = {} \
+         for line in io.lines(name) do \
+             result[#result + 1] = line \
+         end \
+         print(table.concat(result, ','))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "a,b,c");
+}
+
+#[test]
+fn io_file_lines() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('x\\ny\\n') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         local result = {} \
+         for line in f:lines() do \
+             result[#result + 1] = line \
+         end \
+         f:close() \
+         print(table.concat(result, ',')) \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "x,y");
+}
+
+#[test]
+fn io_seek() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('hello world') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         f:seek('set', 6) \
+         print(f:read('*l')) \
+         f:close() \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "world");
+}
+
+#[test]
+fn io_seek_returns_position() {
+    let (stdout, _, code) = run_rilua(
+        "local f = io.tmpfile() \
+         f:write('hello') \
+         print(f:seek('cur')) \
+         f:close()",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "5");
+}
+
+#[test]
+fn io_setvbuf_modes() {
+    let (stdout, _, code) = run_rilua(
+        "local f = io.tmpfile() \
+         assert(f:setvbuf('no')) \
+         assert(f:setvbuf('line')) \
+         assert(f:setvbuf('full')) \
+         f:close() \
+         print('ok')",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn io_tmpfile() {
+    let (stdout, _, code) = run_rilua(
+        "local f = io.tmpfile() \
+         f:write('test data\\n') \
+         f:seek('set') \
+         print(f:read('*l')) \
+         f:close()",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "test data");
+}
+
+#[test]
+fn io_popen_echo() {
+    let (stdout, _, code) = run_rilua(
+        "local f = io.popen('echo hello') \
+         print(f:read('*l')) \
+         f:close()",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "hello");
+}
+
+#[test]
+fn io_input_output_get() {
+    let (stdout, _, code) = run_rilua(
+        "print(io.type(io.input())) \
+         print(io.type(io.output()))",
+    );
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "file");
+    assert_eq!(lines[1], "file");
+}
+
+#[test]
+fn io_input_set() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('from file\\n') \
+         f:close() \
+         io.input(name) \
+         print(io.read()) \
+         io.close(io.input()) \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "from file");
+}
+
+#[test]
+fn io_type_closed_file() {
+    let (stdout, _, code) = run_rilua(
+        "local f = io.tmpfile() \
+         f:close() \
+         print(io.type(f))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "closed file");
+}
+
+#[test]
+fn io_close_returns_true() {
+    let (stdout, _, code) = run_rilua(
+        "local f = io.tmpfile() \
+         local r = f:close() \
+         print(r)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "true");
+}
+
+#[test]
+fn io_flush_default() {
+    let (stdout, _, code) = run_rilua("io.write('hello') io.flush() io.write(' world\\n')");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello world\n");
+}
+
+#[test]
+fn io_read_eof_returns_nil() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         print(f:read('*l')) \
+         f:close() \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "nil");
+}
+
+#[test]
+fn io_read_all_empty() {
+    let (stdout, _, code) = run_rilua(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         local s = f:read('*a') \
+         print(#s) \
+         f:close() \
+         os.remove(name)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "0");
+}

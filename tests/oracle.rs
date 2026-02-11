@@ -1053,3 +1053,192 @@ fn oracle_newproxy_metatable() {
 fn oracle_newproxy_no_metatable() {
     oracle::assert_matches_reference("print(getmetatable(newproxy()))");
 }
+
+// ---------------------------------------------------------------------------
+// I/O library
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_io_type() {
+    oracle::assert_matches_reference("print(type(io))");
+}
+
+#[test]
+fn oracle_io_type_stdin() {
+    oracle::assert_matches_reference("print(io.type(io.stdin))");
+}
+
+#[test]
+fn oracle_io_type_stdout() {
+    oracle::assert_matches_reference("print(io.type(io.stdout))");
+}
+
+#[test]
+fn oracle_io_type_stderr() {
+    oracle::assert_matches_reference("print(io.type(io.stderr))");
+}
+
+#[test]
+fn oracle_io_type_table() {
+    oracle::assert_matches_reference("print(io.type({}))");
+}
+
+#[test]
+fn oracle_io_type_nil() {
+    oracle::assert_matches_reference("print(io.type(nil))");
+}
+
+#[test]
+fn oracle_io_type_number() {
+    oracle::assert_matches_reference("print(io.type(42))");
+}
+
+#[test]
+fn oracle_io_function_types() {
+    oracle::assert_matches_reference(
+        "print(type(io.close), type(io.flush), type(io.input), type(io.lines))",
+    );
+}
+
+#[test]
+fn oracle_io_function_types_2() {
+    oracle::assert_matches_reference("print(type(io.open), type(io.output), type(io.popen))");
+}
+
+#[test]
+fn oracle_io_function_types_3() {
+    oracle::assert_matches_reference(
+        "print(type(io.read), type(io.tmpfile), type(io.type), type(io.write))",
+    );
+}
+
+#[test]
+fn oracle_io_write() {
+    oracle::assert_matches_reference("io.write('hello world\\n')");
+}
+
+#[test]
+fn oracle_io_write_number() {
+    oracle::assert_matches_reference("io.write(42) io.write('\\n')");
+}
+
+#[test]
+fn oracle_io_write_multi() {
+    oracle::assert_matches_reference("io.write('a', 'b', 'c', '\\n')");
+}
+
+#[test]
+fn oracle_io_tmpfile_type() {
+    oracle::assert_matches_reference("print(io.type(io.tmpfile()))");
+}
+
+#[test]
+fn oracle_io_open_nonexistent() {
+    oracle::assert_matches_reference(
+        "local f, msg, code = io.open('/tmp/__rilua_oracle_no__', 'r') \
+         print(f, type(msg), type(code))",
+    );
+}
+
+#[test]
+fn oracle_io_file_read_write() {
+    oracle::assert_matches_reference(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('hello\\n') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         print(f:read('*l')) \
+         f:close() \
+         os.remove(name)",
+    );
+}
+
+#[test]
+fn oracle_io_file_read_all() {
+    oracle::assert_matches_reference(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('abc\\ndef\\n') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         local s = f:read('*a') \
+         print(#s) \
+         f:close() \
+         os.remove(name)",
+    );
+}
+
+#[test]
+fn oracle_io_file_read_number() {
+    oracle::assert_matches_reference(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('3.14 42\\n') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         print(f:read('*n'), f:read('*n')) \
+         f:close() \
+         os.remove(name)",
+    );
+}
+
+#[test]
+fn oracle_io_file_read_bytes() {
+    oracle::assert_matches_reference(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('hello world') \
+         f:close() \
+         local f = io.open(name, 'r') \
+         print(f:read(5), f:read(6)) \
+         f:close() \
+         os.remove(name)",
+    );
+}
+
+#[test]
+fn oracle_io_lines() {
+    oracle::assert_matches_reference(
+        "local name = os.tmpname() \
+         local f = io.open(name, 'w') \
+         f:write('a\\nb\\nc\\n') \
+         f:close() \
+         for line in io.lines(name) do print(line) end",
+    );
+}
+
+#[test]
+fn oracle_io_popen_echo() {
+    oracle::assert_matches_reference(
+        "local f = io.popen('echo hello') \
+         print(f:read('*l')) \
+         f:close()",
+    );
+}
+
+#[test]
+fn oracle_io_seek() {
+    oracle::assert_matches_reference(
+        "local f = io.tmpfile() \
+         f:write('hello') \
+         print(f:seek('cur')) \
+         f:seek('set', 0) \
+         print(f:read('*a')) \
+         f:close()",
+    );
+}
+
+#[test]
+fn oracle_io_type_closed() {
+    oracle::assert_matches_reference(
+        "local f = io.tmpfile() \
+         f:close() \
+         print(io.type(f))",
+    );
+}
+
+#[test]
+fn oracle_io_input_output_type() {
+    oracle::assert_matches_reference("print(io.type(io.input()), io.type(io.output()))");
+}

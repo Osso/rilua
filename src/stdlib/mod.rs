@@ -65,6 +65,9 @@ pub fn open_libs(state: &mut LuaState) -> LuaResult<()> {
     // OS library.
     open_os_lib(state)?;
 
+    // I/O library.
+    io::open_io_lib(state)?;
+
     Ok(())
 }
 
