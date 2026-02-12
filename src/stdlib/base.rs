@@ -1111,14 +1111,35 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     // Call the reader function repeatedly to collect source bytes.
+    // PUC-Rio uses streaming I/O (ZIO) where the lexer pulls data on demand,
+    // so infinite readers terminate naturally via parse errors. We collect
+    // eagerly, so we cap accumulated size to prevent hanging on readers
+    // that never return nil. The limit (10 MB) exceeds any legitimate Lua
+    // source; reaching it means the reader is likely buggy/infinite.
+    const MAX_LOAD_SIZE: usize = 10 * 1024 * 1024;
     let mut collected: Vec<u8> = Vec::new();
+    let saved_top = state.top;
+    let saved_ci = state.ci;
+    let saved_n_ccalls = state.n_ccalls;
     loop {
         let call_base = state.top;
         state.ensure_stack(call_base + 2);
         state.stack_set(call_base, func_val);
         state.top = call_base + 1;
 
-        state.call_function(call_base, 1)?;
+        let call_result = state.call_function(call_base, 1);
+        if let Err(e) = call_result {
+            // PUC-Rio's lua_load catches reader errors via protected parser.
+            // Restore call stack state and return nil + error message.
+            state.ci = saved_ci;
+            state.base = state.call_stack[state.ci].base;
+            state.n_ccalls = saved_n_ccalls;
+            state.top = saved_top;
+            state.push(Val::Nil);
+            let msg = state.gc.intern_string(e.to_string().as_bytes());
+            state.push(Val::Str(msg));
+            return Ok(2);
+        }
 
         let result = state.stack_get(call_base);
         state.top = call_base; // Clean up.
@@ -1136,6 +1157,9 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
                     break; // Empty string also signals end.
                 }
                 collected.extend_from_slice(&chunk);
+                if collected.len() > MAX_LOAD_SIZE {
+                    break;
+                }
             }
             _ => {
                 return Err(simple_error(
@@ -1152,7 +1176,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
 /// and pushes either the function or nil+error.
 #[allow(clippy::unnecessary_wraps)]
 fn load_string_impl(state: &mut LuaState, source: &[u8], name: &str) -> LuaResult<u32> {
-    match crate::compiler::compile(source, name) {
+    match crate::compile_or_undump(source, name) {
         Ok(proto) => {
             let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
             crate::patch_string_constants(&mut proto, &mut state.gc);

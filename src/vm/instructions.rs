@@ -180,6 +180,30 @@ pub enum OpCode {
 /// Total number of opcodes.
 pub const NUM_OPCODES: u32 = 38;
 
+/// Instruction format (matches PUC-Rio `enum OpMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpMode {
+    /// iABC format: three fields A(8), B(9), C(9).
+    IABC,
+    /// iABx format: two fields A(8), Bx(18).
+    IABx,
+    /// iAsBx format: two fields A(8), sBx(18 signed).
+    IAsBx,
+}
+
+/// Operand significance (matches PUC-Rio `enum OpArgMask`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpArgMask {
+    /// Argument is not used.
+    N,
+    /// Argument is used (arbitrary value).
+    U,
+    /// Argument is a register or a jump offset.
+    R,
+    /// Argument is a constant or register/constant.
+    K,
+}
+
 impl OpCode {
     /// Converts a raw integer to an opcode, if valid.
     #[must_use]
@@ -286,6 +310,121 @@ impl OpCode {
             Self::Closure => "CLOSURE",
             Self::VarArg => "VARARG",
         }
+    }
+
+    /// Returns the instruction format for this opcode.
+    ///
+    /// Matches PUC-Rio's `getOpMode(m)` from `luaP_opmodes`.
+    #[must_use]
+    pub fn mode(self) -> OpMode {
+        match self {
+            Self::Jmp | Self::ForLoop | Self::ForPrep => OpMode::IAsBx,
+            Self::LoadK | Self::GetGlobal | Self::SetGlobal | Self::Closure => OpMode::IABx,
+            _ => OpMode::IABC,
+        }
+    }
+
+    /// Returns the B-operand significance for this opcode.
+    ///
+    /// Matches PUC-Rio's `getBMode(m)` from `luaP_opmodes`.
+    #[must_use]
+    pub fn b_mode(self) -> OpArgMask {
+        match self {
+            // OpArgK: constant or register/constant
+            Self::LoadK | Self::GetGlobal | Self::SetGlobal => OpArgMask::K,
+            Self::SetTable
+            | Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::Mod
+            | Self::Pow
+            | Self::Eq
+            | Self::Lt
+            | Self::Le => OpArgMask::K,
+            // OpArgR: register or jump offset
+            Self::Move
+            | Self::LoadNil
+            | Self::Unm
+            | Self::Not
+            | Self::Len
+            | Self::Concat
+            | Self::Jmp
+            | Self::Test
+            | Self::TestSet
+            | Self::ForLoop
+            | Self::ForPrep => OpArgMask::R,
+            Self::GetTable | Self::OpSelf => OpArgMask::R,
+            // OpArgU: used (arbitrary)
+            Self::LoadBool
+            | Self::GetUpval
+            | Self::SetUpval
+            | Self::NewTable
+            | Self::Call
+            | Self::TailCall
+            | Self::Return
+            | Self::SetList
+            | Self::Closure
+            | Self::VarArg => OpArgMask::U,
+            // OpArgN: not used
+            Self::TForLoop | Self::Close => OpArgMask::N,
+        }
+    }
+
+    /// Returns the C-operand significance for this opcode.
+    ///
+    /// Matches PUC-Rio's `getCMode(m)` from `luaP_opmodes`.
+    #[must_use]
+    pub fn c_mode(self) -> OpArgMask {
+        match self {
+            // OpArgK: constant or register/constant
+            Self::GetTable | Self::OpSelf => OpArgMask::K,
+            Self::SetTable
+            | Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::Mod
+            | Self::Pow
+            | Self::Eq
+            | Self::Lt
+            | Self::Le => OpArgMask::K,
+            // OpArgR: register or jump offset
+            Self::Concat => OpArgMask::R,
+            // OpArgU: used (arbitrary)
+            Self::LoadBool
+            | Self::NewTable
+            | Self::Call
+            | Self::TailCall
+            | Self::SetList
+            | Self::Test
+            | Self::TestSet
+            | Self::TForLoop
+            | Self::VarArg => OpArgMask::U,
+            // OpArgN: not used
+            _ => OpArgMask::N,
+        }
+    }
+
+    /// Returns whether the instruction sets register A (i.e. produces a value).
+    ///
+    /// Matches PUC-Rio's `testAMode(m)` from `luaP_opmodes`.
+    #[must_use]
+    pub fn sets_register_a(self) -> bool {
+        !matches!(
+            self,
+            Self::SetGlobal
+                | Self::SetUpval
+                | Self::SetTable
+                | Self::Jmp
+                | Self::Eq
+                | Self::Lt
+                | Self::Le
+                | Self::Return
+                | Self::SetList
+                | Self::Close
+                | Self::TForLoop
+        )
     }
 }
 
@@ -727,5 +866,73 @@ mod tests {
             assert_eq!(instr.opcode(), op, "opcode mismatch at index {i}");
             assert_eq!(op as u8, i as u8, "enum value mismatch for {}", op.name());
         }
+    }
+
+    // -- Opcode mode metadata --
+
+    #[test]
+    fn opcode_modes_match_puc_rio() {
+        // iABx opcodes
+        assert_eq!(OpCode::LoadK.mode(), OpMode::IABx);
+        assert_eq!(OpCode::GetGlobal.mode(), OpMode::IABx);
+        assert_eq!(OpCode::SetGlobal.mode(), OpMode::IABx);
+        assert_eq!(OpCode::Closure.mode(), OpMode::IABx);
+
+        // iAsBx opcodes
+        assert_eq!(OpCode::Jmp.mode(), OpMode::IAsBx);
+        assert_eq!(OpCode::ForLoop.mode(), OpMode::IAsBx);
+        assert_eq!(OpCode::ForPrep.mode(), OpMode::IAsBx);
+
+        // iABC opcodes (spot check)
+        assert_eq!(OpCode::Move.mode(), OpMode::IABC);
+        assert_eq!(OpCode::Add.mode(), OpMode::IABC);
+        assert_eq!(OpCode::Call.mode(), OpMode::IABC);
+        assert_eq!(OpCode::Return.mode(), OpMode::IABC);
+        assert_eq!(OpCode::SetTable.mode(), OpMode::IABC);
+    }
+
+    #[test]
+    fn opcode_b_mode_match_puc_rio() {
+        assert_eq!(OpCode::Move.b_mode(), OpArgMask::R);
+        assert_eq!(OpCode::LoadK.b_mode(), OpArgMask::K);
+        assert_eq!(OpCode::LoadBool.b_mode(), OpArgMask::U);
+        assert_eq!(OpCode::GetUpval.b_mode(), OpArgMask::U);
+        assert_eq!(OpCode::Add.b_mode(), OpArgMask::K);
+        assert_eq!(OpCode::Jmp.b_mode(), OpArgMask::R);
+        assert_eq!(OpCode::TForLoop.b_mode(), OpArgMask::N);
+        assert_eq!(OpCode::Close.b_mode(), OpArgMask::N);
+        assert_eq!(OpCode::VarArg.b_mode(), OpArgMask::U);
+    }
+
+    #[test]
+    fn opcode_c_mode_match_puc_rio() {
+        assert_eq!(OpCode::Move.c_mode(), OpArgMask::N);
+        assert_eq!(OpCode::GetTable.c_mode(), OpArgMask::K);
+        assert_eq!(OpCode::SetTable.c_mode(), OpArgMask::K);
+        assert_eq!(OpCode::Add.c_mode(), OpArgMask::K);
+        assert_eq!(OpCode::Concat.c_mode(), OpArgMask::R);
+        assert_eq!(OpCode::Call.c_mode(), OpArgMask::U);
+        assert_eq!(OpCode::LoadBool.c_mode(), OpArgMask::U);
+        assert_eq!(OpCode::Return.c_mode(), OpArgMask::N);
+        assert_eq!(OpCode::TForLoop.c_mode(), OpArgMask::U);
+    }
+
+    #[test]
+    fn opcode_sets_register_a() {
+        // Instructions that set register A
+        assert!(OpCode::Move.sets_register_a());
+        assert!(OpCode::LoadK.sets_register_a());
+        assert!(OpCode::Add.sets_register_a());
+        assert!(OpCode::Call.sets_register_a());
+        assert!(OpCode::Closure.sets_register_a());
+
+        // Instructions that do NOT set register A
+        assert!(!OpCode::SetGlobal.sets_register_a());
+        assert!(!OpCode::SetUpval.sets_register_a());
+        assert!(!OpCode::SetTable.sets_register_a());
+        assert!(!OpCode::Jmp.sets_register_a());
+        assert!(!OpCode::Eq.sets_register_a());
+        assert!(!OpCode::Return.sets_register_a());
+        assert!(!OpCode::Close.sets_register_a());
     }
 }

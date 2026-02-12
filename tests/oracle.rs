@@ -1722,3 +1722,193 @@ fn oracle_cli_stdin_dash() {
 
     assert_eq!(rilua.stdout, ref_stdout, "stdin dash output mismatch");
 }
+
+// ---------------------------------------------------------------------------
+// string.dump / binary chunk oracle tests (Phase 9b)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_string_dump_roundtrip() {
+    oracle::assert_matches_reference(
+        "local f = loadstring('return 42'); print(loadstring(string.dump(f))())",
+    );
+}
+
+#[test]
+fn oracle_string_dump_constants() {
+    oracle::assert_matches_reference(
+        r#"local f = loadstring("return nil, true, false, 3.14, 'hello'"); print(loadstring(string.dump(f))())"#,
+    );
+}
+
+#[test]
+fn oracle_string_dump_nested() {
+    oracle::assert_matches_reference(
+        r#"local f = function() local g = function() return "inner" end; return g() end; print(loadstring(string.dump(f))())"#,
+    );
+}
+
+#[test]
+fn oracle_string_dump_error_nonfunc() {
+    // Both should return false + error message; exact wording may differ.
+    let rilua = oracle::run_rilua("print(pcall(string.dump, 42))");
+    assert!(
+        rilua.stdout.starts_with("false"),
+        "rilua should fail: {}",
+        rilua.stdout
+    );
+    if let Some(reference) = oracle::run_reference("print(pcall(string.dump, 42))") {
+        assert!(
+            reference.stdout.starts_with("false"),
+            "reference should fail: {}",
+            reference.stdout
+        );
+    }
+}
+
+#[test]
+fn oracle_string_dump_error_cfunc() {
+    // Both should return false + "unable to dump" error; exact wording may differ.
+    let rilua = oracle::run_rilua("print(pcall(string.dump, print))");
+    assert!(
+        rilua.stdout.starts_with("false"),
+        "rilua should fail: {}",
+        rilua.stdout
+    );
+    if let Some(reference) = oracle::run_reference("print(pcall(string.dump, print))") {
+        assert!(
+            reference.stdout.starts_with("false"),
+            "reference should fail: {}",
+            reference.stdout
+        );
+    }
+}
+
+#[test]
+fn oracle_string_dump_type_check() {
+    oracle::assert_matches_reference("local f = function() end; print(type(string.dump(f)))");
+}
+
+#[test]
+fn oracle_string_dump_signature() {
+    oracle::assert_matches_reference(
+        "local f = function() end; local s = string.dump(f); print(string.byte(s,1), string.byte(s,2), string.byte(s,3), string.byte(s,4))",
+    );
+}
+
+#[test]
+fn oracle_dump_load_exec() {
+    oracle::assert_matches_reference(
+        r#"local f = loadstring("local x = 10; for i=1,3 do x = x + i end; return x"); local g = loadstring(string.dump(f)); print(g())"#,
+    );
+}
+
+#[test]
+fn oracle_dump_vararg() {
+    oracle::assert_matches_reference(
+        r#"local f = function(...) return select('#', ...) end; print(loadstring(string.dump(f))(1,2,3))"#,
+    );
+}
+
+#[test]
+fn oracle_dump_upvalue_reset() {
+    oracle::assert_matches_reference(
+        "local x = 10; local f = function() return x end; local g = loadstring(string.dump(f)); print(type(g()))",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Error message formatting (Phase 9c)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_error_msg_call_local() {
+    oracle::assert_matches_reference(
+        "local x = 1; local ok, msg = pcall(function() x() end); print(msg)",
+    );
+}
+
+#[test]
+fn oracle_error_msg_call_global() {
+    oracle::assert_matches_reference("local ok, msg = pcall(function() foo() end); print(msg)");
+}
+
+#[test]
+fn oracle_error_msg_arith_local() {
+    oracle::assert_matches_reference(
+        "local x = 'hello'; local ok, msg = pcall(function() return x + 1 end); print(msg)",
+    );
+}
+
+#[test]
+fn oracle_error_msg_index_local() {
+    oracle::assert_matches_reference(
+        "local x = nil; local ok, msg = pcall(function() return x.y end); print(msg)",
+    );
+}
+
+#[test]
+fn oracle_error_msg_concat_local() {
+    oracle::assert_matches_reference(
+        "local x = {}; local ok, msg = pcall(function() return 'a' .. x end); print(msg)",
+    );
+}
+
+#[test]
+fn oracle_error_msg_len_local() {
+    oracle::assert_matches_reference(
+        "local x = true; local ok, msg = pcall(function() return #x end); print(msg)",
+    );
+}
+
+#[test]
+fn oracle_error_msg_call_upvalue() {
+    oracle::assert_matches_reference(
+        "local x = 1; local ok, msg = pcall(function() return (function() x() end)() end); print(msg)",
+    );
+}
+
+#[test]
+fn oracle_error_msg_call_field() {
+    oracle::assert_matches_reference(
+        "local t = {x = 1}; local ok, msg = pcall(function() t.x() end); print(msg)",
+    );
+}
+
+#[test]
+fn oracle_traceback_error() {
+    oracle::assert_matches_reference_stderr("error('boom')");
+}
+
+#[test]
+fn oracle_traceback_nested() {
+    oracle::assert_matches_reference_stderr(
+        "function a() error('nested') end; function b() a() end; function c() b() end; c()",
+    );
+}
+
+#[test]
+fn oracle_traceback_type_error() {
+    oracle::assert_matches_reference_stderr(
+        "function foo() local x = nil; return x + 1 end; foo()",
+    );
+}
+
+#[test]
+fn oracle_traceback_debug_traceback() {
+    oracle::assert_matches_reference(
+        "function foo() return debug.traceback('msg', 1) end; print(foo())",
+    );
+}
+
+#[test]
+fn oracle_traceback_debug_traceback_no_args() {
+    oracle::assert_matches_reference("function foo() return debug.traceback() end; print(foo())");
+}
+
+#[test]
+fn oracle_error_msg_compare() {
+    oracle::assert_matches_reference(
+        "local ok, msg = pcall(function() return {} < 1 end); print(msg)",
+    );
+}

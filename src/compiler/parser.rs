@@ -448,8 +448,15 @@ impl Parser {
                 span,
             })
         } else {
-            // Function call used as statement
-            Ok(Stat::ExprStat { expr, span })
+            // Function call used as statement.
+            // PUC-Rio's exprstat only accepts calls; anything else
+            // (bare name, literal, binop, etc.) is a syntax error.
+            match &expr {
+                super::ast::Expr::Call { .. } | super::ast::Expr::MethodCall { .. } => {
+                    Ok(Stat::ExprStat { expr, span })
+                }
+                _ => Err(self.error_expected("'='")),
+            }
         }
     }
 
@@ -699,6 +706,9 @@ impl Parser {
 
         self.expect_char(b')')?;
         let body = self.parse_block()?;
+        // Capture the `end` keyword's line before consuming it.
+        // PUC-Rio: f->lastlinedefined = ls->linenumber (at `end`)
+        let end_line = self.span.line;
         self.check_match(&Token::End, &Token::Function, open_line)?;
 
         Ok(FuncBody {
@@ -706,6 +716,7 @@ impl Parser {
             has_varargs,
             body,
             span: def_span,
+            end_line,
         })
     }
 

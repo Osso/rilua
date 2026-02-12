@@ -202,6 +202,8 @@ pub struct FuncBody {
     pub body: Block,
     /// Span covering the entire function definition.
     pub span: Span,
+    /// Line number of the closing `end` keyword.
+    pub end_line: u32,
 }
 
 /// Function name for `function` declarations.
@@ -337,6 +339,7 @@ mod tests {
             has_varargs: true,
             body: vec![],
             span: Span::new(1, 1),
+            end_line: 5,
         };
         assert_eq!(body.params.len(), 2);
         assert!(body.has_varargs);

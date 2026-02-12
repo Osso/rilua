@@ -186,6 +186,53 @@ pub fn run_reference_args(args: &[&str]) -> Option<LuaOutput> {
     })
 }
 
+/// Strips the binary-name prefix from stderr lines.
+///
+/// PUC-Rio outputs `"/path/to/lua: msg"` while rilua outputs
+/// `"/path/to/rilua: msg"`. This function strips everything up to
+/// and including the first `: ` on each line, returning only the
+/// error content for comparison.
+#[allow(dead_code)]
+fn strip_progname(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(|line| {
+            if let Some(idx) = line.find(": ") {
+                &line[idx + 2..]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Assert that rilua and PUC-Rio produce matching stderr (with binary
+/// prefixes stripped) and the same exit code.
+///
+/// Used for testing CLI error message and traceback formatting.
+/// Skips the test if the reference binary is not available.
+#[allow(dead_code)]
+pub fn assert_matches_reference_stderr(code: &str) {
+    let Some(reference) = run_reference(code) else {
+        eprintln!("skipping: reference Lua binary not available");
+        return;
+    };
+    let rilua = run_rilua(code);
+    let rilua_err = strip_progname(&rilua.stderr);
+    let ref_err = strip_progname(&reference.stderr);
+    assert_eq!(
+        rilua_err, ref_err,
+        "Stderr mismatch for code: {code}\n  rilua stderr: {:?}\n  ref   stderr: {:?}",
+        rilua.stderr, reference.stderr,
+    );
+    assert_eq!(
+        rilua.exit_code, reference.exit_code,
+        "Exit code mismatch for code: {code}\n  rilua: {}\n  ref:   {}",
+        rilua.exit_code, reference.exit_code,
+    );
+}
+
 /// Assert that rilua and PUC-Rio produce identical stdout for the given code.
 ///
 /// Skips the test if the reference binary is not available.

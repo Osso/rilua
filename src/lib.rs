@@ -29,12 +29,13 @@ pub mod handles;
 pub mod stdlib;
 pub mod vm;
 
+use std::any::Any;
 use std::rc::Rc;
 
 // Re-exports for public API.
 pub use conversion::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti};
 pub use error::{LuaError, LuaResult};
-pub use handles::{Function, Table, Thread};
+pub use handles::{AnyUserData, Function, Table, Thread};
 pub use stdlib::StdLib;
 pub use vm::closure::RustFn;
 pub use vm::state::ThreadStatus;
@@ -109,7 +110,7 @@ impl Lua {
     /// Source is `&[u8]` because Lua files may contain arbitrary byte
     /// sequences (e.g. `\0`, `\255` in string literals).
     pub fn exec_bytes(&mut self, source: &[u8], name: &str) -> LuaResult<()> {
-        let proto = compiler::compile(source, name)?;
+        let proto = compile_or_undump(source, name)?;
         self.run_proto(proto)
     }
 
@@ -136,9 +137,9 @@ impl Lua {
         self.load_bytes(source.as_bytes(), "=(string)")
     }
 
-    /// Compiles Lua source bytes and returns a function handle.
+    /// Compiles Lua source bytes (or loads a binary chunk) and returns a function handle.
     pub fn load_bytes(&mut self, source: &[u8], name: &str) -> LuaResult<Function> {
-        let proto = compiler::compile(source, name)?;
+        let proto = compile_or_undump(source, name)?;
         let mut proto = Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
         patch_string_constants(&mut proto, &mut self.state.gc);
         let proto = Rc::new(proto);
@@ -175,6 +176,47 @@ impl Lua {
     pub fn create_table(&mut self) -> Table {
         let r = self.state.gc.alloc_table(vm::table::Table::new());
         Table(r)
+    }
+
+    // -----------------------------------------------------------------------
+    // Userdata creation
+    // -----------------------------------------------------------------------
+
+    /// Creates a new userdata containing `data` with no metatable.
+    ///
+    /// The returned `AnyUserData` handle can be passed to Lua code or
+    /// stored as a global. Use [`AnyUserData::set_metatable`] to attach
+    /// methods.
+    pub fn create_userdata<T: Any>(&mut self, data: T) -> AnyUserData {
+        let ud = vm::value::Userdata::new(Box::new(data));
+        let r = self.state.gc.alloc_userdata(ud);
+        AnyUserData(r)
+    }
+
+    /// Creates a new userdata with a named, registry-cached metatable.
+    ///
+    /// The metatable is stored in the registry under `type_name`. If a
+    /// metatable for that name already exists, it is reused. This is the
+    /// same pattern used by PUC-Rio's `luaL_newmetatable` for C userdata
+    /// types.
+    pub fn create_typed_userdata<T: Any>(
+        &mut self,
+        data: T,
+        type_name: &str,
+    ) -> LuaResult<AnyUserData> {
+        let mt = stdlib::new_metatable(&mut self.state, type_name)?;
+        let ud = vm::value::Userdata::with_metatable(Box::new(data), mt);
+        let r = self.state.gc.alloc_userdata(ud);
+        Ok(AnyUserData(r))
+    }
+
+    /// Creates or retrieves a named metatable for a userdata type.
+    ///
+    /// The metatable is cached in the registry by `type_name`. Methods
+    /// can be registered on the returned `Table` handle.
+    pub fn create_userdata_metatable(&mut self, type_name: &str) -> LuaResult<Table> {
+        let mt = stdlib::new_metatable(&mut self.state, type_name)?;
+        Ok(Table(mt))
     }
 
     // -----------------------------------------------------------------------
@@ -275,6 +317,74 @@ impl Lua {
         self.state.base = save_base;
 
         Ok(results)
+    }
+
+    /// Calls a loaded `Function` handle, appending a stack traceback on error.
+    ///
+    /// Identical to `call_function` but on runtime error, generates a
+    /// `debug.traceback`-style stack trace and appends it to the error
+    /// message. Used by the CLI to match PUC-Rio's `docall` pattern
+    /// where a C traceback function is the `lua_pcall` error handler.
+    ///
+    /// Because rilua uses `Result`-based errors (no `longjmp`), the call
+    /// stack is still intact after an error, so we generate the traceback
+    /// after the fact instead of through an error handler function.
+    pub fn call_function_traced(&mut self, func: &Function, args: &[Val]) -> LuaResult<Vec<Val>> {
+        // Push the function at the current top.
+        let func_idx = self.state.top;
+        self.state.ensure_stack(func_idx + 1 + args.len());
+        self.state.stack_set(func_idx, Val::Function(func.0));
+        self.state.top = func_idx + 1;
+
+        // Push arguments.
+        for arg in args {
+            let top = self.state.top;
+            self.state.stack_set(top, *arg);
+            self.state.top = top + 1;
+        }
+
+        // Save the base index so we know where results land.
+        let save_base = self.state.base;
+        let save_ci = self.state.ci;
+        self.state.base = func_idx + 1;
+
+        // Call with LUA_MULTRET to get all results.
+        let result = match self.state.precall(func_idx, LUA_MULTRET) {
+            Ok(CallResult::Lua) => execute(&mut self.state),
+            Ok(CallResult::Rust) => Ok(()),
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(()) => {
+                // Collect results: they're at func_idx..self.state.top.
+                let results: Vec<Val> = (func_idx..self.state.top)
+                    .map(|i| self.state.stack_get(i))
+                    .collect();
+
+                // Restore state.
+                self.state.top = func_idx;
+                self.state.base = save_base;
+
+                Ok(results)
+            }
+            Err(e) => {
+                // Generate traceback while the call stack is still intact.
+                let msg = e.to_string();
+                let traceback = stdlib::debug::generate_traceback(&self.state, &msg, 0);
+
+                // Restore state.
+                self.state.top = func_idx;
+                self.state.base = save_base;
+                self.state.ci = save_ci;
+
+                Err(LuaError::Runtime(RuntimeError {
+                    message: traceback,
+                    level: 0,
+                    traceback: vec![],
+                }))
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -435,6 +545,19 @@ pub fn exec_with_name(source: &[u8], name: &str) -> LuaResult<()> {
 /// Resolves string constant placeholders in a Proto using the GC.
 ///
 /// During compilation, string constants are stored as `Val::Nil` with
+/// Compiles source code or loads a precompiled binary chunk.
+///
+/// Detects the `\x1bLua` signature and dispatches to `undump` for binary
+/// chunks or `compile` for source text. Both return an unpatched Proto
+/// (strings in `string_pool`, `Val::Nil` placeholders).
+pub(crate) fn compile_or_undump(source: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
+    if source.starts_with(vm::dump::LUA_SIGNATURE) {
+        vm::undump::undump(source, name)
+    } else {
+        compiler::compile(source, name)
+    }
+}
+
 /// their raw bytes recorded in `proto.string_pool`. This function
 /// interns each string via the GC and replaces the placeholder with
 /// the real `Val::Str` value. Recurses into child protos.
@@ -647,6 +770,63 @@ mod tests {
         let mut lua = Lua::new_empty();
         let result = lua.load_file(Some("/nonexistent/path/to/file.lua"));
         assert!(result.is_err());
+    }
+
+    // -- Userdata API --
+
+    #[test]
+    fn lua_create_userdata() {
+        let mut lua = Lua::new_empty();
+        let ud = lua.create_userdata(42i64);
+        let val = ud.borrow::<i64>(&lua.state);
+        assert_eq!(val, Some(&42i64));
+    }
+
+    #[test]
+    fn lua_create_userdata_type_mismatch() {
+        let mut lua = Lua::new_empty();
+        let ud = lua.create_userdata(42i64);
+        assert!(ud.borrow::<String>(&lua.state).is_none());
+    }
+
+    #[test]
+    fn lua_create_typed_userdata_with_metatable() {
+        let mut lua = Lua::new_empty();
+        let ud = lua.create_typed_userdata(100u32, "MyType");
+        assert!(ud.is_ok());
+        let ud = ud.unwrap_or_else(|_| unreachable!());
+        // Metatable should be set.
+        let mt = ud.metatable(&lua.state);
+        assert!(mt.is_some());
+    }
+
+    #[test]
+    fn lua_userdata_metatable_caching() {
+        let mut lua = Lua::new_empty();
+        let mt1 = lua.create_userdata_metatable("CachedType");
+        assert!(mt1.is_ok());
+        let mt1 = mt1.unwrap_or_else(|_| unreachable!());
+
+        let mt2 = lua.create_userdata_metatable("CachedType");
+        assert!(mt2.is_ok());
+        let mt2 = mt2.unwrap_or_else(|_| unreachable!());
+
+        // Same name returns same metatable.
+        assert_eq!(mt1.gc_ref(), mt2.gc_ref());
+    }
+
+    #[test]
+    fn lua_create_userdata_set_global() {
+        let mut lua = Lua::new().ok().unwrap_or_else(Lua::new_empty);
+        let ud = lua.create_userdata(99i64);
+
+        // Set as global via IntoLua.
+        let val: Val = ud.into_lua(&mut lua).unwrap_or(Val::Nil);
+        lua.set_global_val("myud", val).ok();
+
+        // Retrieve it.
+        let got = lua.get_global_val("myud");
+        assert!(matches!(got, Val::Userdata(_)));
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use crate::Lua;
 use crate::error::{LuaError, LuaResult, RuntimeError};
-use crate::handles::{Function, Table, Thread};
+use crate::handles::{AnyUserData, Function, Table, Thread};
 use crate::vm::value::Val;
 
 // ---------------------------------------------------------------------------
@@ -319,6 +319,21 @@ impl FromLua for Thread {
     }
 }
 
+impl IntoLua for AnyUserData {
+    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+        Ok(Val::Userdata(self.gc_ref()))
+    }
+}
+
+impl FromLua for AnyUserData {
+    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+        match val {
+            Val::Userdata(r) => Ok(Self(r)),
+            _ => Err(conversion_error("userdata", val.type_name())),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Vec<Val> passthrough for Multi traits
 // ---------------------------------------------------------------------------
@@ -576,6 +591,30 @@ mod tests {
 
         let back = Option::<f64>::from_lua(Val::Nil, &lua);
         assert_eq!(back.ok(), Some(None));
+    }
+
+    // --- AnyUserData ---
+
+    #[test]
+    fn anyuserdata_into_from_lua() {
+        let mut lua = make_lua();
+        let ud = crate::vm::value::Userdata::new(Box::new(123i64));
+        let r = lua.state_mut().gc.alloc_userdata(ud);
+        let handle = AnyUserData(r);
+
+        let val = handle.into_lua(&mut lua).ok().unwrap_or(Val::Nil);
+        assert!(matches!(val, Val::Userdata(_)));
+
+        let back = AnyUserData::from_lua(val, &lua);
+        assert!(back.is_ok());
+        assert_eq!(back.ok().map(AnyUserData::gc_ref), Some(r));
+    }
+
+    #[test]
+    fn anyuserdata_from_wrong_type() {
+        let lua = make_lua();
+        let result = AnyUserData::from_lua(Val::Num(42.0), &lua);
+        assert!(result.is_err());
     }
 
     // --- Handle types ---

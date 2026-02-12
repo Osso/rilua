@@ -254,9 +254,17 @@ fn run_args(lua: &mut Lua, argv: &[String], script_idx: usize, progname: Option<
                     i += 1;
                     &argv[i]
                 };
-                if let Err(e) = lua.exec_bytes(chunk.as_bytes(), "=(command line)") {
-                    report(progname, &e);
-                    return true;
+                match lua.load_bytes(chunk.as_bytes(), "=(command line)") {
+                    Ok(func) => {
+                        if let Err(e) = lua.call_function_traced(&func, &[]) {
+                            report(progname, &e);
+                            return true;
+                        }
+                    }
+                    Err(e) => {
+                        report(progname, &e);
+                        return true;
+                    }
                 }
             }
             b'l' => {
@@ -366,7 +374,7 @@ fn handle_script(
         }
     };
 
-    match lua.call_function(&func, &script_args) {
+    match lua.call_function_traced(&func, &script_args) {
         Ok(_) => false,
         Err(e) => {
             report(progname, &e);
@@ -428,7 +436,7 @@ fn dotty(lua: &mut Lua) {
 
         // Execute the loaded chunk.
         if let Some(func) = func {
-            match lua.call_function(&func, &[]) {
+            match lua.call_function_traced(&func, &[]) {
                 Ok(results) => {
                     if !results.is_empty() {
                         // Print results via print().
@@ -541,7 +549,7 @@ fn main() {
             // Execute stdin as a file.
             match lua.load_file(None) {
                 Ok(func) => {
-                    if let Err(e) = lua.call_function(&func, &[]) {
+                    if let Err(e) = lua.call_function_traced(&func, &[]) {
                         report(progname, &e);
                         process::exit(1);
                     }

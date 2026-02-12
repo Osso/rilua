@@ -27,6 +27,7 @@ use super::metatable::{NUM_TYPE_TAGS, TM_N, TM_NAMES};
 use super::string::{LuaString, StringTable};
 use super::table::Table;
 use super::value::{Userdata, Val};
+use crate::error::LuaResult;
 
 // ---------------------------------------------------------------------------
 // Constants (match PUC-Rio limits)
@@ -448,6 +449,67 @@ impl LuaState {
         } else {
             Val::Nil
         }
+    }
+
+    /// Metamethod-aware table index: `t[key]` with `__index` chain.
+    ///
+    /// Equivalent to PUC-Rio's `lua_gettable`. Follows `__index` metamethods
+    /// up to `MAXTAGLOOP` depth. Used by stdlib code that needs full Lua
+    /// table access semantics (e.g., gsub table replacement).
+    pub fn gettable(&mut self, t: Val, key: Val) -> LuaResult<Val> {
+        use super::metatable::{MAXTAGLOOP, TMS, gettmbyobj};
+
+        let mut current = t;
+        for _ in 0..MAXTAGLOOP {
+            if let Val::Table(table_ref) = current {
+                let result = self
+                    .gc
+                    .tables
+                    .get(table_ref)
+                    .map_or(Val::Nil, |tbl| tbl.get(key, &self.gc.string_arena));
+                if !result.is_nil() {
+                    return Ok(result);
+                }
+                // Check __index metamethod.
+                let tm = gettmbyobj(
+                    current,
+                    TMS::Index,
+                    &self.gc.tables,
+                    &self.gc.string_arena,
+                    &self.gc.type_metatables,
+                    &self.gc.tm_names,
+                    &self.gc.userdata,
+                );
+                match tm {
+                    None => return Ok(Val::Nil),
+                    Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+                        let saved_top = self.top;
+                        let call_base = self.top;
+                        self.ensure_stack(call_base + 4);
+                        self.stack_set(call_base, tm_val);
+                        self.stack_set(call_base + 1, current);
+                        self.stack_set(call_base + 2, key);
+                        self.top = call_base + 3;
+                        self.call_function(call_base, 1)?;
+                        let result = self.stack_get(call_base);
+                        self.top = saved_top;
+                        return Ok(result);
+                    }
+                    Some(tm_val) => {
+                        current = tm_val;
+                    }
+                }
+            } else {
+                return Ok(Val::Nil);
+            }
+        }
+        Err(crate::error::LuaError::Runtime(
+            crate::error::RuntimeError {
+                message: "loop in gettable".into(),
+                level: 0,
+                traceback: vec![],
+            },
+        ))
     }
 
     // ----- CallInfo helpers -----

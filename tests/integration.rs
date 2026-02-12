@@ -3541,3 +3541,658 @@ fn cli_arg_table_negative_indices() {
     );
     std::fs::remove_file(&script).ok();
 }
+
+// ---------------------------------------------------------------------------
+// riluac tests
+// ---------------------------------------------------------------------------
+
+/// Helper: run `riluac` with the given arguments.
+fn run_riluac(args: &[&str]) -> (String, String, i32) {
+    let output = Command::new(env!("CARGO_BIN_EXE_riluac"))
+        .args(args)
+        .output()
+        .expect("failed to run riluac binary");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn riluac_version() {
+    let (stdout, _, code) = run_riluac(&["-v"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("Lua 5.1.1"),
+        "version should contain Lua 5.1.1: {stdout}"
+    );
+    assert!(
+        stdout.contains("PUC-Rio"),
+        "version should contain PUC-Rio: {stdout}"
+    );
+}
+
+#[test]
+fn riluac_list_simple() {
+    let dir = std::env::temp_dir();
+    let script = dir.join("riluac_test_list.lua");
+    std::fs::write(&script, "print('hello')").ok();
+    let script_path = script.to_str().unwrap_or("");
+
+    let (stdout, _, code) = run_riluac(&["-l", script_path]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("main <"),
+        "should start with main function: {stdout}"
+    );
+    assert!(
+        stdout.contains("GETGLOBAL"),
+        "should contain GETGLOBAL: {stdout}"
+    );
+    assert!(
+        stdout.contains("; print"),
+        "should show print global: {stdout}"
+    );
+    assert!(stdout.contains("LOADK"), "should contain LOADK: {stdout}");
+    assert!(stdout.contains("CALL"), "should contain CALL: {stdout}");
+    assert!(stdout.contains("RETURN"), "should contain RETURN: {stdout}");
+
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn riluac_list_full() {
+    let dir = std::env::temp_dir();
+    let script = dir.join("riluac_test_full.lua");
+    std::fs::write(&script, "local x = 42\nreturn x").ok();
+    let script_path = script.to_str().unwrap_or("");
+
+    let (stdout, _, code) = run_riluac(&["-l", "-l", script_path]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("constants ("),
+        "full listing should include constants: {stdout}"
+    );
+    assert!(
+        stdout.contains("locals ("),
+        "full listing should include locals: {stdout}"
+    );
+    assert!(
+        stdout.contains("upvalues ("),
+        "full listing should include upvalues: {stdout}"
+    );
+
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn riluac_parse_only() {
+    let dir = std::env::temp_dir();
+    let script = dir.join("riluac_test_parse.lua");
+    std::fs::write(&script, "local x = 1 + 2").ok();
+    let script_path = script.to_str().unwrap_or("");
+
+    let (stdout, _, code) = run_riluac(&["-p", script_path]);
+    assert_eq!(code, 0);
+    // Parse-only should produce no output.
+    assert!(stdout.is_empty(), "parse-only should be silent: {stdout}");
+
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn riluac_parse_only_syntax_error() {
+    let dir = std::env::temp_dir();
+    let script = dir.join("riluac_test_syntax_err.lua");
+    std::fs::write(&script, "if then end").ok();
+    let script_path = script.to_str().unwrap_or("");
+
+    let (_, stderr, code) = run_riluac(&["-p", script_path]);
+    assert_ne!(code, 0);
+    assert!(
+        !stderr.is_empty(),
+        "syntax error should produce stderr output"
+    );
+
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn riluac_multiple_files() {
+    let dir = std::env::temp_dir();
+    let script1 = dir.join("riluac_test_multi1.lua");
+    let script2 = dir.join("riluac_test_multi2.lua");
+    std::fs::write(&script1, "local a = 1").ok();
+    std::fs::write(&script2, "local b = 2").ok();
+    let path1 = script1.to_str().unwrap_or("");
+    let path2 = script2.to_str().unwrap_or("");
+
+    let (stdout, _, code) = run_riluac(&["-l", path1, path2]);
+    assert_eq!(code, 0);
+    // Should have the combine wrapper "=(riluac)" plus both inner protos.
+    assert!(
+        stdout.contains("=(riluac)"),
+        "should have combine wrapper: {stdout}"
+    );
+
+    std::fs::remove_file(&script1).ok();
+    std::fs::remove_file(&script2).ok();
+}
+
+#[test]
+fn riluac_stdin() {
+    let output = Command::new(env!("CARGO_BIN_EXE_riluac"))
+        .args(["-l", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(b"print(1+2)").ok();
+            }
+            child.wait_with_output()
+        })
+        .expect("failed to run riluac with stdin");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code().unwrap_or(-1), 0);
+    assert!(
+        stdout.contains("=stdin"),
+        "stdin source should be =stdin: {stdout}"
+    );
+    assert!(
+        stdout.contains("GETGLOBAL"),
+        "should contain GETGLOBAL: {stdout}"
+    );
+}
+
+#[test]
+fn riluac_no_input_error() {
+    let (_, stderr, code) = run_riluac(&[]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("no input files given"),
+        "should show error: {stderr}"
+    );
+}
+
+#[test]
+fn riluac_nonexistent_file() {
+    let (_, stderr, code) = run_riluac(&["-l", "/nonexistent/path.lua"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("cannot open"),
+        "should show cannot open: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// string.dump / binary chunk round-trip tests (Phase 9b)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn string_dump_roundtrip() {
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local f = function() return 42 end
+        local s = string.dump(f)
+        local g = loadstring(s)
+        print(g())
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn string_dump_upvalues() {
+    // Upvalues are reset in the loaded copy (PUC-Rio behavior).
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local x = 10
+        local f = function() return x end
+        local s = string.dump(f)
+        local g = loadstring(s)
+        local ok, err = pcall(g)
+        -- The loaded function has no upvalue binding, so x is nil
+        -- Actually in Lua 5.1, the upvalue gets reset to nil
+        print(type(g()))
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // The upvalue x is lost in the dump; accessing it returns nil.
+    assert_eq!(stdout, "nil\n");
+}
+
+#[test]
+fn string_dump_nested() {
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local f = function()
+            local inner = function() return "nested" end
+            return inner()
+        end
+        local s = string.dump(f)
+        local g = loadstring(s)
+        print(g())
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "nested\n");
+}
+
+#[test]
+fn string_dump_vararg() {
+    let (stdout, stderr, code) = run_rilua(
+        r##"
+        local f = function(...) return select("#", ...) end
+        local s = string.dump(f)
+        local g = loadstring(s)
+        print(g(1, 2, 3))
+        "##,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "3\n");
+}
+
+#[test]
+fn string_dump_error_nonfunc() {
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local ok, err = pcall(string.dump, 42)
+        print(ok)
+        print(err)
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("false"), "should fail: {stdout}");
+}
+
+#[test]
+fn string_dump_error_rust_closure() {
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local ok, err = pcall(string.dump, print)
+        print(ok)
+        print(err)
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("false"), "should fail: {stdout}");
+    assert!(
+        stdout.contains("unable to dump"),
+        "should mention unable to dump: {stdout}"
+    );
+}
+
+#[test]
+fn string_dump_with_constants() {
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local f = function()
+            local a = nil
+            local b = true
+            local c = false
+            local d = 3.14
+            local e = "hello"
+            return a, b, c, d, e
+        end
+        local s = string.dump(f)
+        local g = loadstring(s)
+        print(g())
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "nil\ttrue\tfalse\t3.14\thello\n");
+}
+
+#[test]
+fn string_dump_signature_check() {
+    // Verify dump output starts with \27Lua signature.
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local f = function() end
+        local s = string.dump(f)
+        print(string.byte(s, 1), string.byte(s, 2), string.byte(s, 3), string.byte(s, 4))
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // \27 = 27, L = 76, u = 117, a = 97
+    assert_eq!(stdout, "27\t76\t117\t97\n");
+}
+
+#[test]
+fn loadstring_binary_chunk() {
+    // Load a binary chunk produced by string.dump.
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local code = "return 1 + 2"
+        local f1 = assert(loadstring(code))
+        local dumped = string.dump(f1)
+        local f2 = assert(loadstring(dumped))
+        print(f2())
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "3\n");
+}
+
+#[test]
+fn binary_loadfile() {
+    // Write a dump to a temp file, then loadfile it.
+    let dir = std::env::temp_dir();
+    let path = dir.join("rilua_test_binary.luac");
+    let path_str = path.to_str().expect("temp path should be valid utf-8");
+
+    // First: produce binary with rilua
+    let (_stdout, stderr, code) = run_rilua(&format!(
+        r#"
+        local f = assert(loadstring("return 'from binary'"))
+        local s = string.dump(f)
+        local fh = assert(io.open("{path_str}", "wb"))
+        fh:write(s)
+        fh:close()
+        "#
+    ));
+    assert_eq!(code, 0, "dump stderr: {stderr}");
+
+    // Then: load the binary file
+    let (stdout, stderr, code) = run_rilua(&format!(
+        r#"
+        local f = assert(loadfile("{path_str}"))
+        print(f())
+        "#
+    ));
+    assert_eq!(code, 0, "load stderr: {stderr}");
+    assert_eq!(stdout, "from binary\n");
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// riluac -o/-s tests (Phase 9b)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn riluac_output_file() {
+    let dir = std::env::temp_dir();
+    let lua_path = dir.join("rilua_riluac_test.lua");
+    let luac_path = dir.join("rilua_riluac_test.luac");
+
+    std::fs::write(&lua_path, "print('riluac output')").expect("write test file");
+
+    let lua_str = lua_path.to_str().expect("valid path");
+    let luac_str = luac_path.to_str().expect("valid path");
+
+    let (_, stderr, code) = run_riluac(&["-o", luac_str, lua_str]);
+    assert_eq!(code, 0, "riluac -o failed: {stderr}");
+    assert!(luac_path.exists(), "output file should exist");
+
+    // Verify binary starts with \x1bLua.
+    let bytes = std::fs::read(&luac_path).expect("read output");
+    assert!(bytes.starts_with(b"\x1bLua"), "should be binary chunk");
+
+    // Run the binary with rilua.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .arg(luac_str)
+        .output()
+        .expect("failed to run rilua");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "riluac output\n");
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&lua_path);
+    let _ = std::fs::remove_file(&luac_path);
+}
+
+#[test]
+fn riluac_strip() {
+    let dir = std::env::temp_dir();
+    let lua_path = dir.join("rilua_strip_test.lua");
+    let full_path = dir.join("rilua_strip_full.luac");
+    let stripped_path = dir.join("rilua_strip_stripped.luac");
+
+    std::fs::write(&lua_path, "local x = 1; print(x)").expect("write test file");
+
+    let lua_str = lua_path.to_str().expect("valid path");
+    let full_str = full_path.to_str().expect("valid path");
+    let stripped_str = stripped_path.to_str().expect("valid path");
+
+    // Compile full.
+    let (_, stderr, code) = run_riluac(&["-o", full_str, lua_str]);
+    assert_eq!(code, 0, "riluac full failed: {stderr}");
+
+    // Compile stripped.
+    let (_, stderr, code) = run_riluac(&["-s", "-o", stripped_str, lua_str]);
+    assert_eq!(code, 0, "riluac -s failed: {stderr}");
+
+    let full_bytes = std::fs::read(&full_path).expect("read full");
+    let stripped_bytes = std::fs::read(&stripped_path).expect("read stripped");
+
+    // Stripped should be smaller.
+    assert!(
+        stripped_bytes.len() < full_bytes.len(),
+        "stripped ({}) should be smaller than full ({})",
+        stripped_bytes.len(),
+        full_bytes.len()
+    );
+
+    // Stripped binary should still be loadable and produce correct output.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .arg(stripped_str)
+        .output()
+        .expect("failed to run rilua");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "1\n");
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&lua_path);
+    let _ = std::fs::remove_file(&full_path);
+    let _ = std::fs::remove_file(&stripped_path);
+}
+
+#[test]
+fn riluac_default_output() {
+    // Without -o, riluac writes to "luac.out" in the CWD.
+    let dir = std::env::temp_dir().join("rilua_riluac_default_test");
+    let _ = std::fs::create_dir_all(&dir);
+    let lua_path = dir.join("test.lua");
+    let default_out = dir.join("luac.out");
+
+    std::fs::write(&lua_path, "print('default')").expect("write test file");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_riluac"))
+        .arg(lua_path.to_str().expect("valid path"))
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run riluac");
+    assert_eq!(output.status.code().unwrap_or(-1), 0);
+    assert!(default_out.exists(), "luac.out should exist");
+
+    // Verify it's loadable.
+    let run_output = std::process::Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .arg(default_out.to_str().expect("valid path"))
+        .output()
+        .expect("failed to run rilua");
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    assert_eq!(stdout, "default\n");
+
+    // Cleanup.
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn riluac_binary_redump() {
+    // riluac should be able to re-dump a binary chunk (like PUC-Rio).
+    let dir = std::env::temp_dir();
+    let lua_path = dir.join("rilua_redump_src.lua");
+    let first_path = dir.join("rilua_redump_first.luac");
+    let second_path = dir.join("rilua_redump_second.luac");
+
+    std::fs::write(&lua_path, "print('redump')").expect("write test file");
+
+    let lua_str = lua_path.to_str().expect("valid path");
+    let first_str = first_path.to_str().expect("valid path");
+    let second_str = second_path.to_str().expect("valid path");
+
+    // First compile.
+    let (_, stderr, code) = run_riluac(&["-o", first_str, lua_str]);
+    assert_eq!(code, 0, "first compile failed: {stderr}");
+
+    // Re-dump the binary.
+    let (_, stderr, code) = run_riluac(&["-o", second_str, first_str]);
+    assert_eq!(code, 0, "redump failed: {stderr}");
+
+    // Both should be loadable and produce the same output.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .arg(second_str)
+        .output()
+        .expect("failed to run rilua");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "redump\n");
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&lua_path);
+    let _ = std::fs::remove_file(&first_path);
+    let _ = std::fs::remove_file(&second_path);
+}
+
+// ---------------------------------------------------------------------------
+// Error message formatting tests (Phase 9c)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn error_msg_call_local() {
+    // Define local inside the pcall callback so it stays as a local, not an upvalue.
+    let (stdout, _, code) =
+        run_rilua("local ok, msg = pcall(function() local x = 1; x() end); print(msg)");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("attempt to call local 'x' (a number value)"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_call_global() {
+    let (stdout, _, code) = run_rilua("local ok, msg = pcall(function() foo() end); print(msg)");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("attempt to call global 'foo' (a nil value)"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_arith_local() {
+    let (stdout, _, code) = run_rilua(
+        "local ok, msg = pcall(function() local x = 'hello'; return x + 1 end); print(msg)",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("attempt to perform arithmetic on local 'x' (a string value)"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_index_local() {
+    let (stdout, _, code) =
+        run_rilua("local ok, msg = pcall(function() local x = nil; return x.y end); print(msg)");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("attempt to index local 'x' (a nil value)"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_concat_local() {
+    let (stdout, _, code) = run_rilua(
+        "local ok, msg = pcall(function() local x = {}; return 'a' .. x end); print(msg)",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("attempt to concatenate local 'x' (a table value)"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_len_local() {
+    let (stdout, _, code) =
+        run_rilua("local ok, msg = pcall(function() local x = true; return #x end); print(msg)");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("attempt to get length of local 'x' (a boolean value)"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_call_upvalue() {
+    let (stdout, _, code) = run_rilua(
+        "local x = 1; local ok, msg = pcall(function() return (function() x() end)() end); print(msg)",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("attempt to call upvalue 'x' (a number value)"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_call_field() {
+    let (stdout, _, code) =
+        run_rilua("local t = {x = 1}; local ok, msg = pcall(function() t.x() end); print(msg)");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("attempt to call field 'x' (a number value)"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_compare_types() {
+    let (stdout, _, code) =
+        run_rilua("local ok, msg = pcall(function() return {} < 1 end); print(msg)");
+    assert_eq!(code, 0);
+    assert!(stdout.contains("attempt to compare"), "got: {stdout}");
+}
+
+#[test]
+fn traceback_in_stderr() {
+    let (_, stderr, code) = run_rilua("error('boom')");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("stack traceback:"), "got: {stderr}");
+    assert!(stderr.contains("[C]: in function 'error'"), "got: {stderr}");
+    assert!(stderr.contains("in main chunk"), "got: {stderr}");
+}
+
+#[test]
+fn traceback_nested_functions() {
+    let (_, stderr, code) = run_rilua(
+        "function a() error('nested') end; function b() a() end; function c() b() end; c()",
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("stack traceback:"), "got: {stderr}");
+    assert!(stderr.contains("in function 'a'"), "got: {stderr}");
+    assert!(stderr.contains("in function 'b'"), "got: {stderr}");
+    assert!(stderr.contains("in function 'c'"), "got: {stderr}");
+}
+
+#[test]
+fn traceback_type_error() {
+    let (_, stderr, code) = run_rilua("function foo() local x = nil; return x + 1 end; foo()");
+    assert_ne!(code, 0);
+    assert!(stderr.contains("stack traceback:"), "got: {stderr}");
+    assert!(
+        stderr.contains("attempt to perform arithmetic on local 'x' (a nil value)"),
+        "got: {stderr}"
+    );
+    assert!(stderr.contains("in function 'foo'"), "got: {stderr}");
+}

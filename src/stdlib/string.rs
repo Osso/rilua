@@ -1013,7 +1013,7 @@ impl<'a> MatchState<'a> {
                                 b'f' => {
                                     return self.match_frontier(src_pos, pat_pos);
                                 }
-                                c if c.is_ascii_digit() && c != b'0' => {
+                                c if c.is_ascii_digit() => {
                                     return self.match_backref(src_pos, pat_pos);
                                 }
                                 _ => {}
@@ -1105,25 +1105,30 @@ impl<'a> MatchState<'a> {
     }
 
     /// Match a character against a bracket class [set].
+    /// PUC-Rio: matchbracketclass(c, p, ec) where p points to '[' and ec to ']'.
     fn matchbracketclass(&self, ch: u8, pat_pos: usize) -> (bool, usize) {
+        // Find the closing ']' first (class_end handles ] after [^ correctly).
+        let class_end_pos = self.class_end(pat_pos);
+        // ec is the position of ']', class_end returns one past it.
+        let ec = class_end_pos - 1;
+
         let mut pos = pat_pos + 1; // Skip '['.
-        let complement = pos < self.pat.len() && self.pat[pos] == b'^';
+        let complement = pos < ec && self.pat[pos] == b'^';
         if complement {
             pos += 1;
         }
 
+        // PUC-Rio: while (++p < ec) — pre-increment processes chars between
+        // (the opening `[`/`^`) and `ec` (the closing `]`).
         let mut matched = false;
-        while pos < self.pat.len() && self.pat[pos] != b']' {
-            if self.pat[pos] == b'%' && pos + 1 < self.pat.len() {
+        while pos < ec {
+            if self.pat[pos] == b'%' && pos + 1 < ec {
                 pos += 1;
                 if matchclass(ch, self.pat[pos]) {
                     matched = true;
                 }
                 pos += 1;
-            } else if pos + 2 < self.pat.len()
-                && self.pat[pos + 1] == b'-'
-                && self.pat[pos + 2] != b']'
-            {
+            } else if pos + 2 < ec && self.pat[pos + 1] == b'-' {
                 // Range a-z.
                 if ch >= self.pat[pos] && ch <= self.pat[pos + 2] {
                     matched = true;
@@ -1137,12 +1142,7 @@ impl<'a> MatchState<'a> {
             }
         }
 
-        // Skip past ']'.
-        if pos < self.pat.len() {
-            pos += 1;
-        }
-
-        (if complement { !matched } else { matched }, pos)
+        (if complement { !matched } else { matched }, class_end_pos)
     }
 
     /// Returns the end position of the pattern class and what quantifier follows.
@@ -1180,18 +1180,21 @@ impl<'a> MatchState<'a> {
                 if pos < self.pat.len() && self.pat[pos] == b'^' {
                     pos += 1;
                 }
-                // Scan to matching ']'.
+                // PUC-Rio uses do { ... } while (*p != ']') which processes
+                // at least one character before checking for ']'. This handles
+                // `]` immediately after `[` or `[^` as a literal.
                 loop {
                     if pos >= self.pat.len() {
                         return pos;
-                    }
-                    if self.pat[pos] == b']' {
-                        return pos + 1;
                     }
                     if self.pat[pos] == b'%' && pos + 1 < self.pat.len() {
                         pos += 1; // Skip escaped char in bracket.
                     }
                     pos += 1;
+                    // Check for closing ']' AFTER processing the character.
+                    if pos < self.pat.len() && self.pat[pos] == b']' {
+                        return pos + 1;
+                    }
                 }
             }
             _ => pat_pos + 1,
@@ -1301,13 +1304,15 @@ impl<'a> MatchState<'a> {
         let mut count = 1i32;
         let mut pos = src_pos + 1;
         while pos < self.src.len() {
-            if self.src[pos] == open {
-                count += 1;
-            } else if self.src[pos] == close {
+            // PUC-Rio checks close first, so when open==close,
+            // each occurrence decrements (matching nearest pair).
+            if self.src[pos] == close {
                 count -= 1;
                 if count == 0 {
                     return self.match_(pos + 1, pat_pos + 4);
                 }
+            } else if self.src[pos] == open {
+                count += 1;
             }
             pos += 1;
         }
@@ -1347,10 +1352,11 @@ impl<'a> MatchState<'a> {
 
     /// Match `%N` back-reference (1-9).
     fn match_backref(&mut self, src_pos: usize, pat_pos: usize) -> LuaResult<Option<usize>> {
+        // PUC-Rio's check_capture: l = digit - '1'; error if l < 0 || l >= level || unfinished
         let n = (self.pat[pat_pos + 1] - b'0') as usize;
-        if n > self.captures.len() || n == 0 {
+        if n == 0 || n > self.captures.len() {
             return Err(LuaError::Runtime(RuntimeError {
-                message: format!("invalid back reference %{n}"),
+                message: "invalid capture index".into(),
                 level: 0,
                 traceback: vec![],
             }));
@@ -1358,7 +1364,7 @@ impl<'a> MatchState<'a> {
         let cap = self.captures[n - 1];
         let CaptureLen::Finished(len) = cap.len else {
             return Err(LuaError::Runtime(RuntimeError {
-                message: format!("attempt to reference unfinished capture %{n}"),
+                message: "invalid capture index".into(),
                 level: 0,
                 traceback: vec![],
             }));
@@ -1396,6 +1402,7 @@ fn matchclass(ch: u8, class: u8) -> bool {
         b'u' => ch.is_ascii_uppercase(),
         b'w' => ch.is_ascii_alphanumeric(),
         b'x' => ch.is_ascii_hexdigit(),
+        b'z' => ch == 0,         // PUC-Rio: case 'z': res = (c == 0)
         _ => return ch == class, // Literal match for non-class escapes.
     };
     // Uppercase class means complement.
@@ -1753,18 +1760,39 @@ fn get_gsub_replacement(
                         if n == 0 {
                             // %0 = whole match.
                             result.extend_from_slice(&src[match_start..match_end]);
-                        } else if n <= ms.captures.len() {
-                            let cap = ms.captures[n - 1];
-                            match cap.len {
-                                CaptureLen::Finished(len) => {
-                                    result.extend_from_slice(&src[cap.start..cap.start + len]);
+                        } else {
+                            // PUC-Rio push_onecapture: index = n-1
+                            let cap_idx = n - 1;
+                            if cap_idx >= ms.captures.len() {
+                                // i >= level: if i == 0 (cap_idx == 0 && no captures),
+                                // return whole match; otherwise error.
+                                if cap_idx == 0 && ms.captures.is_empty() {
+                                    result.extend_from_slice(&src[match_start..match_end]);
+                                } else {
+                                    return Err(LuaError::Runtime(RuntimeError {
+                                        message: format!("invalid capture index %{n}"),
+                                        level: 0,
+                                        traceback: vec![],
+                                    }));
                                 }
-                                CaptureLen::Position => {
-                                    // Position captures are 1-based integers.
-                                    let pos_str = format!("{}", cap.start + 1);
-                                    result.extend_from_slice(pos_str.as_bytes());
+                            } else {
+                                let cap = ms.captures[cap_idx];
+                                match cap.len {
+                                    CaptureLen::Finished(len) => {
+                                        result.extend_from_slice(&src[cap.start..cap.start + len]);
+                                    }
+                                    CaptureLen::Position => {
+                                        let pos_str = format!("{}", cap.start + 1);
+                                        result.extend_from_slice(pos_str.as_bytes());
+                                    }
+                                    CaptureLen::Unfinished => {
+                                        return Err(LuaError::Runtime(RuntimeError {
+                                            message: "unfinished capture".into(),
+                                            level: 0,
+                                            traceback: vec![],
+                                        }));
+                                    }
                                 }
-                                CaptureLen::Unfinished => {}
                             }
                         }
                         i += 2;
@@ -1780,19 +1808,16 @@ fn get_gsub_replacement(
             }
             Ok(result)
         }
-        Val::Table(table_ref) => {
+        Val::Table(_) => {
             // Table replacement: look up first capture (or whole match) as key.
+            // Uses gettable for __index metamethod support.
             let key = if ms.captures.is_empty() {
                 let r = state.gc.intern_string(&src[match_start..match_end]);
                 Val::Str(r)
             } else {
-                get_capture_val(state, &ms.captures[0], src)
+                get_capture_val(state, &ms.captures[0], src)?
             };
-            let val = state
-                .gc
-                .tables
-                .get(table_ref)
-                .map_or(Val::Nil, |t| t.get(key, &state.gc.string_arena));
+            let val = state.gettable(repl, key)?;
             val_to_replacement(state, val, src, match_start, match_end)
         }
         Val::Function(_) => {
@@ -1808,7 +1833,7 @@ fn get_gsub_replacement(
             } else {
                 let mut n = 0;
                 for cap in &ms.captures {
-                    let val = get_capture_val(state, cap, src);
+                    let val = get_capture_val(state, cap, src)?;
                     state.stack_set(call_base + 1 + n, val);
                     n += 1;
                 }
@@ -1831,18 +1856,22 @@ fn get_gsub_replacement(
 }
 
 /// Convert a capture to a Val.
-fn get_capture_val(state: &mut LuaState, cap: &Capture, src: &[u8]) -> Val {
+fn get_capture_val(state: &mut LuaState, cap: &Capture, src: &[u8]) -> LuaResult<Val> {
     match cap.len {
         CaptureLen::Position =>
         {
             #[allow(clippy::cast_precision_loss)]
-            Val::Num((cap.start + 1) as f64)
+            Ok(Val::Num((cap.start + 1) as f64))
         }
         CaptureLen::Finished(len) => {
             let r = state.gc.intern_string(&src[cap.start..cap.start + len]);
-            Val::Str(r)
+            Ok(Val::Str(r))
         }
-        CaptureLen::Unfinished => Val::Nil,
+        CaptureLen::Unfinished => Err(LuaError::Runtime(RuntimeError {
+            message: "unfinished capture".into(),
+            level: 0,
+            traceback: vec![],
+        })),
     }
 }
 
@@ -1878,9 +1907,39 @@ fn val_to_replacement(
 /// Stub: not yet implemented (requires bytecode serialization).
 pub fn str_dump(state: &mut LuaState) -> LuaResult<u32> {
     check_args("string.dump", state, 1)?;
-    Err(LuaError::Runtime(RuntimeError {
-        message: "string.dump is not yet implemented".into(),
-        level: 0,
-        traceback: vec![],
-    }))
+
+    let func_val = arg(state, 0);
+    let closure_ref = match func_val {
+        Val::Function(r) => r,
+        _ => return Err(bad_argument("string.dump", 1, "function expected")),
+    };
+
+    // Get the Proto from the closure (must be a Lua closure).
+    let proto = {
+        let Some(closure) = state.gc.closures.get(closure_ref) else {
+            return Err(LuaError::Runtime(RuntimeError {
+                message: "unable to dump given function".into(),
+                level: 0,
+                traceback: vec![],
+            }));
+        };
+        match closure {
+            crate::vm::closure::Closure::Lua(lua_cl) => std::rc::Rc::clone(&lua_cl.proto),
+            crate::vm::closure::Closure::Rust(_) => {
+                return Err(LuaError::Runtime(RuntimeError {
+                    message: "unable to dump given function".into(),
+                    level: 0,
+                    traceback: vec![],
+                }));
+            }
+        }
+    };
+
+    // Dump with the string arena (patched Proto from a live closure).
+    let bytes = crate::vm::dump::dump(&proto, Some(&state.gc.string_arena), false);
+
+    // Intern the result bytes as a Lua string.
+    let str_ref = state.gc.intern_string(&bytes);
+    state.push(Val::Str(str_ref));
+    Ok(1)
 }

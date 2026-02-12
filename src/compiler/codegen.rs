@@ -16,7 +16,7 @@ use crate::vm::instructions::{
     BITRK, Instruction, LFIELDS_PER_FLUSH, LUAI_MAXUPVALUES, LUAI_MAXVARS, MAXARG_BX, MAXINDEXRK,
     MAXSTACK, NO_JUMP, NO_REG, OpCode, is_k,
 };
-use crate::vm::proto::{LocalVar, Proto};
+use crate::vm::proto::{LocalVar, Proto, VARARG_HASARG, VARARG_ISVARARG, VARARG_NEEDSARG};
 use crate::vm::value::Val;
 
 // ---------------------------------------------------------------------------
@@ -120,6 +120,12 @@ impl ExprContext {
     /// Returns true if the expression has pending jump lists.
     fn has_jumps(&self) -> bool {
         self.t != self.f
+    }
+
+    /// Returns true if the expression is a pure numeric constant with no pending
+    /// jumps. Matches PUC-Rio's `isnumeral` macro in `lcode.c`.
+    fn is_numeral(&self) -> bool {
+        self.kind == ExprKind::KNum && self.t == NO_JUMP && self.f == NO_JUMP
     }
 }
 
@@ -1011,7 +1017,7 @@ impl Compiler {
 
     /// Converts expression to RK format (register or constant).
     pub(crate) fn exp2rk(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<u32> {
-        self.discharge_vars(e, line);
+        self.exp2val(e, line);
         match e.kind {
             ExprKind::True | ExprKind::False | ExprKind::Nil => {
                 // Small enough to encode: use constant
@@ -1348,18 +1354,13 @@ impl Compiler {
             super::ast::BinOp::Concat => {
                 self.exp2nextreg(e, line)?;
             }
-            super::ast::BinOp::Add
-            | super::ast::BinOp::Sub
-            | super::ast::BinOp::Mul
-            | super::ast::BinOp::Div
-            | super::ast::BinOp::Mod
-            | super::ast::BinOp::Pow => {
-                // Try to use RK form
-                self.exp2rk(e, line)?;
-            }
             _ => {
-                // Comparisons: also try RK form
-                self.exp2rk(e, line)?;
+                // Arithmetic and comparisons: use RK form.
+                // Skip for pure numerals (no jumps) -- they're already optimal.
+                // Matches PUC-Rio's `if (!isnumeral(v)) luaK_exp2RK(fs, v)`.
+                if !e.is_numeral() {
+                    self.exp2rk(e, line)?;
+                }
             }
         }
         Ok(())
@@ -1651,6 +1652,24 @@ fn compile_stat(compiler: &mut Compiler, stat: &super::ast::Stat) -> LuaResult<(
         Stat::Return { values, .. } => compile_return(compiler, values, line),
 
         Stat::Break { .. } => {
+            // PUC-Rio's breakstat: walk up block stack to the breakable
+            // loop. If any block along the way has upvalues, emit CLOSE
+            // to close them before jumping out of the loop.
+            let fs = compiler.fs();
+            let mut needs_close = false;
+            let mut close_level = 0u32;
+            for block in fs.blocks.iter().rev() {
+                if block.has_upval {
+                    needs_close = true;
+                }
+                if block.is_breakable {
+                    close_level = u32::from(block.num_active_vars);
+                    break;
+                }
+            }
+            if needs_close {
+                compiler.emit_abc(OpCode::Close, close_level, 0, 0, line);
+            }
             let jmp = compiler.emit_jump(line) as i32;
             compiler.add_break_jump(jmp)?;
             Ok(())
@@ -2174,17 +2193,26 @@ fn compile_funcbody(
         compiler.fs_mut().proto.num_params = num_params;
     }
     if body.has_varargs {
-        compiler.fs_mut().proto.is_vararg = 7; // HASARG | ISVARARG | NEEDSARG
+        // LUA_COMPAT_VARARG: add implicit 'arg' local and set all flags.
+        // NEEDSARG is cleared later if the body actually uses '...'.
+        compiler.fs_mut().proto.is_vararg = VARARG_HASARG | VARARG_ISVARARG | VARARG_NEEDSARG;
+        compiler.new_local("arg")?;
+        compiler.activate_locals(1);
     }
 
-    // Reserve registers for parameters
-    let nparams = u32::from(compiler.fs().proto.num_params);
-    compiler.reserve_regs(nparams)?;
+    // Reserve registers for parameters (+ 'arg' if vararg).
+    // PUC-Rio: numparams excludes the 'arg' parameter.
+    let nactvar = u32::from(compiler.fs().num_active_vars);
+    compiler.reserve_regs(nactvar)?;
 
     // Compile body
     compile_block(compiler, &body.body)?;
 
-    compiler.fs_mut().proto.last_line_defined = compiler.current_line;
+    // PUC-Rio: f->lastlinedefined = ls->linenumber (line of `end` keyword)
+    compiler.fs_mut().proto.last_line_defined = body.end_line;
+    // Set current_line to `end` so leave_function's implicit RETURN maps to it.
+    // PUC-Rio: close_func uses fs->ls->lastline for luaK_ret.
+    compiler.current_line = body.end_line;
 
     // Save child's upvalue descriptors before leave_function discards them.
     // PUC-Rio accesses func->upvalues in pushclosure while the child
@@ -2239,6 +2267,8 @@ fn compile_expr(compiler: &mut Compiler, expr: &super::ast::Expr) -> LuaResult<E
         }
 
         Expr::VarArg(_) => {
+            // LUA_COMPAT_VARARG: using '...' means 'arg' table is not needed.
+            compiler.fs_mut().proto.is_vararg &= !VARARG_NEEDSARG;
             let pc = compiler.emit_abc(OpCode::VarArg, 0, 1, 0, line);
             Ok(ExprContext::new(ExprKind::VarArg, pc as i32))
         }
@@ -2361,29 +2391,51 @@ fn compile_table_ctor(
     let mut nh: u32 = 0; // hash fields count
     let mut tostore: u32 = 0; // pending array fields
 
-    for field in fields {
+    // Find the index of the last ValueField for lastlistfield handling.
+    // PUC-Rio's lastlistfield: if the last list item is a multi-return
+    // expression (call or vararg), expand it into all return values.
+    let last_value_idx = fields
+        .iter()
+        .rposition(|f| matches!(f, TableField::ValueField { .. }));
+
+    for (i, field) in fields.iter().enumerate() {
         match field {
             TableField::ValueField { value, .. } => {
                 // Array/list field
                 na += 1;
                 tostore += 1;
-                let mut val_e = compile_expr(compiler, value)?;
 
-                compiler.exp2nextreg(&mut val_e, line)?;
-                if tostore >= LFIELDS_PER_FLUSH {
-                    compiler.code_setlist(table_reg, na, tostore, line);
+                let is_last = last_value_idx == Some(i);
+                if is_last && is_multret_expr(value) {
+                    // Last value field with multi-return: expand all results.
+                    // Matches PUC-Rio's lastlistfield() in lparser.c.
+                    let mut val_e = compile_expr(compiler, value)?;
+                    compiler.set_multret(&mut val_e);
+                    compiler.code_setlist(table_reg, na, 0, line); // B=0 = MULTRET
+                    na -= 1; // don't count last (unknown count)
                     tostore = 0;
+                } else {
+                    let mut val_e = compile_expr(compiler, value)?;
+                    compiler.exp2nextreg(&mut val_e, line)?;
+                    if tostore >= LFIELDS_PER_FLUSH {
+                        compiler.code_setlist(table_reg, na, tostore, line);
+                        tostore = 0;
+                    }
                 }
             }
             TableField::NameField { name, value, .. } => {
                 // Hash field: name = value
+                // PUC-Rio recfield(): uses exp2RK for the key to handle
+                // constant pool indices > MAXINDEXRK (falls back to register).
                 nh += 1;
                 let k = compiler.string_constant(name.as_bytes())?;
-                let key_rk = k | BITRK;
+                let mut key_e = ExprContext::new(ExprKind::K, k as i32);
+                let key_rk = compiler.exp2rk(&mut key_e, line)?;
                 let mut val_e = compile_expr(compiler, value)?;
                 let val_rk = compiler.exp2rk(&mut val_e, line)?;
                 compiler.emit_abc(OpCode::SetTable, table_reg, key_rk, val_rk, line);
                 compiler.free_expr(&val_e);
+                compiler.free_expr(&key_e);
             }
             TableField::IndexField { key, value, .. } => {
                 // Hash field: [key] = value
@@ -2412,6 +2464,17 @@ fn compile_table_ctor(
     compiler.set_instruction(pc, instr);
 
     Ok(t)
+}
+
+/// Returns true if an expression can produce multiple return values
+/// (function call or vararg). Matches PUC-Rio's `hasmultret` macro.
+fn is_multret_expr(expr: &super::ast::Expr) -> bool {
+    matches!(
+        expr,
+        super::ast::Expr::Call { .. }
+            | super::ast::Expr::MethodCall { .. }
+            | super::ast::Expr::VarArg(..)
+    )
 }
 
 /// Converts an integer to PUC-Rio's "float byte" format (eeeeexxx).

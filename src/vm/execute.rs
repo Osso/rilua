@@ -15,10 +15,11 @@ use crate::error::{LuaError, LuaResult, RuntimeError};
 
 use super::callinfo::{CallInfo, LUA_MULTRET};
 use super::closure::{Closure, LuaClosure, Upvalue};
+use super::debug_info;
 use super::gc::arena::GcRef;
 use super::instructions::{Instruction, LFIELDS_PER_FLUSH, OpCode, index_k, is_k};
 use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
-use super::proto::{Proto, VARARG_ISVARARG};
+use super::proto::{Proto, VARARG_ISVARARG, VARARG_NEEDSARG};
 use super::state::{Gc, LUA_MINSTACK, LuaState, MAXCALLS, MAXCCALLS};
 use super::table::Table;
 use super::value::{Userdata, Val};
@@ -129,69 +130,96 @@ fn runtime_error(proto: &Proto, pc: usize, message: String) -> LuaError {
     })
 }
 
-/// Type error for arithmetic.
-fn arith_error(proto: &Proto, pc: usize, val: Val) -> LuaError {
-    runtime_error(
+/// Type error with variable name resolution.
+///
+/// Matches PUC-Rio's `luaG_typeerror`. Uses `getobjname` to find the
+/// variable name and kind (local/global/field/upvalue/method) for the
+/// value at register `reg` (relative to base, so the stack position
+/// is `base + reg`). Produces messages like:
+/// - `"attempt to call local 'x' (a number value)"`
+/// - `"attempt to index a nil value"`
+fn type_error(
+    state: &LuaState,
+    proto: &Proto,
+    pc: usize,
+    base: usize,
+    reg: usize,
+    opname: &str,
+) -> LuaError {
+    let val = state.stack_get(base + reg);
+    let type_name = val.type_name();
+    // pc is already incremented past the current instruction, so use pc-1.
+    let current_pc = pc.saturating_sub(1);
+    let name_info = debug_info::getobjname(
         proto,
-        pc,
-        format!(
-            "attempt to perform arithmetic on a {} value",
-            val.type_name()
-        ),
-    )
+        current_pc,
+        #[allow(clippy::cast_possible_truncation)]
+        (reg as u32),
+        &state.gc.string_arena,
+    );
+    let message = if let Some((kind, name)) = name_info {
+        format!("attempt to {opname} {kind} '{name}' (a {type_name} value)")
+    } else {
+        format!("attempt to {opname} a {type_name} value")
+    };
+    runtime_error(proto, pc, message)
 }
 
-/// Type error for comparison.
+/// Arithmetic type error with RK-aware operand resolution.
+///
+/// Matches PUC-Rio's `luaG_aritherror`: identifies which operand
+/// caused the error (first non-numeric), then calls `type_error`
+/// if the operand is in a register (not a constant).
+#[allow(clippy::too_many_arguments)]
+fn arith_error(
+    state: &LuaState,
+    proto: &Proto,
+    pc: usize,
+    base: usize,
+    lhs: Val,
+    rhs: Val,
+    b_rk: u32,
+    c_rk: u32,
+) -> LuaError {
+    // PUC-Rio: if first can't convert, error on first operand.
+    let rk = if coerce_to_number(lhs, &state.gc).is_none() {
+        b_rk
+    } else {
+        c_rk
+    };
+    // If the problematic operand is a constant, we can't resolve a variable
+    // name. Otherwise use type_error for register-based name resolution.
+    if is_k(rk) {
+        let val = if coerce_to_number(lhs, &state.gc).is_none() {
+            lhs
+        } else {
+            rhs
+        };
+        runtime_error(
+            proto,
+            pc,
+            format!(
+                "attempt to perform arithmetic on a {} value",
+                val.type_name()
+            ),
+        )
+    } else {
+        type_error(state, proto, pc, base, rk as usize, "perform arithmetic on")
+    }
+}
+
+/// Type error for comparison (no variable names — PUC-Rio doesn't use them).
 fn compare_error(proto: &Proto, pc: usize, left: Val, right: Val) -> LuaError {
-    runtime_error(
-        proto,
-        pc,
+    let message = if left.type_name() == right.type_name() {
+        format!("attempt to compare two {} values", left.type_name())
+    } else {
         format!(
-            "attempt to compare two {} values",
-            if left.type_name() == right.type_name() {
-                left.type_name().to_string()
-            } else {
-                format!("{} with {}", left.type_name(), right.type_name())
-            }
-        ),
-    )
-}
-
-/// Type error for concatenation.
-fn concat_error(proto: &Proto, pc: usize, val: Val) -> LuaError {
-    runtime_error(
-        proto,
-        pc,
-        format!("attempt to concatenate a {} value", val.type_name()),
-    )
-}
-
-/// Type error for length.
-fn len_error(proto: &Proto, pc: usize, val: Val) -> LuaError {
-    runtime_error(
-        proto,
-        pc,
-        format!("attempt to get length of a {} value", val.type_name()),
-    )
-}
-
-/// Type error for indexing.
-fn index_error(proto: &Proto, pc: usize, val: Val) -> LuaError {
-    runtime_error(
-        proto,
-        pc,
-        format!("attempt to index a {} value", val.type_name()),
-    )
-}
-
-/// Type error for calling.
-#[allow(dead_code)] // Used in Phase 4b (__call metamethod)
-fn call_error(proto: &Proto, pc: usize, val: Val) -> LuaError {
-    runtime_error(
-        proto,
-        pc,
-        format!("attempt to call a {} value", val.type_name()),
-    )
+            "attempt to compare {} with {}",
+            left.type_name(),
+            right.type_name()
+        )
+    };
+    runtime_error(proto, pc, message)
 }
 
 /// luaO_fb2int: convert a "floating point byte" to an integer.
@@ -280,11 +308,34 @@ impl LuaState {
                         }
                     }
                     _ => {
-                        return Err(LuaError::Runtime(RuntimeError {
-                            message: format!("attempt to call a {} value", func_val.type_name()),
-                            level: 0,
-                            traceback: vec![],
-                        }));
+                        // Try to resolve the variable name from the caller frame.
+                        let ci = &self.call_stack[self.ci];
+                        let caller_func = self.stack_get(ci.func);
+                        let err = if let Val::Function(r) = caller_func {
+                            if let Some(Closure::Lua(lcl)) = self.gc.closures.get(r) {
+                                let reg = func_idx - ci.base;
+                                type_error(self, &lcl.proto, ci.saved_pc, ci.base, reg, "call")
+                            } else {
+                                LuaError::Runtime(RuntimeError {
+                                    message: format!(
+                                        "attempt to call a {} value",
+                                        func_val.type_name()
+                                    ),
+                                    level: 0,
+                                    traceback: vec![],
+                                })
+                            }
+                        } else {
+                            LuaError::Runtime(RuntimeError {
+                                message: format!(
+                                    "attempt to call a {} value",
+                                    func_val.type_name()
+                                ),
+                                level: 0,
+                                traceback: vec![],
+                            })
+                        };
+                        return Err(err);
                     }
                 }
             }
@@ -424,30 +475,70 @@ impl LuaState {
 
     /// Adjusts the stack for a vararg function call.
     ///
-    /// Moves fixed parameters to new positions above the vararg area.
-    /// Returns the new base (first local slot after fixed params).
+    /// Matches PUC-Rio's `adjust_varargs` in `ldo.c`:
+    /// 1. Pads actual args with nil if fewer than num_params
+    /// 2. Copies fixed params from their original positions to above the vararg area
+    /// 3. Nils out the original fixed param positions
+    /// Returns the new base (pointing to the first fixed param copy).
     fn adjust_varargs(&mut self, proto: &Proto, nargs: usize, func_idx: usize) -> usize {
         let num_params = proto.num_params as usize;
 
-        // Move fixed params to new positions.
-        let new_base = self.top + num_params;
-
-        // Ensure enough stack space.
-        self.ensure_stack(new_base + 1);
-
-        // Copy fixed params from original positions to above varargs.
-        for i in 0..num_params {
-            let src_idx = func_idx + 1 + i;
-            let val = if i < nargs {
-                self.stack_get(src_idx)
-            } else {
-                Val::Nil
-            };
-            self.stack_set(self.top + i, val);
+        // Pad with nil if actual < num_params.
+        let mut actual = nargs;
+        while actual < num_params {
+            self.push(Val::Nil);
+            actual += 1;
         }
 
-        // Set nil in the vararg area (original param positions become varargs).
-        self.top = new_base;
+        // LUA_COMPAT_VARARG: create 'arg' table if NEEDSARG is set.
+        // The table contains the extra (vararg) arguments with an 'n' field.
+        let arg_table = if proto.is_vararg & VARARG_NEEDSARG != 0 {
+            let nvar = actual - num_params; // Number of extra arguments.
+            let fixed = self.top - actual;
+            let mut tbl = Table::new();
+            for i in 0..nvar {
+                let val = self.stack_get(fixed + num_params + i);
+                #[allow(clippy::cast_precision_loss)]
+                let _ = tbl.raw_set(Val::Num((i + 1) as f64), val, &self.gc.string_arena);
+            }
+            let n_key = self.gc.intern_string(b"n");
+            #[allow(clippy::cast_precision_loss)]
+            let _ = tbl.raw_set(
+                Val::Str(n_key),
+                Val::Num(nvar as f64),
+                &self.gc.string_arena,
+            );
+            Some(self.gc.alloc_table(tbl))
+        } else {
+            None
+        };
+
+        // `fixed` = first original argument position.
+        let fixed = self.top - actual;
+        // `base` = where the fixed param copies will start (above all args).
+        let new_base = self.top;
+
+        // Ensure enough stack space for the copies + optional 'arg' table.
+        self.ensure_stack(new_base + num_params + 1);
+
+        // Copy fixed params to above varargs, nil out originals.
+        for i in 0..num_params {
+            let val = self.stack_get(fixed + i);
+            self.stack_set(self.top, val);
+            self.top += 1;
+            self.stack_set(fixed + i, Val::Nil);
+        }
+
+        // Push 'arg' table as an extra parameter if needed.
+        if let Some(tbl_ref) = arg_table {
+            self.stack_set(self.top, Val::Table(tbl_ref));
+            self.top += 1;
+        }
+
+        // Stack layout now:
+        // [func] [nil...] [vararg1] [vararg2] ... [param1] [param2] [arg?]
+        //         ^ fixed positions nilled out       ^ base (new_base)
+        let _ = func_idx; // func_idx not needed; `fixed` is derived from top
 
         new_base
     }
@@ -684,6 +775,10 @@ fn call_tm_void(state: &mut LuaState, tm: Val, arg1: Val, arg2: Val, arg3: Val) 
 /// Looks up `event` in lhs's metatable. If not found, tries rhs's.
 /// Calls the found metamethod with (lhs, rhs) and stores the result.
 /// Returns an error if neither side has the metamethod.
+///
+/// `b_rk` and `c_rk` are the raw B/C instruction fields, used to
+/// resolve variable names in error messages via `arith_error`.
+#[allow(clippy::too_many_arguments)]
 fn call_bin_tm(
     state: &mut LuaState,
     lhs: Val,
@@ -692,13 +787,16 @@ fn call_bin_tm(
     event: TMS,
     proto: &Proto,
     pc: usize,
+    base: usize,
+    b_rk: u32,
+    c_rk: u32,
 ) -> LuaResult<()> {
     let tm =
         get_tm_for_val(&state.gc, lhs, event).or_else(|| get_tm_for_val(&state.gc, rhs, event));
 
     match tm {
         Some(tm_val) => call_tm_res(state, tm_val, lhs, rhs, result_reg),
-        None => Err(arith_error(proto, pc, lhs)),
+        None => Err(arith_error(state, proto, pc, base, lhs, rhs, b_rk, c_rk)),
     }
 }
 
@@ -772,10 +870,13 @@ fn vm_concat(
                 call_tm_res(state, tm_val, lhs, rhs, top - 2)?;
             } else {
                 // No metamethod -- find which operand is the problem.
-                if !is_string_or_number(lhs, &state.gc) {
-                    return Err(concat_error(proto, pc, lhs));
-                }
-                return Err(concat_error(proto, pc, rhs));
+                // lhs is at top-2 (register last-1), rhs at top-1 (register last).
+                let reg = if !is_string_or_number(lhs, &state.gc) {
+                    last - 1
+                } else {
+                    last
+                };
+                return Err(type_error(state, proto, pc, base, reg, "concatenate"));
             }
             total -= 1;
             last -= 1;
@@ -842,7 +943,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
     loop {
         // Cache values from current frame.
         let ci_func = state.call_stack[state.ci].func;
-        let base = state.base;
+        let mut base = state.base;
 
         // Get the current closure and proto.
         let func_val = state.stack_get(ci_func);
@@ -925,7 +1026,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let bx = instr.bx() as usize;
                     let key = proto.constants[bx];
                     state.call_stack[state.ci].saved_pc = pc;
-                    vm_gettable(state, Val::Table(env), key, ra, &proto, pc)?;
+                    vm_gettable(state, Val::Table(env), key, ra, &proto, pc, base, None)?;
                 }
 
                 OpCode::SetGlobal => {
@@ -933,7 +1034,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let key = proto.constants[bx];
                     let val = state.stack_get(ra);
                     state.call_stack[state.ci].saved_pc = pc;
-                    vm_settable(state, Val::Table(env), key, val, &proto, pc)?;
+                    vm_settable(state, Val::Table(env), key, val, &proto, pc, base, None)?;
                 }
 
                 // ----- Table access -----
@@ -942,7 +1043,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let table_val = state.stack_get(base + b);
                     let key = rk(&state.stack, base, &proto.constants, instr.c());
                     state.call_stack[state.ci].saved_pc = pc;
-                    vm_gettable(state, table_val, key, ra, &proto, pc)?;
+                    vm_gettable(state, table_val, key, ra, &proto, pc, base, Some(b))?;
                 }
 
                 OpCode::SetTable => {
@@ -950,7 +1051,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let key = rk(&state.stack, base, &proto.constants, instr.b());
                     let val = rk(&state.stack, base, &proto.constants, instr.c());
                     state.call_stack[state.ci].saved_pc = pc;
-                    vm_settable(state, table_val, key, val, &proto, pc)?;
+                    vm_settable(state, table_val, key, val, &proto, pc, base, Some(a))?;
                 }
 
                 OpCode::NewTable => {
@@ -968,7 +1069,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     state.stack_set(ra + 1, table_val);
                     let key = rk(&state.stack, base, &proto.constants, instr.c());
                     state.call_stack[state.ci].saved_pc = pc;
-                    vm_gettable(state, table_val, key, ra, &proto, pc)?;
+                    vm_gettable(state, table_val, key, ra, &proto, pc, base, Some(b))?;
                 }
 
                 // ----- Arithmetic -----
@@ -982,7 +1083,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb + nc)),
                         _ => {
                             state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(state, b_val, c_val, ra, TMS::Add, &proto, pc)?;
+                            call_bin_tm(
+                                state,
+                                b_val,
+                                c_val,
+                                ra,
+                                TMS::Add,
+                                &proto,
+                                pc,
+                                base,
+                                instr.b(),
+                                instr.c(),
+                            )?;
                         }
                     }
                 }
@@ -997,7 +1109,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb - nc)),
                         _ => {
                             state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(state, b_val, c_val, ra, TMS::Sub, &proto, pc)?;
+                            call_bin_tm(
+                                state,
+                                b_val,
+                                c_val,
+                                ra,
+                                TMS::Sub,
+                                &proto,
+                                pc,
+                                base,
+                                instr.b(),
+                                instr.c(),
+                            )?;
                         }
                     }
                 }
@@ -1012,7 +1135,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb * nc)),
                         _ => {
                             state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(state, b_val, c_val, ra, TMS::Mul, &proto, pc)?;
+                            call_bin_tm(
+                                state,
+                                b_val,
+                                c_val,
+                                ra,
+                                TMS::Mul,
+                                &proto,
+                                pc,
+                                base,
+                                instr.b(),
+                                instr.c(),
+                            )?;
                         }
                     }
                 }
@@ -1027,7 +1161,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb / nc)),
                         _ => {
                             state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(state, b_val, c_val, ra, TMS::Div, &proto, pc)?;
+                            call_bin_tm(
+                                state,
+                                b_val,
+                                c_val,
+                                ra,
+                                TMS::Div,
+                                &proto,
+                                pc,
+                                base,
+                                instr.b(),
+                                instr.c(),
+                            )?;
                         }
                     }
                 }
@@ -1045,7 +1190,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         }
                         _ => {
                             state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(state, b_val, c_val, ra, TMS::Mod, &proto, pc)?;
+                            call_bin_tm(
+                                state,
+                                b_val,
+                                c_val,
+                                ra,
+                                TMS::Mod,
+                                &proto,
+                                pc,
+                                base,
+                                instr.b(),
+                                instr.c(),
+                            )?;
                         }
                     }
                 }
@@ -1060,7 +1216,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb.powf(nc))),
                         _ => {
                             state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(state, b_val, c_val, ra, TMS::Pow, &proto, pc)?;
+                            call_bin_tm(
+                                state,
+                                b_val,
+                                c_val,
+                                ra,
+                                TMS::Pow,
+                                &proto,
+                                pc,
+                                base,
+                                instr.b(),
+                                instr.c(),
+                            )?;
                         }
                     }
                 }
@@ -1078,7 +1245,16 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                                     state.call_stack[state.ci].saved_pc = pc;
                                     call_tm_res(state, tm_val, b_val, b_val, ra)?;
                                 }
-                                None => return Err(arith_error(&proto, pc, b_val)),
+                                None => {
+                                    return Err(type_error(
+                                        state,
+                                        &proto,
+                                        pc,
+                                        base,
+                                        b,
+                                        "perform arithmetic on",
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1096,21 +1272,19 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let b_val = state.stack_get(base + b);
                     match b_val {
                         Val::Str(r) => {
-                            let s = state
-                                .gc
-                                .string_arena
-                                .get(r)
-                                .ok_or_else(|| len_error(&proto, pc, b_val))?;
+                            let s =
+                                state.gc.string_arena.get(r).ok_or_else(|| {
+                                    runtime_error_simple("invalid string reference")
+                                })?;
                             #[allow(clippy::cast_precision_loss)]
                             state.stack_set(ra, Val::Num(s.len() as f64));
                         }
                         Val::Table(r) => {
                             // Lua 5.1.1: tables always use raw length (no __len).
-                            let t = state
-                                .gc
-                                .tables
-                                .get(r)
-                                .ok_or_else(|| len_error(&proto, pc, b_val))?;
+                            let t =
+                                state.gc.tables.get(r).ok_or_else(|| {
+                                    runtime_error_simple("invalid table reference")
+                                })?;
                             #[allow(clippy::cast_precision_loss)]
                             let len = t.len(&state.gc.string_arena) as f64;
                             state.stack_set(ra, Val::Num(len));
@@ -1122,7 +1296,14 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                                 state.call_stack[state.ci].saved_pc = pc;
                                 call_tm_res(state, tm_val, b_val, Val::Nil, ra)?;
                             } else {
-                                return Err(len_error(&proto, pc, b_val));
+                                return Err(type_error(
+                                    state,
+                                    &proto,
+                                    pc,
+                                    base,
+                                    b,
+                                    "get length of",
+                                ));
                             }
                         }
                     }
@@ -1413,34 +1594,62 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         state.top = ra + b as usize;
                     }
 
-                    // Close upvalues at current base.
-                    state.close_upvalues(base);
-
-                    // Save pc.
+                    // Save pc before the call (matches PUC-Rio).
                     state.call_stack[state.ci].saved_pc = pc;
 
-                    // Move function + args down to current frame's func position.
-                    let ci_func = state.call_stack[state.ci].func;
-                    let nargs = state.top - ra;
-                    for i in 0..nargs {
-                        state.stack_set(ci_func + i, state.stack_get(ra + i));
-                    }
-                    state.top = ci_func + nargs;
-
-                    // Pop current frame and set up the tail call.
-                    let num_results = state.call_stack[state.ci].num_results;
-                    state.pop_ci();
-                    state.base = state.call_stack[state.ci].base;
-
-                    match state.precall(ci_func, num_results)? {
+                    // PUC-Rio calls precall FIRST, then only does the
+                    // tail call optimization for Lua-to-Lua calls. For
+                    // Lua-to-C calls, the C function has already completed
+                    // and the caller's frame stays on the stack.
+                    match state.precall(ra, LUA_MULTRET)? {
                         CallResult::Lua => {
-                            // Continue in the outer loop -- we've set up a new
-                            // Lua frame at the same call depth.
+                            // Tail call optimization: put the new Lua frame
+                            // in place of the previous one.
+                            let prev_ci = state.ci - 1;
+                            let old_func = state.call_stack[prev_ci].func;
+                            let new_func = state.call_stack[state.ci].func;
+
+                            // Close upvalues at the old base.
+                            state.close_upvalues(state.call_stack[prev_ci].base);
+
+                            // Adjust previous frame's base.
+                            let base_offset = state.call_stack[state.ci].base - new_func;
+                            state.call_stack[prev_ci].base = old_func + base_offset;
+                            state.base = state.call_stack[prev_ci].base;
+
+                            // Move the new frame's stack down over the old
+                            // frame.
+                            let mut aux = 0;
+                            while new_func + aux < state.top {
+                                state.stack_set(old_func + aux, state.stack_get(new_func + aux));
+                                aux += 1;
+                            }
+                            state.top = old_func + aux;
+                            state.call_stack[prev_ci].top = state.top;
+
+                            // Update saved_pc from the new frame.
+                            state.call_stack[prev_ci].saved_pc =
+                                state.call_stack[state.ci].saved_pc;
+                            state.call_stack[prev_ci].tail_calls += 1;
+
+                            // Remove the new frame -- the previous frame
+                            // now holds the callee's data.
+                            state.pop_ci();
                         }
                         CallResult::Rust => {
                             // Rust tail-call completed. poscall already
-                            // unwound the frame and placed results. Done.
-                            return Ok(());
+                            // unwound the Rust frame and placed results.
+                            // The Lua caller's frame is now on top of the
+                            // call stack, so poscall for the Lua frame
+                            // happens via normal RETURN.
+                            // Refresh base from the current (restored) frame.
+                            let nresults = state.call_stack[state.ci].num_results;
+                            if nresults >= 0 {
+                                state.top = state.call_stack[state.ci].top;
+                            }
+                            base = state.call_stack[state.ci].base;
+                            // Continue executing in the current frame.
+                            continue;
                         }
                     }
                     break; // Re-enter outer loop for Lua tail call.
@@ -1622,7 +1831,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let table_val = state.stack_get(ra);
                     let table_ref = match table_val {
                         Val::Table(r) => r,
-                        _ => return Err(index_error(&proto, pc, table_val)),
+                        _ => return Err(type_error(state, &proto, pc, base, a, "index")),
                     };
 
                     let offset = (c - 1) * LFIELDS_PER_FLUSH as usize;
@@ -1676,6 +1885,7 @@ fn table_set(state: &mut LuaState, table_ref: GcRef<Table>, key: Val, value: Val
 /// 3. If `__index` is a function, call it with (t, key) and return result.
 /// 4. If `__index` is a table, repeat the lookup on that table.
 /// 5. Loop up to `MAXTAGLOOP` times to prevent infinite chains.
+#[allow(clippy::too_many_arguments)]
 fn vm_gettable(
     state: &mut LuaState,
     t: Val,
@@ -1683,6 +1893,8 @@ fn vm_gettable(
     result_reg: usize,
     proto: &Proto,
     pc: usize,
+    base: usize,
+    obj_reg: Option<usize>,
 ) -> LuaResult<()> {
     let mut current = t;
     for _ in 0..MAXTAGLOOP {
@@ -1705,10 +1917,7 @@ fn vm_gettable(
             let tm = {
                 let mt = table.metatable();
                 match mt {
-                    Some(mt_ref) => {
-                        let tm_val = get_tm_for_table(&state.gc, mt_ref, TMS::Index);
-                        tm_val
-                    }
+                    Some(mt_ref) => get_tm_for_table(&state.gc, mt_ref, TMS::Index),
                     None => None,
                 }
             };
@@ -1734,7 +1943,14 @@ fn vm_gettable(
             let tm = get_tm_for_val(&state.gc, current, TMS::Index);
             match tm {
                 None => {
-                    return Err(index_error(proto, pc, current));
+                    if let Some(reg) = obj_reg {
+                        return Err(type_error(state, proto, pc, base, reg, "index"));
+                    }
+                    return Err(runtime_error(
+                        proto,
+                        pc,
+                        format!("attempt to index a {} value", current.type_name()),
+                    ));
                 }
                 Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
                     call_tm_res(state, tm_val, current, key, result_reg)?;
@@ -1757,6 +1973,7 @@ fn vm_gettable(
 /// 3. If `__newindex` is a function, call it with (t, key, value). Return.
 /// 4. If `__newindex` is a table, repeat the set on that table.
 /// 5. If no `__newindex`, rawset on original table.
+#[allow(clippy::too_many_arguments)]
 fn vm_settable(
     state: &mut LuaState,
     t: Val,
@@ -1764,6 +1981,8 @@ fn vm_settable(
     value: Val,
     proto: &Proto,
     pc: usize,
+    base: usize,
+    obj_reg: Option<usize>,
 ) -> LuaResult<()> {
     let mut current = t;
     for _ in 0..MAXTAGLOOP {
@@ -1831,7 +2050,14 @@ fn vm_settable(
             let tm = get_tm_for_val(&state.gc, current, TMS::NewIndex);
             match tm {
                 None => {
-                    return Err(index_error(proto, pc, current));
+                    if let Some(reg) = obj_reg {
+                        return Err(type_error(state, proto, pc, base, reg, "index"));
+                    }
+                    return Err(runtime_error(
+                        proto,
+                        pc,
+                        format!("attempt to index a {} value", current.type_name()),
+                    ));
                 }
                 Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
                     call_tm_void(state, tm_val, current, key, value)?;

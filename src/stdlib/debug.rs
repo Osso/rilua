@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::vm::closure::Closure;
+use crate::vm::debug_info;
 use crate::vm::gc::arena::GcRef;
 use crate::vm::state::LuaState;
 use crate::vm::table::Table;
@@ -83,7 +84,7 @@ fn get_thread_offset(state: &LuaState) -> usize {
 
 const LUA_IDSIZE: usize = 60;
 
-fn chunkid(source: &str) -> String {
+pub(crate) fn chunkid(source: &str) -> String {
     if let Some(rest) = source.strip_prefix('=') {
         if rest.len() < LUA_IDSIZE {
             rest.to_string()
@@ -110,7 +111,7 @@ fn chunkid(source: &str) -> String {
 }
 
 /// Gets the current line from a Lua `CallInfo`.
-fn current_line(state: &LuaState, ci_idx: usize) -> i32 {
+pub(crate) fn current_line(state: &LuaState, ci_idx: usize) -> i32 {
     let ci = &state.call_stack[ci_idx];
     let func_val = state.stack_get(ci.func);
     if let Val::Function(r) = func_val
@@ -124,6 +125,105 @@ fn current_line(state: &LuaState, ci_idx: usize) -> i32 {
         }
     }
     -1
+}
+
+/// Generates a stack traceback string from the current call stack.
+///
+/// This is the shared logic used by both `debug.traceback()` and the CLI
+/// error handler. Matches PUC-Rio's `luaL_traceback` / the traceback
+/// function in `lua.c`.
+///
+/// `msg` is prepended (with a newline separator) if non-empty.
+/// `start_level` controls how many frames to skip from the top
+/// (PUC-Rio uses 2 to skip the traceback function and the error handler).
+pub(crate) fn generate_traceback(state: &LuaState, msg: &str, start_level: usize) -> String {
+    const LEVELS1: usize = 12;
+    const LEVELS2: usize = 10;
+
+    let mut result = String::new();
+
+    if !msg.is_empty() {
+        result.push_str(msg);
+        result.push('\n');
+    }
+
+    result.push_str("stack traceback:");
+
+    let mut level = start_level;
+    let mut first_part = true;
+    loop {
+        if level > state.ci {
+            break;
+        }
+        let ci_idx = state.ci - level;
+
+        if level > LEVELS1 && first_part {
+            if state.ci > level + LEVELS2 + 1 {
+                result.push_str("\n\t...");
+                let mut total = level;
+                while state.ci > total + 1 {
+                    total += 1;
+                }
+                level = total - LEVELS2;
+                first_part = false;
+                continue;
+            }
+            first_part = false;
+        }
+
+        result.push_str("\n\t");
+
+        let ci = &state.call_stack[ci_idx];
+        let func_val = state.stack_get(ci.func);
+
+        // Try to resolve function name from the calling frame.
+        let func_name = debug_info::getfuncname(state, ci_idx, &state.gc.string_arena);
+
+        if let Val::Function(r) = func_val {
+            if let Some(cl) = state.gc.closures.get(r) {
+                match cl {
+                    Closure::Lua(lcl) => {
+                        let short_src = chunkid(&lcl.proto.source);
+                        result.push_str(&short_src);
+                        result.push(':');
+                        let line = current_line(state, ci_idx);
+                        if line > 0 {
+                            let _ = write!(result, "{line}:");
+                        }
+                        if let Some((_kind, name)) = &func_name {
+                            let _ = write!(result, " in function '{name}'");
+                        } else if lcl.proto.line_defined == 0 {
+                            result.push_str(" in main chunk");
+                        } else {
+                            let _ = write!(
+                                result,
+                                " in function <{}:{}>",
+                                short_src, lcl.proto.line_defined
+                            );
+                        }
+                    }
+                    Closure::Rust(rcl) => {
+                        result.push_str("[C]:");
+                        if let Some((_kind, name)) = &func_name {
+                            let _ = write!(result, " in function '{name}'");
+                        } else if rcl.name.is_empty() {
+                            result.push_str(" ?");
+                        } else {
+                            let _ = write!(result, " in function '{}'", rcl.name);
+                        }
+                    }
+                }
+            } else {
+                result.push_str("[C]: ?");
+            }
+        } else {
+            result.push_str("[C]: ?");
+        }
+
+        level += 1;
+    }
+
+    result
 }
 
 /// PUC-Rio's `luaF_getlocalname` equivalent -- finds active local variable
@@ -425,9 +525,27 @@ pub fn db_getinfo(state: &mut LuaState) -> LuaResult<u32> {
         }
 
         if options.contains('n') {
-            let namewhat = if info.name.is_empty() { "" } else { "global" };
-            set_table_str(state, result_table, "name", &info.name)?;
-            set_table_str(state, result_table, "namewhat", namewhat)?;
+            // Use getfuncname to resolve the name from the calling instruction.
+            let (name, namewhat) = if let Some(ci) = ci_idx {
+                if ci > 0 {
+                    debug_info::getfuncname(state, ci, &state.gc.string_arena).map_or_else(
+                        || (info.name.clone(), String::new()),
+                        |(kind, n)| (n, kind.to_string()),
+                    )
+                } else {
+                    (info.name.clone(), String::new())
+                }
+            } else {
+                // Function passed directly (not a stack level).
+                let namewhat = if info.name.is_empty() {
+                    String::new()
+                } else {
+                    "global".to_string()
+                };
+                (info.name.clone(), namewhat)
+            };
+            set_table_str(state, result_table, "name", &name)?;
+            set_table_str(state, result_table, "namewhat", &namewhat)?;
         }
 
         if let (true, Some(cl_ref)) = (options.contains('f'), closure_ref) {
@@ -703,9 +821,6 @@ pub fn db_debug(state: &mut LuaState) -> LuaResult<u32> {
 // 14. debug.traceback([thread,] [message [, level]])
 // ---------------------------------------------------------------------------
 
-const LEVELS1: usize = 12;
-const LEVELS2: usize = 10;
-
 pub fn db_traceback(state: &mut LuaState) -> LuaResult<u32> {
     let arg_offset = get_thread_offset(state);
 
@@ -750,83 +865,7 @@ pub fn db_traceback(state: &mut LuaState) -> LuaResult<u32> {
         }
     };
 
-    let mut result = String::new();
-
-    if let Some(m) = &msg {
-        if !m.is_empty() {
-            result.push_str(m);
-            result.push('\n');
-        }
-    }
-
-    result.push_str("stack traceback:");
-
-    let mut level = start_level;
-    let mut first_part = true;
-    loop {
-        if level >= state.ci {
-            break;
-        }
-        let ci_idx = state.ci - level;
-
-        if level > LEVELS1 && first_part {
-            if state.ci > level + LEVELS2 + 1 {
-                result.push_str("\n\t...");
-                let mut total = level;
-                while state.ci > total + 1 {
-                    total += 1;
-                }
-                level = total - LEVELS2;
-                first_part = false;
-                continue;
-            }
-            first_part = false;
-        }
-
-        result.push_str("\n\t");
-
-        let ci = &state.call_stack[ci_idx];
-        let func_val = state.stack_get(ci.func);
-
-        if let Val::Function(r) = func_val {
-            if let Some(cl) = state.gc.closures.get(r) {
-                match cl {
-                    Closure::Lua(lcl) => {
-                        let short_src = chunkid(&lcl.proto.source);
-                        result.push_str(&short_src);
-                        result.push(':');
-                        let line = current_line(state, ci_idx);
-                        if line > 0 {
-                            let _ = write!(result, "{line}:");
-                        }
-                        if lcl.proto.line_defined == 0 {
-                            result.push_str(" in main chunk");
-                        } else {
-                            let _ = write!(
-                                result,
-                                " in function <{}:{}>",
-                                short_src, lcl.proto.line_defined
-                            );
-                        }
-                    }
-                    Closure::Rust(rcl) => {
-                        result.push_str("[C]:");
-                        if rcl.name.is_empty() {
-                            result.push_str(" ?");
-                        } else {
-                            let _ = write!(result, " in function '{}'", rcl.name);
-                        }
-                    }
-                }
-            } else {
-                result.push_str("[C]: ?");
-            }
-        } else {
-            result.push_str("[C]: ?");
-        }
-
-        level += 1;
-    }
+    let result = generate_traceback(state, msg.as_deref().unwrap_or(""), start_level);
 
     let result_ref = state.gc.intern_string(result.as_bytes());
     state.push(Val::Str(result_ref));

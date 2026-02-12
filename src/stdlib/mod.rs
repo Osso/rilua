@@ -298,8 +298,16 @@ fn open_string_lib(state: &mut LuaState) -> LuaResult<()> {
     register_table_fn(state, string_table, "gmatch", string::str_gmatch)?;
     register_table_fn(state, string_table, "gsub", string::str_gsub)?;
     register_table_fn(state, string_table, "dump", string::str_dump)?;
-    // Deprecated alias: gfind = gmatch (LUA_COMPAT_GFIND, enabled by default).
-    register_table_fn(state, string_table, "gfind", string::str_gmatch)?;
+    // LUA_COMPAT_GFIND: string.gfind = string.gmatch (same closure object).
+    // PUC-Rio copies the value via lua_getfield/lua_setfield so gfind == gmatch.
+    let gmatch_key = state.gc.intern_string(b"gmatch");
+    let gfind_key = state.gc.intern_string(b"gfind");
+    let gmatch_val = state.gc.tables.get(string_table).map_or(Val::Nil, |t| {
+        t.get(Val::Str(gmatch_key), &state.gc.string_arena)
+    });
+    if let Some(t) = state.gc.tables.get_mut(string_table) {
+        t.raw_set(Val::Str(gfind_key), gmatch_val, &state.gc.string_arena)?;
+    }
 
     // Register as global "string".
     register_global_val(state, "string", Val::Table(string_table))?;
