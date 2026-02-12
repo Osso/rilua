@@ -10,6 +10,8 @@ pub mod package;
 pub mod string;
 pub mod table;
 
+use std::ops::{BitOr, BitOrAssign};
+
 use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::vm::closure::{Closure, RustClosure, RustFn};
 use crate::vm::gc::arena::GcRef;
@@ -17,9 +19,122 @@ use crate::vm::state::LuaState;
 use crate::vm::table::Table;
 use crate::vm::value::{Userdata, Val};
 
+// ---------------------------------------------------------------------------
+// StdLib bitflags for selective library loading
+// ---------------------------------------------------------------------------
+
+/// Bitflag set for selecting which standard libraries to load.
+///
+/// Combines with `|` for ergonomic selective loading:
+///
+/// ```ignore
+/// let lua = Lua::new_with(StdLib::BASE | StdLib::STRING | StdLib::TABLE)?;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StdLib(u16);
+
+impl StdLib {
+    /// Base library: `print`, `type`, `tostring`, `error`, `pcall`, etc.
+    pub const BASE: Self = Self(1 << 0);
+    /// String library: `string.format`, `string.find`, etc.
+    pub const STRING: Self = Self(1 << 1);
+    /// Table library: `table.insert`, `table.sort`, etc.
+    pub const TABLE: Self = Self(1 << 2);
+    /// Math library: `math.sin`, `math.random`, etc.
+    pub const MATH: Self = Self(1 << 3);
+    /// I/O library: `io.open`, `io.read`, etc.
+    pub const IO: Self = Self(1 << 4);
+    /// OS library: `os.time`, `os.clock`, etc.
+    pub const OS: Self = Self(1 << 5);
+    /// Debug library: `debug.getinfo`, `debug.traceback`, etc.
+    pub const DEBUG: Self = Self(1 << 6);
+    /// Package library: `require`, `module`, `package.path`, etc.
+    pub const PACKAGE: Self = Self(1 << 7);
+    /// Coroutine library: `coroutine.create`, `coroutine.resume`, etc.
+    pub const COROUTINE: Self = Self(1 << 8);
+    /// No libraries.
+    pub const NONE: Self = Self(0);
+    /// All standard libraries.
+    pub const ALL: Self = Self(
+        Self::BASE.0
+            | Self::STRING.0
+            | Self::TABLE.0
+            | Self::MATH.0
+            | Self::IO.0
+            | Self::OS.0
+            | Self::DEBUG.0
+            | Self::PACKAGE.0
+            | Self::COROUTINE.0,
+    );
+
+    /// Returns true if `self` contains all flags in `other`.
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl BitOr for StdLib {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for StdLib {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
 /// Registers all standard library functions into the global table.
+///
+/// Equivalent to `open_libs_selective(state, StdLib::ALL)`.
 pub fn open_libs(state: &mut LuaState) -> LuaResult<()> {
-    // Base library functions.
+    open_libs_selective(state, StdLib::ALL)
+}
+
+/// Registers selected standard libraries into the global table.
+///
+/// Only loads libraries whose flags are set in `libs`. The package library
+/// is always loaded last (when requested) because it populates
+/// `package.loaded` with the other library tables.
+pub fn open_libs_selective(state: &mut LuaState, libs: StdLib) -> LuaResult<()> {
+    if libs.contains(StdLib::BASE) {
+        open_base_lib(state)?;
+    }
+    if libs.contains(StdLib::STRING) {
+        open_string_lib(state)?;
+    }
+    if libs.contains(StdLib::TABLE) {
+        open_table_lib(state)?;
+    }
+    if libs.contains(StdLib::MATH) {
+        open_math_lib(state)?;
+    }
+    if libs.contains(StdLib::OS) {
+        open_os_lib(state)?;
+    }
+    if libs.contains(StdLib::IO) {
+        io::open_io_lib(state)?;
+    }
+    if libs.contains(StdLib::COROUTINE) {
+        open_coroutine_lib(state)?;
+    }
+    if libs.contains(StdLib::DEBUG) {
+        open_debug_lib(state)?;
+    }
+    // Package must be last: populates package.loaded with other libs.
+    if libs.contains(StdLib::PACKAGE) {
+        package::open_package_lib(state)?;
+    }
+    Ok(())
+}
+
+/// Registers the base library: global functions, `_G`, `_VERSION`.
+///
+/// Follows PUC-Rio's `luaopen_base` pattern from `lbaselib.c`.
+fn open_base_lib(state: &mut LuaState) -> LuaResult<()> {
     register_global_fn(state, "print", base::lua_print)?;
     register_global_fn(state, "type", base::lua_type)?;
     register_global_fn(state, "tostring", base::lua_tostring)?;
@@ -52,30 +167,6 @@ pub fn open_libs(state: &mut LuaState) -> LuaResult<()> {
     register_global_val(state, "_G", Val::Table(state.global))?;
     let version_str = state.gc.intern_string(b"Lua 5.1");
     register_global_val(state, "_VERSION", Val::Str(version_str))?;
-
-    // String library.
-    open_string_lib(state)?;
-
-    // Table library.
-    open_table_lib(state)?;
-
-    // Math library.
-    open_math_lib(state)?;
-
-    // OS library.
-    open_os_lib(state)?;
-
-    // I/O library.
-    io::open_io_lib(state)?;
-
-    // Coroutine library.
-    open_coroutine_lib(state)?;
-
-    // Debug library.
-    open_debug_lib(state)?;
-
-    // Package library (must be last: populates package.loaded with other libs).
-    package::open_package_lib(state)?;
 
     Ok(())
 }
