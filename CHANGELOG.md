@@ -69,7 +69,7 @@ and this project adheres to
 - Architecture documentation in `docs/` (14 documents covering pipeline,
   instructions, values, GC, tables, strings, closures, call stack,
   metatables, errors, API, stdlib, coroutines, testing)
-- 1266 tests: 583 unit + 406 integration + 277 oracle comparison
+- 1271 tests: 583 unit + 411 integration + 277 oracle comparison
 - PUC-Rio test suite: 7/20 applicable files pass (files, gc, locals,
   math, nextvar, pm, sort)
 
@@ -106,3 +106,8 @@ and this project adheres to
   the loop-back JMP, causing false-branch JMPs from conditions inside
   `while true` bodies to self-loop instead of jumping to the loop top.
   Unblocked math.lua and nextvar.lua in PUC-Rio test suite.
+- Parenthesized call/vararg not truncating to single value: `(f())`
+  returned all values instead of 1. Added `Expr::Paren` AST variant so
+  codegen calls `discharge_vars`/`set_one_ret`, matching PUC-Rio's
+  `prefixexp` -> `luaK_dischargevars` -> `luaK_setoneret` chain.
+  Also fixes `(f())` as statement correctly being a syntax error.

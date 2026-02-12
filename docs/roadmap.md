@@ -154,8 +154,8 @@ assertion failure (bug #17).
 | Fail | 8 | attrib, big, constructs, db, errors, literals, main, vararg |
 
 **Timeout root causes**:
-- `calls`: bug #17 (parenthesized multi-return), #21 (return-from-C
-  stale value), plus additional while-true patterns
+- `calls`: bug #21 (return-from-C stale value), plus additional
+  infinite-loop patterns (progresses 4 markers after bug #17 fix)
 - `closure`: bug #19 (repeat-until upvalue scoping)
 - `events`: additional infinite-loop patterns beyond bug #18
 - `strings`: additional infinite-loop patterns beyond bug #18
@@ -166,8 +166,8 @@ assertion failure (bug #17).
   `libs/B.lua` etc. to disk)
 - `big`: requires `checktable` module (C library). Also: PUC-Rio itself
   fails this test. Not a rilua issue.
-- `constructs`: bug #17 (parenthesized multi-return: `(f())` keeps
-  multiple returns instead of truncating to 1). Line 131.
+- `constructs`: assertion failure at line 235 (progressed past line 131
+  after bug #17 fix). Needs investigation.
 - `db`: bug #23 (debug.getinfo namewhat returns "global" instead of
   "local")
 - `errors`: bug #22 (loadstring error message format mismatch:
@@ -177,8 +177,8 @@ assertion failure (bug #17).
   instead of a table)
 - `main`: requires CLI subprocess execution (test spawns child
   processes via `os.execute` with rilua binary path)
-- `vararg`: bug #21 (return-from-C stale value: `call(print, {"+"})`
-  returns stale function instead of nil)
+- `vararg`: assertion failure at line 42 (progressed past bug #17;
+  likely bug #21 return-from-C stale value)
 
 ### Execution order corrections
 
@@ -1273,10 +1273,12 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
 
 **Remaining known bugs** (discovered during evaluation, Feb 2026):
 
-17. **Parenthesized multi-return truncation**: `(f())` should truncate
-    to a single return value but doesn't. In PUC-Rio, `(ret2(f()))` yields
-    1 value; rilua yields 2. Causes `calls.lua` test hang (infinite
-    recursion in `unlpack`). Affects: calls, vararg.
+17. ~~**Parenthesized multi-return truncation**~~: **FIXED**. Added
+    `Expr::Paren` AST variant. Parser wraps `(expr)` in `Paren` node;
+    codegen calls `discharge_vars` which triggers `set_one_ret` for
+    Call/VarArg expressions, matching PUC-Rio's `prefixexp` behavior.
+    Also makes `(f())` as a statement a syntax error (matching PUC-Rio).
+    Files: `ast.rs`, `parser.rs`, `codegen.rs`.
 18. ~~**While-true-if-break compiler bug**~~: **FIXED**. `compile_while`
     used `patch_jump` (single instruction) instead of `patch_list`
     (walks linked list) for the loop-back JMP. `emit_jump` concatenates

@@ -143,6 +143,11 @@ pub enum Expr {
     FuncDef { body: FuncBody, span: Span },
     /// Table constructor: `{ fields }`.
     TableCtor { fields: Vec<TableField>, span: Span },
+    /// Parenthesized expression: `(expr)`.
+    /// Forces multi-return expressions (calls, vararg) to produce exactly
+    /// one value. Maps to PUC-Rio's `prefixexp → '(' expr ')'` which calls
+    /// `luaK_dischargevars` (triggering `luaK_setoneret`).
+    Paren(Box<Self>, Span),
 }
 
 /// Binary operators.
@@ -260,7 +265,8 @@ impl Expr {
             | Self::MethodCall { span, .. }
             | Self::Call { span, .. }
             | Self::FuncDef { span, .. }
-            | Self::TableCtor { span, .. } => *span,
+            | Self::TableCtor { span, .. }
+            | Self::Paren(_, span) => *span,
         }
     }
 }

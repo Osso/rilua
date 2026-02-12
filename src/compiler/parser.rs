@@ -633,10 +633,11 @@ impl Parser {
                 }
             }
             Token::Char(b'(') => {
+                let paren_span = self.span;
                 self.advance()?;
                 let expr = self.parse_expr()?;
                 self.expect_char(b')')?;
-                Ok(expr)
+                Ok(Expr::Paren(Box::new(expr), paren_span))
             }
             _ => Err(self.syntax_error(&format!(
                 "unexpected symbol near {}",

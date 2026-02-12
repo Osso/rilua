@@ -4263,3 +4263,61 @@ fn while_true_if_break_complex_condition() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "3\n");
 }
+
+// -- Bug #17 regression: parenthesized multi-return truncation --
+
+#[test]
+fn paren_truncates_call_return() {
+    // Bug #17: (f()) should return exactly 1 value
+    let (stdout, _, code) = run_rilua(
+        "function f() return 1, 2, 3 end \
+         local a, b, c = (f()) \
+         assert(a == 1 and b == nil and c == nil) \
+         print(a, b, c)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\tnil\tnil\n");
+}
+
+#[test]
+fn paren_truncates_in_table_ctor() {
+    let (stdout, _, code) = run_rilua(
+        "function f() return 1, 2, 3 end \
+         local t = {(f())} \
+         print(#t, t[1], t[2])",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\t1\tnil\n");
+}
+
+#[test]
+fn paren_truncates_in_call_args() {
+    let (stdout, _, code) = run_rilua(
+        "function f() return 1, 2, 3 end \
+         local function count(...) return select('#', ...) end \
+         print(count(f()), count((f())))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\t1\n");
+}
+
+#[test]
+fn paren_truncates_vararg() {
+    let (stdout, _, code) = run_rilua(
+        "local function vtest(...) return (...) end \
+         print(vtest(10, 20, 30))",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "10\n");
+}
+
+#[test]
+fn paren_call_as_statement_is_syntax_error() {
+    // (f()) as a statement should be a syntax error, matching PUC-Rio
+    let (_, stderr, code) = run_rilua("(print(1))");
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("'=' expected") || stderr.contains("syntax error"),
+        "got: {stderr}"
+    );
+}

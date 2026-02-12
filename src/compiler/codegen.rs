@@ -2333,6 +2333,15 @@ fn compile_expr(compiler: &mut Compiler, expr: &super::ast::Expr) -> LuaResult<E
         Expr::FuncDef { body, .. } => compile_funcbody(compiler, body, false, line),
 
         Expr::TableCtor { fields, .. } => compile_table_ctor(compiler, fields, line),
+
+        Expr::Paren(inner, _) => {
+            let mut e = compile_expr(compiler, inner)?;
+            // Parenthesized expressions force calls and varargs to return
+            // exactly one value. Maps to PUC-Rio's luaK_dischargevars in
+            // prefixexp which calls luaK_setoneret for VCALL/VVARARG.
+            compiler.discharge_vars(&mut e, line);
+            Ok(e)
+        }
     }
 }
 
