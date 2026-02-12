@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 8/23 PUC-Rio tests pass) | 1262 total (583 unit + 402 integration + 277 oracle) |
+| 9: Compatibility | In progress (9a-9d done; 5/20 applicable PUC-Rio tests pass) | 1262 total (583 unit + 402 integration + 277 oracle) |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -136,43 +136,54 @@ All must be resolved before the project is considered complete.
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (8 / 23 pass)
+### PUC-Rio test suite status (5 / 20 applicable pass)
 
-Re-baselined after Phase 9c-9d. Eight test files pass. Phase 9c added
-error message formatting (getobjname, type_error with variable names,
-CLI tracebacks). Phase 9d fixes include or-in-EQ, parser, varargs,
-closures, pattern matching, table constructor constant overflow,
-string.gfind alias, LUA_COMPAT_VARARG, and load(func_reader) hang.
+Re-baselined after full evaluation (Feb 2026). Three test files (api,
+checktable, code) require the `testC` C library and are not applicable
+to rilua. Of the 20 applicable tests, 5 pass, 8 timeout (all due to
+the while-true-if-break compiler bug #18), and 7 fail.
 
 | Result | Count | Files |
 |--------|-------|-------|
-| Pass | 8 | api, checktable, code, files, gc, locals, pm, sort |
+| Pass | 5 | files, gc, locals, pm, sort |
+| N/A | 3 | api, checktable, code (require testC C library) |
 | Timeout | 8 | calls, closure, constructs, events, math, nextvar, strings, verybig |
 | Fail | 7 | attrib, big, db, errors, literals, main, vararg |
 
-**Timeout details**:
-- `calls`: hangs around line 213 (parenthesized multi-return truncation
-  bug -- `(ret2(f()))` should truncate to single value but doesn't,
-  causing infinite recursion in `unlpack`)
-- `closure`: unknown hang, needs investigation
-- `constructs`: unknown hang (or-in-EQ fix resolved previous trigger)
-- `events`: unknown hang, needs investigation
-- `math`: unknown hang, needs investigation
-- `nextvar`: unknown hang, needs investigation
-- `strings`: unknown hang, needs investigation
-- `verybig`: timeout, likely large-code limitation
+**Timeout root causes** (all 8 share the while-true-if-break bug #18):
+- `calls`: also blocked by bug #17 (parenthesized multi-return), #21
+  (return-from-C stale value)
+- `closure`: also blocked by bug #19 (repeat-until upvalue scoping)
+- `constructs`: while-true-if-break is the sole blocker
+- `events`: while-true-if-break is the sole blocker (line ~187)
+- `math`: while-true-if-break is the sole blocker (NaN testing section)
+- `nextvar`: while-true-if-break is the sole blocker (`find` function
+  at line 153 uses `while 1 do ... if ... return ... end end`)
+- `strings`: while-true-if-break plus format edge cases (line ~104)
+- `verybig`: while-true-if-break (generates code with while 1 loops)
 
-**Fail details** (common blockers):
-- `vararg`: line 42 assertion fails (LUA_COMPAT_VARARG is implemented
-  but test expects specific behavior not yet matched)
-- `errors`: line 20 assertion fails in `checksyntax` (syntax error
-  message format does not match PUC-Rio)
-- `db`: line 78 assertion fails (debug.getinfo name resolution)
-- `literals`: line 155, `pairs` receives non-table argument (for
-  generator error in string escape testing)
-- `attrib`: requires file creation test infrastructure
-- `big`: needs string length limits
-- `main`: needs CLI subprocess execution test infrastructure
+**Fail details**:
+- `attrib`: requires file creation test infrastructure (writes
+  `libs/B.lua` etc. to disk)
+- `big`: requires `checktable` module (C library). Also: PUC-Rio itself
+  fails this test. Not a rilua issue.
+- `db`: bug #23 (debug.getinfo namewhat returns "global" instead of
+  "local")
+- `errors`: bug #22 (loadstring error message format mismatch:
+  source name and error text differ from PUC-Rio)
+- `literals`: bug #20 (coroutine register restoration: upvalue
+  corruption after yield/resume causes pairs to receive a string
+  instead of a table)
+- `main`: requires CLI subprocess execution (test spawns child
+  processes via `os.execute` with rilua binary path)
+- `vararg`: bug #21 (return-from-C stale value: `call(print, {"+"})`
+  returns stale function instead of nil)
+
+**Impact analysis**: Bug #18 (while-true-if-break) is the single
+highest-impact fix. Resolving it unblocks all 8 timeout tests and would
+likely bring the pass count from 5 to 10+ (constructs, events, math,
+nextvar, and potentially more once secondary bugs in calls/closure/
+strings are addressed).
 
 ### Execution order corrections
 
@@ -1265,13 +1276,53 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
     HASARG|ISVARARG|NEEDSARG flags; VM creates arg table when NEEDSARG
     is set; NEEDSARG cleared when `...` is used in body.
 
-**Remaining known bugs**:
-- Parenthesized multi-return truncation: `(f())` should truncate to
-  single value but doesn't. Causes `calls.lua` hang.
-- Constant pool deduplication gap (rilua creates ~5% more constants
-  than PUC-Rio for large scripts; works correctly with exp2rk fix but
-  wastes space).
-- Additional bugs will surface when running the full PUC-Rio test suite.
+**Remaining known bugs** (discovered during evaluation, Feb 2026):
+
+17. **Parenthesized multi-return truncation**: `(f())` should truncate
+    to a single return value but doesn't. In PUC-Rio, `(ret2(f()))` yields
+    1 value; rilua yields 2. Causes `calls.lua` test hang (infinite
+    recursion in `unlpack`). Affects: calls, vararg.
+18. **While-true-if-break compiler bug**: `while true do i=i+1; if i>3
+    then break end end` generates an infinite loop. The JMP after a
+    comparison-based `if` condition inside `while true` jumps to itself
+    instead of back to the loop top. rilua emits `JMP -1` (self-loop)
+    where PUC-Rio emits `JMP -3` (loop top). Root cause: jump
+    backpatching error for the false branch of comparison conditions
+    in constant-true while loops. Affects: constructs, calls, events,
+    math, nextvar, strings, verybig (8 of the 8 timeout tests).
+19. **Repeat-until upvalue scoping**: Closures in `repeat ... until`
+    loops all share the same upvalue for locals declared in the loop
+    body instead of each iteration creating its own copy. PUC-Rio
+    creates fresh upvalues per iteration. Affects: closure.
+20. **Coroutine register restoration**: After `coroutine.yield` and
+    subsequent `resume`, upvalue registers in the coroutine's stack
+    frame are corrupted. An upvalue pointing at a table gets resolved
+    as the first element of that table (off-by-one or wrong base in
+    stack restoration). Affects: literals (coroutine + pairs/ipairs
+    pattern).
+21. **Return-from-C stale value**: When a Rust/C function returns 0
+    values and is called via `return f(...)` (tail position in a Lua
+    wrapper), a stale register value leaks as the return value instead
+    of nothing. Direct calls work correctly; only the `return f(...)`
+    wrapper pattern is affected. Affects: vararg.
+22. **Loadstring error message format**: `loadstring("break label")`
+    produces `break label:1: ...` instead of `[string "break label"]:1:
+    ...`. The source name uses the raw input string instead of the
+    `[string "..."]` format. Additionally, the error text differs:
+    rilua says `<eof> expected near <name>` instead of `no loop to
+    break near 'label'`. Affects: errors.
+23. **Debug.getinfo namewhat**: `debug.getinfo(1).namewhat` returns
+    `"global"` instead of `"local"` for a `function f()` defined via
+    `local function f()` in certain call contexts. The function name
+    resolution in `getobjname`/`getfuncname` doesn't distinguish
+    local function definitions. Affects: db.
+24. **Constant pool deduplication gap**: rilua creates ~5% more
+    constants than PUC-Rio for large scripts (264 vs 252 for pm.lua).
+    Works correctly with exp2rk fix but wastes constant pool space.
+25. **Missing constant folding**: rilua's compiler doesn't fold
+    constant arithmetic expressions at compile time. PUC-Rio folds
+    `1 + 2 * 3` to `LOADK 7`; rilua emits `MUL` + `ADD`. Unary `-1`
+    also not folded. Correct behavior, just less optimal bytecode.
 
 Files: `src/compiler/codegen.rs`, `src/compiler/parser.rs`,
 `src/compiler/ast.rs`, `src/vm/execute.rs`, `src/stdlib/debug.rs`,
