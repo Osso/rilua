@@ -48,9 +48,11 @@ understanding the pipeline.
 
 ### 5. External Interface
 
-1. [api.md](api.md) -- Trait-based public API, IntoLua/FromLua,
-   UserData, embedding example
-2. [stdlib.md](stdlib.md) -- All 9 standard libraries, function lists,
+1. [api.md](api.md) -- Public API as implemented: Lua struct,
+   IntoLua/FromLua, handle types, embedding examples
+2. [future-api.md](future-api.md) -- Planned API enhancements:
+   closure-based functions, UserData trait, container conversions
+3. [stdlib.md](stdlib.md) -- All 9 standard libraries, function lists,
    implementation priority
 
 ### 6. Quality

@@ -9,94 +9,148 @@
 
 PUC-Rio Lua exposes a stack-based C API where values are pushed and
 popped from a virtual stack. This works well in C but is unergonomic
-in Rust — it lacks type safety, requires manual stack management,
+in Rust -- it lacks type safety, requires manual stack management,
 and does not leverage Rust's trait system.
 
 rilua provides a Rust-idiomatic API using traits for type conversion,
 methods for common operations, and the type system for safety. The
 API is designed for embedding Lua in Rust applications.
 
+See `docs/future-api.md` for planned ergonomic improvements that are
+not yet implemented.
+
 ## Core Type: Lua
 
 ```rust
 /// A Lua interpreter instance.
 ///
-/// This is the main entry point for the rilua API. It owns all
-/// Lua state: the value stack, GC heap, global table, registry,
-/// and loaded libraries.
+/// Owns the full VM state including value stack, call stack, GC heap,
+/// and global table. All interaction with Lua values goes through this
+/// struct.
 pub struct Lua {
     // Internal state (not public)
 }
 
 impl Lua {
-    /// Create a new Lua state with standard libraries loaded.
-    pub fn new() -> Self { ... }
+    /// Create a new Lua state with all standard libraries loaded.
+    pub fn new() -> LuaResult<Self> { ... }
 
     /// Create a new Lua state without any libraries.
     pub fn new_empty() -> Self { ... }
 
-    /// Load and execute a string of Lua code.
-    pub fn exec(&mut self, source: &str) -> Result<()> { ... }
+    /// Create a new Lua state with selected standard libraries.
+    ///
+    /// ```ignore
+    /// let lua = Lua::new_with(StdLib::BASE | StdLib::STRING)?;
+    /// ```
+    pub fn new_with(libs: StdLib) -> LuaResult<Self> { ... }
 
-    /// Load a string of Lua code and return a callable function.
-    pub fn load(&mut self, source: &str) -> Result<Function> { ... }
+    // -- Execution --
 
-    /// Get a global variable.
-    pub fn global<V: FromLua>(&self, name: &str) -> Result<V> { ... }
+    /// Compile and execute a Lua source string.
+    /// Chunk name is set to `"=(string)"`.
+    pub fn exec(&mut self, source: &str) -> LuaResult<()> { ... }
 
-    /// Set a global variable.
+    /// Compile and execute Lua source bytes with a given chunk name.
+    /// Source is `&[u8]` because Lua files may contain arbitrary bytes.
+    pub fn exec_bytes(
+        &mut self, source: &[u8], name: &str,
+    ) -> LuaResult<()> { ... }
+
+    /// Read a file and execute its contents as a Lua chunk.
+    /// Chunk name is set to `@<path>`.
+    pub fn exec_file(&mut self, path: &str) -> LuaResult<()> { ... }
+
+    /// Compile a Lua source string and return a function handle.
+    /// Chunk name is set to `"=(string)"`.
+    pub fn load(&mut self, source: &str) -> LuaResult<Function> { ... }
+
+    /// Compile Lua source bytes (or load a binary chunk) and return
+    /// a function handle.
+    pub fn load_bytes(
+        &mut self, source: &[u8], name: &str,
+    ) -> LuaResult<Function> { ... }
+
+    /// Read a file (or stdin if `None`) and compile it, returning a
+    /// function handle. Handles shebang lines in executable scripts.
+    pub fn load_file(
+        &mut self, path: Option<&str>,
+    ) -> LuaResult<Function> { ... }
+
+    // -- Globals --
+
+    /// Get a global variable, converting via FromLua.
+    /// Takes `&mut self` because looking up a string key may intern
+    /// the name.
+    pub fn global<V: FromLua>(
+        &mut self, name: &str,
+    ) -> LuaResult<V> { ... }
+
+    /// Set a global variable from a Rust value, converting via IntoLua.
     pub fn set_global<V: IntoLua>(
         &mut self, name: &str, value: V,
-    ) -> Result<()> { ... }
+    ) -> LuaResult<()> { ... }
 
-    /// Create a new empty table.
-    pub fn create_table(&mut self) -> Result<Table> { ... }
+    // -- Object creation --
 
-    /// Create a Lua-callable function from a Rust closure.
-    pub fn create_function<F>(&mut self, func: F) -> Result<Function>
-    where
-        F: Fn(&mut Lua) -> Result<u32> + 'static,
-    { ... }
+    /// Allocate a new empty table and return a handle.
+    pub fn create_table(&mut self) -> Table { ... }
 
-    /// Register a Rust function as a global.
-    pub fn register_function<F>(
-        &mut self,
-        name: &str,
-        func: F,
-    ) -> Result<()>
-    where
-        F: Fn(&mut Lua) -> Result<u32> + 'static,
-    { ... }
+    /// Intern a byte string via the GC string table.
+    pub fn create_string(&mut self, s: &[u8]) -> Val { ... }
 
-    /// Load and execute a file of Lua code.
-    pub fn exec_file(&mut self, path: &str) -> Result<()> { ... }
+    /// Register a Rust function as a global Lua function.
+    ///
+    /// `RustFn` is `fn(&mut LuaState) -> LuaResult<u32>` where the
+    /// return value is the number of results pushed onto the stack.
+    pub fn register_function(
+        &mut self, name: &str, func: RustFn,
+    ) -> LuaResult<()> { ... }
 
-    /// Load a file and return a callable function.
-    pub fn load_file(&mut self, path: &str) -> Result<Function> { ... }
+    // -- Userdata creation --
 
-    /// Load a string with a chunk name (used in error messages).
-    pub fn load_named(
-        &mut self, source: &str, name: &str,
-    ) -> Result<Function> { ... }
+    /// Create a new userdata containing `data` with no metatable.
+    pub fn create_userdata<T: Any>(&mut self, data: T) -> AnyUserData { ... }
 
-    /// Call a Lua function with arguments and return results.
-    pub fn call<A, R>(&mut self, func: Function, args: A) -> Result<R>
-    where
-        A: IntoLuaMulti,
-        R: FromLuaMulti,
-    { ... }
+    /// Create a new userdata with a named, registry-cached metatable.
+    /// The metatable is stored in the registry under `type_name` and
+    /// reused for subsequent calls with the same name.
+    pub fn create_typed_userdata<T: Any>(
+        &mut self, data: T, type_name: &str,
+    ) -> LuaResult<AnyUserData> { ... }
 
-    /// Protected call — catches Lua errors.
-    pub fn pcall<A, R>(
-        &mut self, func: Function, args: A,
-    ) -> std::result::Result<R, Error>
-    where
-        A: IntoLuaMulti,
-        R: FromLuaMulti,
-    { ... }
+    /// Create or retrieve a named metatable for a userdata type.
+    pub fn create_userdata_metatable(
+        &mut self, type_name: &str,
+    ) -> LuaResult<Table> { ... }
 
-    /// Force a full garbage collection cycle.
-    pub fn gc_collect(&mut self) { ... }
+    // -- Calling functions --
+
+    /// Call a loaded Function handle with arguments and collect results.
+    ///
+    /// Arguments and results are raw `Val` values. For type-safe
+    /// conversions, use `IntoLua`/`FromLua` on individual values.
+    pub fn call_function(
+        &mut self, func: &Function, args: &[Val],
+    ) -> LuaResult<Vec<Val>> { ... }
+
+    /// Call a loaded Function handle, appending a stack traceback
+    /// on error. Used by the CLI to match PUC-Rio's `docall` pattern.
+    pub fn call_function_traced(
+        &mut self, func: &Function, args: &[Val],
+    ) -> LuaResult<Vec<Val>> { ... }
+
+    // -- Table operations --
+
+    /// Raw set on a table handle (no metamethod dispatch).
+    pub fn table_raw_set(
+        &mut self, table: &Table, key: Val, value: Val,
+    ) -> LuaResult<()> { ... }
+
+    // -- GC control --
+
+    /// Run a full garbage collection cycle.
+    pub fn gc_collect(&mut self) -> LuaResult<()> { ... }
 
     /// Get current memory usage in bytes.
     pub fn gc_count(&self) -> usize { ... }
@@ -108,28 +162,38 @@ impl Lua {
     pub fn gc_restart(&mut self) { ... }
 
     /// Perform an incremental GC step. Returns true if a cycle completed.
-    pub fn gc_step(&mut self) -> bool { ... }
+    pub fn gc_step(&mut self, step_size: i64) -> LuaResult<bool> { ... }
 
-    /// Set GC pause parameter. Returns the previous value.
+    /// Set GC pause parameter (percentage). Returns the previous value.
     pub fn gc_set_pause(&mut self, pause: u32) -> u32 { ... }
 
     /// Set GC step multiplier. Returns the previous value.
-    pub fn gc_set_step_multiplier(&mut self, mul: u32) -> u32 { ... }
-
-    /// Create a new coroutine (Lua thread) from a function.
-    pub fn create_thread(&mut self, func: Function) -> Result<Thread> { ... }
-
-    // -- Native function helpers --
-    // Used inside closures passed to create_function / register_function.
-
-    /// Get argument at the given 1-based index, converting via FromLua.
-    /// Raises an argument error if the value is missing or the wrong type.
-    pub fn check_arg<V: FromLua>(&self, index: u32) -> Result<V> { ... }
-
-    /// Push a return value onto the stack, converting via IntoLua.
-    pub fn push<V: IntoLua>(&mut self, value: V) -> Result<()> { ... }
+    pub fn gc_set_step_multiplier(&mut self, stepmul: u32) -> u32 { ... }
 }
 ```
+
+## Selective Library Loading
+
+```rust
+bitflags! {
+    pub struct StdLib: u16 {
+        const BASE      = 0x0001;
+        const PACKAGE   = 0x0002;
+        const TABLE     = 0x0004;
+        const IO        = 0x0008;
+        const OS        = 0x0010;
+        const STRING    = 0x0020;
+        const MATH      = 0x0040;
+        const DEBUG     = 0x0080;
+        const COROUTINE = 0x0100;
+        const ALL       = 0x01FF;
+    }
+}
+```
+
+Use `Lua::new_with(StdLib::BASE | StdLib::STRING)` to load only
+selected libraries. This enables sandboxing by excluding dangerous
+libraries (IO, OS, debug).
 
 ## Conversion Traits
 
@@ -138,27 +202,32 @@ impl Lua {
 ```rust
 /// Convert a Rust value into a Lua value.
 pub trait IntoLua {
-    fn into_lua(self, lua: &mut Lua) -> Result<Val>;
+    fn into_lua(self, lua: &mut Lua) -> LuaResult<Val>;
 }
 
 /// Convert a Lua value into a Rust value.
 pub trait FromLua: Sized {
-    fn from_lua(val: Val, lua: &Lua) -> Result<Self>;
+    fn from_lua(val: Val, lua: &Lua) -> LuaResult<Self>;
 }
 ```
 
-Standard implementations:
+Implemented for:
 
-| Rust Type | Lua Type |
-|-----------|----------|
-| `()` | nil |
-| `bool` | boolean |
-| `f64`, `f32` | number |
-| `i8`..`i64`, `u8`..`u64` | number (with range check) |
-| `String`, `&str` | string |
-| `Vec<T>` | table (array) |
-| `HashMap<K, V>` | table |
-| `Option<T>` | T or nil |
+| Rust Type | Lua Type | Direction |
+|-----------|----------|-----------|
+| `()` | nil | both |
+| `bool` | boolean | both |
+| `f64`, `f32` | number | both |
+| `i8`..`i64`, `u8`..`u64` | number (with range check) | both |
+| `String` | string | both |
+| `&str` | string | IntoLua only |
+| `&[u8]` | string | IntoLua only |
+| `Vec<u8>` | string (raw bytes) | FromLua only |
+| `Val` | (any) | both (passthrough) |
+| `Table` | table | both |
+| `Function` | function | both |
+| `Thread` | thread | both |
+| `AnyUserData` | userdata | both |
 
 ### IntoLuaMulti / FromLuaMulti
 
@@ -166,136 +235,183 @@ For functions with multiple arguments or return values:
 
 ```rust
 pub trait IntoLuaMulti {
-    fn into_lua_multi(self, lua: &mut Lua) -> Result<Vec<Val>>;
+    fn into_lua_multi(self, lua: &mut Lua) -> LuaResult<Vec<Val>>;
 }
 
 pub trait FromLuaMulti: Sized {
-    fn from_lua_multi(values: Vec<Val>, lua: &Lua) -> Result<Self>;
+    fn from_lua_multi(values: &[Val], lua: &Lua) -> LuaResult<Self>;
 }
 ```
 
-Implemented for tuples up to reasonable arity:
+Implemented for `Vec<Val>` (variable-length) and `()` (zero values).
+
+## Handle Types
+
+### Table
 
 ```rust
-impl<A: IntoLua, B: IntoLua> IntoLuaMulti for (A, B) { ... }
-impl<A: FromLua, B: FromLua> FromLuaMulti for (A, B) { ... }
-```
-
-## Table API
-
-```rust
-pub struct Table { /* GcRef<table::Table> */ }
+pub struct Table(/* GcRef<table::Table> */);
 
 impl Table {
-    pub fn get<K: IntoLua, V: FromLua>(
-        &self, lua: &Lua, key: K,
-    ) -> Result<V> { ... }
+    /// Get a value by key (raw, no metamethods).
+    pub fn raw_get(
+        &self, state: &LuaState, key: Val,
+    ) -> LuaResult<Val> { ... }
 
-    pub fn set<K: IntoLua, V: IntoLua>(
-        &self, lua: &mut Lua, key: K, value: V,
-    ) -> Result<()> { ... }
+    /// Set a value by key (raw, no metamethods).
+    pub fn raw_set(
+        &self, state: &mut LuaState, key: Val, value: Val,
+    ) -> LuaResult<()> { ... }
 
-    pub fn raw_get<K: IntoLua, V: FromLua>(
-        &self, lua: &Lua, key: K,
-    ) -> Result<V> { ... }
+    /// Raw length (no `__len` metamethod).
+    pub fn raw_len(&self, state: &LuaState) -> i64 { ... }
 
-    pub fn raw_set<K: IntoLua, V: IntoLua>(
-        &self, lua: &mut Lua, key: K, value: V,
-    ) -> Result<()> { ... }
-
-    pub fn len(&self, lua: &Lua) -> Result<i64> { ... }
-
-    pub fn raw_len(&self, lua: &Lua) -> i64 { ... }
-
-    pub fn next<K: IntoLua, NK: FromLua, NV: FromLua>(
-        &self, lua: &Lua, key: K,
-    ) -> Result<Option<(NK, NV)>> { ... }
-
-    pub fn pairs<K: FromLua, V: FromLua>(
-        &self, lua: &Lua,
-    ) -> TablePairs<K, V> { ... }
-
+    /// Set or clear the metatable.
     pub fn set_metatable(
-        &self, lua: &mut Lua, mt: Option<Table>,
-    ) -> Result<()> { ... }
+        &self, state: &mut LuaState, mt: Option<Table>,
+    ) -> LuaResult<()> { ... }
+
+    /// Get the underlying GcRef.
+    pub fn gc_ref(self) -> GcRef<table::Table> { ... }
 }
 ```
 
-## Function API
+Note: Table handle methods take `&LuaState` (the internal VM state),
+not `&Lua`. This is because handles are used both from the public API
+and from stdlib internals. Use `lua.state()` / `lua.state_mut()` (which
+are `pub(crate)`) to get the state reference, or use
+`Lua::table_raw_set()` for the public-facing convenience method.
+
+### Function
 
 ```rust
-pub struct Function { /* GcRef<Closure> or RustFn */ }
+pub struct Function(/* GcRef<Closure> */);
 
 impl Function {
-    pub fn call<A: IntoLuaMulti, R: FromLuaMulti>(
-        &self, lua: &mut Lua, args: A,
-    ) -> Result<R> { ... }
+    /// Get the underlying GcRef.
+    pub fn gc_ref(self) -> GcRef<Closure> { ... }
 }
 ```
 
-## UserData
+Call a Function via `Lua::call_function()` or `Lua::call_function_traced()`.
 
-Custom Rust types can be exposed to Lua via the `UserData` trait:
-
-```rust
-pub trait UserData {
-    fn add_methods(methods: &mut UserDataMethods<Self>);
-    fn add_fields(fields: &mut UserDataFields<Self>);
-}
-```
-
-This follows mlua's pattern. A Rust type implementing `UserData`
-gets a Lua-visible metatable with methods and fields.
-
-## Thread (Coroutine) API
+### Thread
 
 ```rust
-pub struct Thread { /* GcRef<LuaThread> */ }
+pub struct Thread(/* GcRef<LuaThread> */);
 
 impl Thread {
-    pub fn resume<A: IntoLuaMulti, R: FromLuaMulti>(
-        &self, lua: &mut Lua, args: A,
-    ) -> Result<R> { ... }
+    /// Get the status of this coroutine thread.
+    pub fn status(&self, state: &LuaState) -> ThreadStatus { ... }
 
-    pub fn status(&self, lua: &Lua) -> ThreadStatus { ... }
+    /// Get the underlying GcRef.
+    pub fn gc_ref(self) -> GcRef<LuaThread> { ... }
 }
 
 pub enum ThreadStatus {
-    Running,
-    Suspended,
-    Normal,
-    Dead,
+    Initial,    // loaded, not yet started
+    Running,    // currently executing
+    Suspended,  // yielded, waiting to be resumed
+    Normal,     // resumed another coroutine, waiting
+    Dead,       // finished or errored
+}
+```
+
+### AnyUserData
+
+```rust
+pub struct AnyUserData(/* GcRef<Userdata> */);
+
+impl AnyUserData {
+    /// Borrow the inner data as `&T`.
+    /// Returns None if the type doesn't match or the userdata was collected.
+    pub fn borrow<'a, T: Any>(
+        &self, state: &'a LuaState,
+    ) -> Option<&'a T> { ... }
+
+    /// Borrow the inner data as `&mut T`.
+    pub fn borrow_mut<'a, T: Any>(
+        &self, state: &'a mut LuaState,
+    ) -> Option<&'a mut T> { ... }
+
+    /// Set or clear the metatable.
+    pub fn set_metatable(
+        &self, state: &mut LuaState, mt: Option<Table>,
+    ) -> LuaResult<()> { ... }
+
+    /// Get the metatable, if set.
+    pub fn metatable(&self, state: &LuaState) -> Option<Table> { ... }
+
+    /// Get the underlying GcRef.
+    pub fn gc_ref(self) -> GcRef<Userdata> { ... }
 }
 ```
 
 ## Embedding Example
 
 ```rust
-use rilua::Lua;
+use rilua::{Lua, StdLib, Val};
 
-fn main() -> rilua::Result<()> {
-    let mut lua = Lua::new();
-
-    // Register a Rust closure as a global
-    lua.register_function("greet", |lua| {
-        let name: String = lua.check_arg(1)?;
-        lua.push(format!("Hello, {name}!"))?;
-        Ok(1)
-    })?;
+fn main() -> rilua::LuaResult<()> {
+    let mut lua = Lua::new_with(StdLib::ALL)?;
 
     // Execute Lua code
     lua.exec(r#"
-        msg = greet("World")
-        print(msg)
+        x = 1 + 2
+        msg = string.format("x = %d", x)
     "#)?;
 
-    // Read a Lua global from Rust
-    let result: String = lua.global("msg")?;
-    assert_eq!(result, "Hello, World!");
+    // Read Lua globals from Rust
+    let x: f64 = lua.global("x")?;
+    assert_eq!(x, 3.0);
+
+    let msg: String = lua.global("msg")?;
+    assert_eq!(msg, "x = 3");
+
+    // Set Lua globals from Rust
+    lua.set_global("greeting", "hello from Rust")?;
+    lua.exec("print(greeting)")?;
+
+    // Load and call a function
+    let func = lua.load("return 1 + 2")?;
+    let results = lua.call_function(&func, &[])?;
+    assert_eq!(results, vec![Val::Num(3.0)]);
 
     Ok(())
 }
 ```
+
+## Implementing Native Functions
+
+Native functions use the low-level stack-based API via `LuaState`.
+This is the same API used by the standard library implementation.
+
+```rust
+use rilua::{Lua, RustFn};
+use rilua::vm::state::LuaState;
+use rilua::LuaResult;
+
+/// A native function that adds two numbers.
+/// Arguments are on the stack at indices base..top.
+/// Returns the number of results pushed.
+fn my_add(state: &mut LuaState) -> LuaResult<u32> {
+    let a = state.check_number(1)?;
+    let b = state.check_number(2)?;
+    state.push_number(a + b);
+    Ok(1)
+}
+
+fn main() -> rilua::LuaResult<()> {
+    let mut lua = Lua::new()?;
+    lua.register_function("my_add", my_add)?;
+    lua.exec("print(my_add(10, 20))")?; // prints 30
+    Ok(())
+}
+```
+
+The `RustFn` type is `fn(&mut LuaState) -> LuaResult<u32>`. It takes
+a function pointer, not a closure. For stateful native functions, use
+RustClosure upvalues (the same mechanism the standard library uses).
 
 ## Internal Stack Model
 

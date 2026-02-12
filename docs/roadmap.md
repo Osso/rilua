@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 5/20 applicable PUC-Rio tests pass) | 1262 total (583 unit + 402 integration + 277 oracle) |
+| 9: Compatibility | In progress (9a-9d done; 7/20 applicable PUC-Rio tests pass) | 1271 total (583 unit + 411 integration + 277 oracle) |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -136,7 +136,7 @@ All must be resolved before the project is considered complete.
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (5 / 20 applicable pass)
+### PUC-Rio test suite status (7 / 20 applicable pass)
 
 Re-baselined after full evaluation (Feb 2026). Three test files (api,
 checktable, code) require the `testC` C library and are not applicable
