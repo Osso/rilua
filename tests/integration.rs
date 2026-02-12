@@ -4196,3 +4196,70 @@ fn traceback_type_error() {
     );
     assert!(stderr.contains("in function 'foo'"), "got: {stderr}");
 }
+
+// -- Bug #18 regression: while-true-if-break loop --
+
+#[test]
+fn while_true_if_break_comparison() {
+    // Bug #18: while true do ... if cond then break end end
+    // The false-branch JMP of the comparison was patched to itself
+    // (self-loop), causing an infinite loop.
+    let (stdout, _, code) = run_rilua(
+        "local i = 0 \
+         while true do \
+           i = i + 1 \
+           if i > 3 then break end \
+         end \
+         print(i)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "4\n");
+}
+
+#[test]
+fn while_true_if_break_equality() {
+    let (stdout, _, code) = run_rilua(
+        "local j = 0 \
+         while true do \
+           j = j + 1 \
+           if j == 5 then break end \
+         end \
+         print(j)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5\n");
+}
+
+#[test]
+fn while_true_if_break_nested() {
+    let (stdout, _, code) = run_rilua(
+        "local a, b = 0, 0 \
+         while true do \
+           a = a + 1 \
+           local inner = 0 \
+           while true do \
+             inner = inner + 1 \
+             if inner > 2 then break end \
+           end \
+           b = b + inner \
+           if a > 2 then break end \
+         end \
+         print(a, b)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\t9\n");
+}
+
+#[test]
+fn while_true_if_break_complex_condition() {
+    let (stdout, _, code) = run_rilua(
+        "local k = 0 \
+         while true do \
+           k = k + 1 \
+           if k > 2 and k < 10 then break end \
+         end \
+         print(k)",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\n");
+}

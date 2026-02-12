@@ -140,33 +140,34 @@ All must be resolved before the project is considered complete.
 
 Re-baselined after full evaluation (Feb 2026). Three test files (api,
 checktable, code) require the `testC` C library and are not applicable
-to rilua. Of the 20 applicable tests, 5 pass, 8 timeout (all due to
-the while-true-if-break compiler bug #18), and 7 fail.
+to rilua. Of the 20 applicable tests, 7 pass, 5 timeout, and 8 fail.
+
+Bug #18 (while-true-if-break) was fixed, unblocking math.lua and
+nextvar.lua (both now pass), and progressing constructs.lua to an
+assertion failure (bug #17).
 
 | Result | Count | Files |
 |--------|-------|-------|
-| Pass | 5 | files, gc, locals, pm, sort |
+| Pass | 7 | files, gc, locals, math, nextvar, pm, sort |
 | N/A | 3 | api, checktable, code (require testC C library) |
-| Timeout | 8 | calls, closure, constructs, events, math, nextvar, strings, verybig |
-| Fail | 7 | attrib, big, db, errors, literals, main, vararg |
+| Timeout | 5 | calls, closure, events, strings, verybig |
+| Fail | 8 | attrib, big, constructs, db, errors, literals, main, vararg |
 
-**Timeout root causes** (all 8 share the while-true-if-break bug #18):
-- `calls`: also blocked by bug #17 (parenthesized multi-return), #21
-  (return-from-C stale value)
-- `closure`: also blocked by bug #19 (repeat-until upvalue scoping)
-- `constructs`: while-true-if-break is the sole blocker
-- `events`: while-true-if-break is the sole blocker (line ~187)
-- `math`: while-true-if-break is the sole blocker (NaN testing section)
-- `nextvar`: while-true-if-break is the sole blocker (`find` function
-  at line 153 uses `while 1 do ... if ... return ... end end`)
-- `strings`: while-true-if-break plus format edge cases (line ~104)
-- `verybig`: while-true-if-break (generates code with while 1 loops)
+**Timeout root causes**:
+- `calls`: bug #17 (parenthesized multi-return), #21 (return-from-C
+  stale value), plus additional while-true patterns
+- `closure`: bug #19 (repeat-until upvalue scoping)
+- `events`: additional infinite-loop patterns beyond bug #18
+- `strings`: additional infinite-loop patterns beyond bug #18
+- `verybig`: additional infinite-loop patterns beyond bug #18
 
 **Fail details**:
 - `attrib`: requires file creation test infrastructure (writes
   `libs/B.lua` etc. to disk)
 - `big`: requires `checktable` module (C library). Also: PUC-Rio itself
   fails this test. Not a rilua issue.
+- `constructs`: bug #17 (parenthesized multi-return: `(f())` keeps
+  multiple returns instead of truncating to 1). Line 131.
 - `db`: bug #23 (debug.getinfo namewhat returns "global" instead of
   "local")
 - `errors`: bug #22 (loadstring error message format mismatch:
@@ -178,12 +179,6 @@ the while-true-if-break compiler bug #18), and 7 fail.
   processes via `os.execute` with rilua binary path)
 - `vararg`: bug #21 (return-from-C stale value: `call(print, {"+"})`
   returns stale function instead of nil)
-
-**Impact analysis**: Bug #18 (while-true-if-break) is the single
-highest-impact fix. Resolving it unblocks all 8 timeout tests and would
-likely bring the pass count from 5 to 10+ (constructs, events, math,
-nextvar, and potentially more once secondary bugs in calls/closure/
-strings are addressed).
 
 ### Execution order corrections
 
@@ -1282,14 +1277,13 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
     to a single return value but doesn't. In PUC-Rio, `(ret2(f()))` yields
     1 value; rilua yields 2. Causes `calls.lua` test hang (infinite
     recursion in `unlpack`). Affects: calls, vararg.
-18. **While-true-if-break compiler bug**: `while true do i=i+1; if i>3
-    then break end end` generates an infinite loop. The JMP after a
-    comparison-based `if` condition inside `while true` jumps to itself
-    instead of back to the loop top. rilua emits `JMP -1` (self-loop)
-    where PUC-Rio emits `JMP -3` (loop top). Root cause: jump
-    backpatching error for the false branch of comparison conditions
-    in constant-true while loops. Affects: constructs, calls, events,
-    math, nextvar, strings, verybig (8 of the 8 timeout tests).
+18. ~~**While-true-if-break compiler bug**~~: **FIXED**. `compile_while`
+    used `patch_jump` (single instruction) instead of `patch_list`
+    (walks linked list) for the loop-back JMP. `emit_jump` concatenates
+    pending `jpc` jumps into the new JMP, but `patch_jump` only patched
+    the single loop-back JMP, leaving false-branch JMPs from conditions
+    inside the body with their initial NO_JUMP (-1) sBx, which encodes
+    as a self-loop. Fix: `codegen.rs` line 1787.
 19. **Repeat-until upvalue scoping**: Closures in `repeat ... until`
     loops all share the same upvalue for locals declared in the loop
     body instead of each iteration creating its own copy. PUC-Rio

@@ -69,9 +69,9 @@ and this project adheres to
 - Architecture documentation in `docs/` (14 documents covering pipeline,
   instructions, values, GC, tables, strings, closures, call stack,
   metatables, errors, API, stdlib, coroutines, testing)
-- 1262 tests: 583 unit + 402 integration + 277 oracle comparison
-- PUC-Rio test suite: 8/23 files pass (api, checktable, code, files,
-  gc, locals, pm, sort)
+- 1266 tests: 583 unit + 406 integration + 277 oracle comparison
+- PUC-Rio test suite: 7/20 applicable files pass (files, gc, locals,
+  math, nextvar, pm, sort)
 
 ### Changed
 
@@ -101,3 +101,8 @@ and this project adheres to
 - `lastlinedefined` always 0 in function prototypes
 - Shebang line handling in source files
 - String coercion in stdlib functions
+- While-true-if-break compiler bug: `compile_while` used `patch_jump`
+  (single instruction) instead of `patch_list` (linked list walk) for
+  the loop-back JMP, causing false-branch JMPs from conditions inside
+  `while true` bodies to self-loop instead of jumping to the loop top.
+  Unblocked math.lua and nextvar.lua in PUC-Rio test suite.

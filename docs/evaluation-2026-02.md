@@ -88,10 +88,10 @@ checktable, math needs non-standard printf, verybig is optional.
 
 Fixing bugs in this order maximizes test progress:
 
-1. **Bug #18** (while-true-if-break): Unblocks all 8 timeout tests.
-   Root cause: jump backpatching for false branch of comparison in
-   constant-true while loops emits self-referencing JMP instead of
-   loop-top JMP. Expected fix: ~20 lines in `codegen.rs`.
+1. **Bug #18** (while-true-if-break): **FIXED**. Unblocked math.lua and
+   nextvar.lua (both now pass). constructs.lua progresses to bug #17
+   failure. Fix: `compile_while` used `patch_jump` (single instruction)
+   instead of `patch_list` (walks linked list) for the loop-back JMP.
 
 2. **Bug #17** (parenthesized multi-return): Needed for calls.lua.
    Root cause: `(expr)` in the parser doesn't set a "truncate to 1"

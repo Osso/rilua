@@ -1784,7 +1784,7 @@ fn compile_while(
     compiler.enter_block(true); // breakable
     compile_block(compiler, body)?;
     let jmp = compiler.emit_jump(line);
-    compiler.patch_jump(jmp, whileinit);
+    compiler.patch_list(jmp as i32, whileinit);
     compiler.leave_block();
     compiler.patch_to_here(condexit);
     Ok(())
