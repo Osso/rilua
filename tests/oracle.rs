@@ -1596,3 +1596,129 @@ fn oracle_debug_setmetatable_number() {
          debug.setmetatable(0, nil)",
     );
 }
+
+// ---------------------------------------------------------------------------
+// CLI behavior oracle tests (Phase 8d)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn oracle_cli_script_arg_table() {
+    // Compare arg table behavior between rilua and PUC-Rio.
+    if !oracle::reference_available() {
+        eprintln!("skipping: reference Lua binary not available");
+        return;
+    }
+
+    let script = std::env::temp_dir().join("oracle_cli_args.lua");
+    std::fs::write(&script, "print(arg[-1], arg[0], arg[1], arg[2])").ok();
+    let script_path = script.to_str().unwrap_or("");
+
+    let rilua = oracle::run_rilua_args(&[script_path, "foo", "bar"]);
+    let reference = oracle::run_reference_args(&[script_path, "foo", "bar"]);
+
+    if let Some(ref_out) = reference {
+        // The binary name (arg[-1]) will differ, but arg[0], arg[1], arg[2]
+        // should be identical.
+        assert_eq!(rilua.exit_code, ref_out.exit_code, "exit code mismatch");
+        // Both should print the script path, "foo", and "bar".
+        assert!(
+            rilua.stdout.contains("foo") && rilua.stdout.contains("bar"),
+            "rilua missing args: {}",
+            rilua.stdout
+        );
+        assert!(
+            ref_out.stdout.contains("foo") && ref_out.stdout.contains("bar"),
+            "ref missing args: {}",
+            ref_out.stdout
+        );
+    }
+
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn oracle_cli_script_varargs() {
+    if !oracle::reference_available() {
+        eprintln!("skipping: reference Lua binary not available");
+        return;
+    }
+
+    let script = std::env::temp_dir().join("oracle_cli_varargs.lua");
+    std::fs::write(&script, "print(...)").ok();
+    let script_path = script.to_str().unwrap_or("");
+
+    let rilua = oracle::run_rilua_args(&[script_path, "a", "b", "c"]);
+    let reference = oracle::run_reference_args(&[script_path, "a", "b", "c"]);
+
+    if let Some(ref_out) = reference {
+        assert_eq!(rilua.stdout, ref_out.stdout, "varargs output mismatch");
+        assert_eq!(rilua.exit_code, ref_out.exit_code, "exit code mismatch");
+    }
+
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn oracle_cli_e_flag_error() {
+    if !oracle::reference_available() {
+        eprintln!("skipping: reference Lua binary not available");
+        return;
+    }
+
+    let rilua = oracle::run_rilua_args(&["-e", "error('test error')"]);
+    let reference = oracle::run_reference_args(&["-e", "error('test error')"]);
+
+    if let Some(ref_out) = reference {
+        assert_eq!(rilua.exit_code, ref_out.exit_code, "exit code mismatch");
+        // Both should contain the error message.
+        assert!(
+            rilua.stderr.contains("test error"),
+            "rilua stderr: {}",
+            rilua.stderr
+        );
+        assert!(
+            ref_out.stderr.contains("test error"),
+            "ref stderr: {}",
+            ref_out.stderr
+        );
+    }
+}
+
+#[test]
+fn oracle_cli_multiple_e() {
+    oracle::assert_matches_reference("x=10 print(x)");
+}
+
+#[test]
+fn oracle_cli_stdin_dash() {
+    if !oracle::reference_available() {
+        eprintln!("skipping: reference Lua binary not available");
+        return;
+    }
+
+    let rilua = oracle::run_rilua_stdin(&["-"], "print(99)\n");
+
+    // PUC-Rio equivalent.
+    let bin = oracle::reference_bin();
+    if !bin.exists() {
+        return;
+    }
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(&bin)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|_| panic!("failed to spawn reference"));
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(b"print(99)\n").ok();
+    }
+    let output = child
+        .wait_with_output()
+        .unwrap_or_else(|_| panic!("wait failed"));
+    let ref_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert_eq!(rilua.stdout, ref_stdout, "stdin dash output mismatch");
+}

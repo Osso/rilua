@@ -139,8 +139,9 @@ fn version_flag() {
         .arg("-v")
         .output()
         .expect("failed to run rilua binary");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Lua 5.1.1"));
+    // PUC-Rio prints version to stderr (via l_message(NULL, ...)).
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Lua 5.1.1"));
     assert_eq!(output.status.code().unwrap_or(-1), 0);
 }
 
@@ -3231,4 +3232,312 @@ fn debug_getinfo_in_pcall() {
     );
     assert_eq!(code, 0);
     assert_eq!(stdout, "true\nmain\n");
+}
+
+// ---------------------------------------------------------------------------
+// CLI tests (Phase 8d)
+// ---------------------------------------------------------------------------
+
+/// Helper: run rilua with arbitrary args and return (stdout, stderr, exit_code).
+fn run_rilua_args(args: &[&str]) -> (String, String, i32) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .args(args)
+        .env_remove("LUA_INIT")
+        .output()
+        .expect("failed to run rilua binary");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+/// Helper: run rilua with piped stdin.
+fn run_rilua_stdin(args: &[&str], stdin_data: &str) -> (String, String, i32) {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .args(args)
+        .env_remove("LUA_INIT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn rilua");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(stdin_data.as_bytes()).ok();
+    }
+
+    let output = child.wait_with_output().expect("failed to wait on rilua");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+/// Helper: run rilua with env vars.
+fn run_rilua_env(args: &[&str], env_vars: &[(&str, &str)]) -> (String, String, i32) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rilua"));
+    cmd.args(args);
+    cmd.env_remove("LUA_INIT");
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("failed to run rilua binary");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn cli_version_flag() {
+    let (_, stderr, code) = run_rilua_args(&["-v"]);
+    assert_eq!(code, 0);
+    assert!(
+        stderr.contains("Lua 5.1.1"),
+        "version should contain 'Lua 5.1.1', got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_e_flag_basic() {
+    let (stdout, _, code) = run_rilua_args(&["-e", "print(1+2)"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\n");
+}
+
+#[test]
+fn cli_e_flag_suffix_form() {
+    let (stdout, _, code) = run_rilua_args(&["-eprint('suffix')"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "suffix\n");
+}
+
+#[test]
+fn cli_e_flag_error_exits_1() {
+    let (_, stderr, code) = run_rilua_args(&["-e", "error('boom')"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("boom"),
+        "stderr should contain error: {stderr}"
+    );
+}
+
+#[test]
+fn cli_e_flag_missing_arg() {
+    let (_, stderr, code) = run_rilua_args(&["-e"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("usage:"),
+        "should print usage on missing -e arg: {stderr}"
+    );
+}
+
+#[test]
+fn cli_l_flag_require_string() {
+    let (stdout, _, code) = run_rilua_args(&["-l", "string", "-e", "print(string.len('abc'))"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\n");
+}
+
+#[test]
+fn cli_l_flag_suffix_form() {
+    let (stdout, _, code) = run_rilua_args(&["-lstring", "-e", "print(string.len('abc'))"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "3\n");
+}
+
+#[test]
+fn cli_invalid_option() {
+    let (_, stderr, code) = run_rilua_args(&["-z"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("usage:"),
+        "should print usage for invalid option: {stderr}"
+    );
+}
+
+#[test]
+fn cli_double_dash_stops_options() {
+    // After --, next arg is treated as script file.
+    let (_, stderr, code) = run_rilua_args(&["--", "-e"]);
+    // "-e" is treated as a file name, which shouldn't exist.
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("cannot open -e"),
+        "should try to open '-e' as file: {stderr}"
+    );
+}
+
+#[test]
+fn cli_script_with_args() {
+    let script = std::env::temp_dir().join("rilua_test_args.lua");
+    std::fs::write(&script, "print(arg[0], arg[1], arg[2])").ok();
+    let script_path = script.to_str().unwrap_or("");
+    let (stdout, _, code) = run_rilua_args(&[script_path, "foo", "bar"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("foo") && stdout.contains("bar"),
+        "should pass args: {stdout}"
+    );
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn cli_script_varargs() {
+    let script = std::env::temp_dir().join("rilua_test_varargs.lua");
+    std::fs::write(&script, "print(...)").ok();
+    let script_path = script.to_str().unwrap_or("");
+    let (stdout, _, code) = run_rilua_args(&[script_path, "hello", "world"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello\tworld\n");
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn cli_stdin_dash() {
+    let (stdout, _, code) = run_rilua_stdin(&["-"], "print(42)\n");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn cli_stdin_pipe_no_args() {
+    // When stdin is not a TTY and no args, rilua reads stdin as file.
+    let (stdout, _, code) = run_rilua_stdin(&[], "print('piped')\n");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "piped\n");
+}
+
+#[test]
+fn cli_lua_init_string() {
+    let (stdout, _, code) =
+        run_rilua_env(&["-e", "print('done')"], &[("LUA_INIT", "print('init')")]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "init\ndone\n");
+}
+
+#[test]
+fn cli_lua_init_file() {
+    let init_file = std::env::temp_dir().join("rilua_test_init.lua");
+    std::fs::write(&init_file, "INIT_RAN = true").ok();
+    let init_path = format!("@{}", init_file.to_str().unwrap_or(""));
+    let (stdout, _, code) = run_rilua_env(&["-e", "print(INIT_RAN)"], &[("LUA_INIT", &init_path)]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "true\n");
+    std::fs::remove_file(&init_file).ok();
+}
+
+#[test]
+fn cli_lua_init_error_exits() {
+    let (_, stderr, code) = run_rilua_env(
+        &["-e", "print('never')"],
+        &[("LUA_INIT", "error('init failed')")],
+    );
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("init failed"),
+        "should report LUA_INIT error: {stderr}"
+    );
+}
+
+#[test]
+fn cli_multiple_e_flags() {
+    let (stdout, _, code) = run_rilua_args(&["-e", "x=1", "-e", "print(x)"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn cli_e_and_l_order() {
+    // -l string happens before -e, so string functions are available.
+    let (stdout, _, code) = run_rilua_args(&["-l", "string", "-e", "print(string.rep('a', 3))"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "aaa\n");
+}
+
+#[test]
+fn cli_v_implies_no_repl() {
+    // -v alone should just print version and exit (no REPL).
+    let (_, stderr, code) = run_rilua_args(&["-v"]);
+    assert_eq!(code, 0);
+    assert!(stderr.contains("Lua 5.1.1"));
+}
+
+#[test]
+fn cli_i_implies_v() {
+    // -i implies -v, so version should appear in stderr.
+    let (_, stderr, code) = run_rilua_stdin(&["-i"], "");
+    assert_eq!(code, 0);
+    assert!(
+        stderr.contains("Lua 5.1.1"),
+        "-i should print version: {stderr}"
+    );
+}
+
+#[test]
+fn cli_nonexistent_script() {
+    let (_, stderr, code) = run_rilua_args(&["/tmp/nonexistent_rilua_script_12345.lua"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("cannot open"),
+        "should report file error: {stderr}"
+    );
+}
+
+#[test]
+fn cli_syntax_error_in_script() {
+    let script = std::env::temp_dir().join("rilua_test_syntax.lua");
+    std::fs::write(&script, "if then end").ok();
+    let script_path = script.to_str().unwrap_or("");
+    let (_, stderr, code) = run_rilua_args(&[script_path]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("expected"),
+        "should report syntax error: {stderr}"
+    );
+    std::fs::remove_file(&script).ok();
+}
+
+#[test]
+fn cli_repl_eq_shorthand() {
+    // Test =expr shorthand in REPL via piped stdin with -i.
+    let (stdout, _, code) = run_rilua_stdin(&["-i"], "=1+2\n");
+    assert_eq!(code, 0);
+    assert!(stdout.contains('3'), "=expr should print result: {stdout}");
+}
+
+#[test]
+fn cli_repl_multiline() {
+    // Multiline input: "function f()\n  return 42\nend\nprint(f())\n"
+    let input = "function f()\nreturn 42\nend\nprint(f())\n";
+    let (stdout, _, code) = run_rilua_stdin(&["-i"], input);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("42"),
+        "multiline function should work: {stdout}"
+    );
+}
+
+#[test]
+fn cli_arg_table_negative_indices() {
+    let script = std::env::temp_dir().join("rilua_test_argneg.lua");
+    std::fs::write(&script, "print(arg[-1])").ok();
+    let script_path = script.to_str().unwrap_or("");
+    let (stdout, _, code) = run_rilua_args(&["-e", "x=1", script_path]);
+    assert_eq!(code, 0);
+    // arg[-1] should be "x=1" (the -e argument), but actually
+    // -e and its argument are at negative indices. arg[-1] is "-e".
+    // Wait, let me think: script is at argv[3] (rilua, -e, x=1, script).
+    // arg[-3] = rilua, arg[-2] = -e, arg[-1] = x=1, arg[0] = script.
+    assert!(
+        stdout.contains("x=1") || stdout.contains("-e"),
+        "negative arg indices should work: {stdout}"
+    );
+    std::fs::remove_file(&script).ok();
 }

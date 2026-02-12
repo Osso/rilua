@@ -107,6 +107,85 @@ pub fn run_rilua(code: &str) -> LuaOutput {
     }
 }
 
+/// Run rilua with arbitrary arguments.
+#[allow(dead_code, clippy::expect_used)]
+pub fn run_rilua_args(args: &[&str]) -> LuaOutput {
+    let output = Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .args(args)
+        .output()
+        .expect("failed to run rilua binary");
+
+    LuaOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    }
+}
+
+/// Run rilua with arbitrary arguments and environment variables.
+#[allow(dead_code, clippy::expect_used)]
+pub fn run_rilua_args_env(args: &[&str], env_vars: &[(&str, &str)]) -> LuaOutput {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rilua"));
+    cmd.args(args);
+    // Clear LUA_INIT to avoid interference, then set requested vars.
+    cmd.env_remove("LUA_INIT");
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("failed to run rilua binary");
+
+    LuaOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    }
+}
+
+/// Run rilua with piped stdin content.
+#[allow(dead_code, clippy::expect_used)]
+pub fn run_rilua_stdin(args: &[&str], stdin_data: &str) -> LuaOutput {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rilua"))
+        .args(args)
+        .env_remove("LUA_INIT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn rilua");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(stdin_data.as_bytes()).ok();
+    }
+
+    let output = child.wait_with_output().expect("failed to wait on rilua");
+
+    LuaOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    }
+}
+
+/// Run PUC-Rio reference with arbitrary arguments.
+#[allow(dead_code)]
+pub fn run_reference_args(args: &[&str]) -> Option<LuaOutput> {
+    let bin = reference_bin();
+    if !bin.exists() {
+        return None;
+    }
+
+    let output = Command::new(&bin).args(args).output().ok()?;
+
+    Some(LuaOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
+}
+
 /// Assert that rilua and PUC-Rio produce identical stdout for the given code.
 ///
 /// Skips the test if the reference binary is not available.

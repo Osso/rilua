@@ -233,6 +233,111 @@ impl Lua {
     }
 
     // -----------------------------------------------------------------------
+    // Calling loaded functions
+    // -----------------------------------------------------------------------
+
+    /// Calls a loaded `Function` handle with arguments and returns results.
+    ///
+    /// Sets up the stack: push function, push args, precall, execute,
+    /// collect results. Used by the REPL to execute loaded chunks and
+    /// print results, and by `-l` to call `require`.
+    pub fn call_function(&mut self, func: &Function, args: &[Val]) -> LuaResult<Vec<Val>> {
+        // Push the function at the current top.
+        let func_idx = self.state.top;
+        self.state.ensure_stack(func_idx + 1 + args.len());
+        self.state.stack_set(func_idx, Val::Function(func.0));
+        self.state.top = func_idx + 1;
+
+        // Push arguments.
+        for arg in args {
+            let top = self.state.top;
+            self.state.stack_set(top, *arg);
+            self.state.top = top + 1;
+        }
+
+        // Save the base index so we know where results land.
+        let save_base = self.state.base;
+        self.state.base = func_idx + 1;
+
+        // Call with LUA_MULTRET to get all results.
+        match self.state.precall(func_idx, LUA_MULTRET)? {
+            CallResult::Lua => execute(&mut self.state)?,
+            CallResult::Rust => {}
+        }
+
+        // Collect results: they're at func_idx..self.state.top.
+        let results: Vec<Val> = (func_idx..self.state.top)
+            .map(|i| self.state.stack_get(i))
+            .collect();
+
+        // Restore state.
+        self.state.top = func_idx;
+        self.state.base = save_base;
+
+        Ok(results)
+    }
+
+    // -----------------------------------------------------------------------
+    // String creation
+    // -----------------------------------------------------------------------
+
+    /// Interns a byte string via the GC string table, returning `Val::Str`.
+    ///
+    /// The string is deduplicated: if an identical byte sequence was
+    /// already interned, the existing reference is returned.
+    pub fn create_string(&mut self, s: &[u8]) -> Val {
+        let str_ref = self.state.gc.intern_string(s);
+        Val::Str(str_ref)
+    }
+
+    // -----------------------------------------------------------------------
+    // File loading
+    // -----------------------------------------------------------------------
+
+    /// Reads a file (or stdin if `None`) and compiles it, returning a
+    /// function handle.
+    ///
+    /// The chunk name is set to `@path` for files, or `=stdin` for stdin.
+    /// Handles the shebang line (`#!`) that may appear in executable
+    /// Lua scripts.
+    pub fn load_file(&mut self, path: Option<&str>) -> LuaResult<Function> {
+        let (source, name) = if let Some(p) = path {
+            let bytes = std::fs::read(p).map_err(|e| {
+                LuaError::Runtime(RuntimeError {
+                    message: format!("cannot open {p}: {e}"),
+                    level: 0,
+                    traceback: vec![],
+                })
+            })?;
+            let name = format!("@{p}");
+            (bytes, name)
+        } else {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes).map_err(|e| {
+                LuaError::Runtime(RuntimeError {
+                    message: format!("cannot read stdin: {e}"),
+                    level: 0,
+                    traceback: vec![],
+                })
+            })?;
+            (bytes, "=stdin".to_string())
+        };
+        self.load_bytes(&source, &name)
+    }
+
+    // -----------------------------------------------------------------------
+    // Table operations
+    // -----------------------------------------------------------------------
+
+    /// Raw set on a table handle via the public API.
+    ///
+    /// Sets `table[key] = value` without metamethod dispatch.
+    pub fn table_raw_set(&mut self, table: &Table, key: Val, value: Val) -> LuaResult<()> {
+        table.raw_set(&mut self.state, key, value)
+    }
+
+    // -----------------------------------------------------------------------
     // Internal accessors (pub(crate) for stdlib, conversion, handles)
     // -----------------------------------------------------------------------
 
@@ -475,6 +580,73 @@ mod tests {
         let func = lua.load("return 42");
         assert!(func.is_ok());
         assert!(matches!(func.ok(), Some(Function(_))));
+    }
+
+    #[test]
+    fn lua_call_function_returns_results() {
+        let mut lua = Lua::new().ok().unwrap_or_else(Lua::new_empty);
+        let func = lua.load("return 1, 2, 3").ok();
+        assert!(func.is_some());
+        let func = func.unwrap_or_else(|| unreachable!());
+        let results = lua.call_function(&func, &[]);
+        assert!(results.is_ok());
+        let results = results.unwrap_or_default();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0], Val::Num(1.0));
+        assert_eq!(results[1], Val::Num(2.0));
+        assert_eq!(results[2], Val::Num(3.0));
+    }
+
+    #[test]
+    fn lua_call_function_with_args() {
+        let mut lua = Lua::new().ok().unwrap_or_else(Lua::new_empty);
+        let func = lua.load("return select('#', ...)").ok();
+        assert!(func.is_some());
+        let func = func.unwrap_or_else(|| unreachable!());
+        let results = lua.call_function(&func, &[Val::Num(10.0), Val::Num(20.0)]);
+        assert!(results.is_ok());
+        let results = results.unwrap_or_default();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], Val::Num(2.0));
+    }
+
+    #[test]
+    fn lua_call_function_no_results() {
+        let mut lua = Lua::new().ok().unwrap_or_else(Lua::new_empty);
+        let func = lua.load("local x = 1").ok();
+        assert!(func.is_some());
+        let func = func.unwrap_or_else(|| unreachable!());
+        let results = lua.call_function(&func, &[]);
+        assert!(results.is_ok());
+        let results = results.unwrap_or_default();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn lua_create_string() {
+        let mut lua = Lua::new_empty();
+        let val = lua.create_string(b"hello");
+        assert!(matches!(val, Val::Str(_)));
+        // Create same string again: should return same reference.
+        let val2 = lua.create_string(b"hello");
+        assert_eq!(val, val2);
+    }
+
+    #[test]
+    fn lua_table_raw_set_via_api() {
+        let mut lua = Lua::new_empty();
+        let t = lua.create_table();
+        let result = lua.table_raw_set(&t, Val::Num(1.0), Val::Num(42.0));
+        assert!(result.is_ok());
+        let v = t.raw_get(&lua.state, Val::Num(1.0));
+        assert_eq!(v.ok(), Some(Val::Num(42.0)));
+    }
+
+    #[test]
+    fn lua_load_file_nonexistent() {
+        let mut lua = Lua::new_empty();
+        let result = lua.load_file(Some("/nonexistent/path/to/file.lua"));
+        assert!(result.is_err());
     }
 
     #[test]

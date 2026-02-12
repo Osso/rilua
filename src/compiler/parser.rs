@@ -111,8 +111,12 @@ impl Parser {
             if open_line == self.lexer.line() {
                 return Err(self.error_expected(&close.display_name()));
             }
+            // PUC-Rio's check_match calls luaX_syntaxerror which always
+            // appends "near <token>". We must include this for the REPL's
+            // incomplete chunk detection (checks for "<eof>" at end).
+            let near = self.current.display_name();
             return Err(self.syntax_error(&format!(
-                "{} expected (to close {} at line {open_line})",
+                "{} expected (to close {} at line {open_line}) near {near}",
                 close.display_name(),
                 open.display_name(),
             )));
