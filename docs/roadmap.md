@@ -145,49 +145,44 @@ All must be resolved before the project is considered complete.
   to parser. Function call `(` on different line than expression emits
   "ambiguous syntax (function call x new statement)".
 
-**Remaining bugs (discovered during 9d)**:
-- ~~Bug #24: `not` applied to `and`/`or` expressions silently drops the
-  negation~~ **FIXED**: Added `remove_values()` to `code_not()` to convert
-  TESTSET -> TEST instructions after swapping true/false jump lists
-  (matching PUC-Rio's `removevalues()` in `codenot()`). Unlocked
-  constructs.lua.
-- **Bug #25**: `load()` with reader function reads entire input before
-  parsing. PUC-Rio streams reader output incrementally into the lexer.
-  Reader call count differs. Affects calls.lua.
-- **Bug #26**: `setfenv` on coroutine threads not supported. rilua has
-  a single global table; PUC-Rio has per-thread globals (`gt(L)`).
-  Affects closure.lua.
-- **Bug #27**: Locale-aware number parsing missing. Rust `f64::parse()`
-  ignores C locale. PUC-Rio uses `strtod()` which respects locale.
-  Fix requires libc FFI. Affects literals.lua.
-- ~~**Bug #28**~~: **FIXED**. `arg_error`/`type_error` functions in
-  `src/stdlib/mod.rs` (PUC-Rio's `luaL_argerror`/`luaL_typerror`).
-  Missing args now report "no value" instead of "nil". `check_userdata`
-  produces `bad argument #N to 'name' (TYPE expected, got ACTUAL)`.
-  Affects errors.lua.
+**Remaining open issues (discovered during 9d)**:
+- ~~Bug #24~~ **FIXED**: `not`+`and`/`or` negation (removevalues in codenot).
+- ~~Bug #28~~ **FIXED**: `arg_error`/`type_error` formatting ("no value" vs "nil").
+- ~~Bugs #26-#28 (detailed list)~~ **FIXED**: raw byte errors, nesting limits,
+  parser-level local/upvalue limits. `errors.lua` now fully passes.
+- `load()` reader streaming: reads entire input before parsing. PUC-Rio
+  streams incrementally. Reader call count differs. Affects calls.lua.
+- Per-thread global tables: `setfenv` on coroutine threads not supported.
+  rilua has a single global table; PUC-Rio has per-thread globals
+  (`gt(L)`). Affects closure.lua.
+- Locale-aware number parsing: Rust `f64::parse()` ignores C locale.
+  PUC-Rio uses `strtod()` which respects locale. Fix requires libc FFI.
+  Affects literals.lua.
 
 **Debug library (Phase 5h, stubs)**:
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (11 / 20 applicable pass)
+### PUC-Rio test suite status (12 / 20 applicable pass)
 
 Re-baselined after Phase 9d bug fixes (Feb 2026). Three test files (api,
 checktable, code) require the `testC` C library and are not applicable
 to rilua. Of the 20 applicable tests, 12 pass and 8 fail.
 
-Bugs #15-#24, #28 fixed: timeouts resolved (parser/compiler infinite-loop
+Bugs #15-#28 fixed: timeouts resolved (parser/compiler infinite-loop
 patterns), TAILCALL stale values, VARARG register targeting, select
 boundary, coroutine cross-thread upvalue corruption, debug.getinfo name
 field, semicolon parsing, error message quoting, ambiguous syntax
-detection, `not`+`and`/`or` negation (removevalues in codenot), and
-`luaL_argerror`/`luaL_typerror` formatting ("no value" vs "nil").
+detection, `not`+`and`/`or` negation (removevalues in codenot),
+`luaL_argerror`/`luaL_typerror` formatting ("no value" vs "nil"),
+raw byte error messages, syntax nesting limits, and parser-level
+local/upvalue limit checking.
 
 | Result | Count | Files |
 |--------|-------|-------|
-| Pass | 11 | constructs, events, files, gc, locals, math, nextvar, pm, sort, strings, vararg |
+| Pass | 12 | constructs, errors, events, files, gc, locals, math, nextvar, pm, sort, strings, vararg |
 | N/A | 3 | api, checktable, code (require testC C library) |
-| Fail | 9 | attrib, big, calls, closure, db, errors, literals, main, verybig |
+| Fail | 8 | attrib, big, calls, closure, db, literals, main, verybig |
 
 **Fail details**:
 - `attrib`: requires file creation test infrastructure (writes
@@ -199,16 +194,13 @@ detection, `not`+`and`/`or` negation (removevalues in codenot), and
   call count differs (`i=9` vs expected `i=2`).
 - `closure`: `setfenv` on coroutine threads not supported. Fails at
   line 416 (`debug.setfenv(co, a)`). Per-thread global tables not
-  implemented.
+  implemented. Also: repeat-until upvalue scoping (Bug #19).
 - `db`: fails at line 20 -- requires `debug.sethook` line hook execution
-  (currently a stub). Also: debug.getinfo name nil fix applied.
-- `errors`: **PASS** -- all tests pass. Raw byte preservation, syntax
-  nesting limits, upvalue/local limits, stack overflow detection, xpcall
-  handler ordering, arg error formatting, and error message fixes all
-  applied.
+  (currently a stub). Also: debug.getinfo namewhat resolution (Bug #23).
 - `literals`: assertion at line 162 -- locale-aware `tonumber("3,4")`
   returns nil because Rust `f64::parse` ignores C locale. Fix requires
-  libc `strtod` FFI for number parsing.
+  libc `strtod` FFI for number parsing. Also: coroutine register
+  restoration (Bug #20).
 - `main`: requires CLI subprocess execution with `LUA_PATH` manipulation.
   `require` path search fails for `/tmp/lua_*` temp files.
 - `verybig`: assertion at line 120033 of generated code. Bug #24 fix
