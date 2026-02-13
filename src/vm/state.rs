@@ -231,6 +231,8 @@ pub struct LuaThread {
     pub ci: usize,
     /// Nested C-call boundary depth (for yield boundary check).
     pub n_ccalls: u16,
+    /// Recursive execute() depth counter (for stack overflow detection).
+    pub call_depth: u16,
     /// Open upvalues.
     pub open_upvalues: Vec<GcRef<Upvalue>>,
     /// Upvalues that were open when the thread was suspended.
@@ -267,6 +269,7 @@ impl LuaThread {
             call_stack,
             ci: 0,
             n_ccalls: 0,
+            call_depth: 0,
             open_upvalues: Vec::new(),
             suspended_upvals: Vec::new(),
             error_object: None,
@@ -284,6 +287,7 @@ impl Default for LuaThread {
             call_stack: Vec::new(),
             ci: 0,
             n_ccalls: 0,
+            call_depth: 0,
             open_upvalues: Vec::new(),
             suspended_upvals: Vec::new(),
             error_object: None,
@@ -324,8 +328,13 @@ pub struct LuaState {
     /// Index into `call_stack` for the current frame.
     pub ci: usize,
 
-    /// Nested Rust call depth counter.
+    /// Nested Rust call depth counter (yield boundary: yield only when 0).
     pub n_ccalls: u16,
+
+    /// Recursive execute() depth counter (stack overflow detection).
+    /// Separate from `n_ccalls` because OP_CALL increments this but must
+    /// not block coroutine yields.
+    pub call_depth: u16,
 
     /// Global table (_G). Used by GETGLOBAL/SETGLOBAL.
     pub global: GcRef<Table>,
@@ -394,6 +403,7 @@ impl LuaState {
             call_stack,
             ci: 0,
             n_ccalls: 0,
+            call_depth: 0,
             global,
             registry,
             open_upvalues: Vec::new(),
@@ -587,6 +597,7 @@ impl LuaState {
             call_stack: std::mem::take(&mut self.call_stack),
             ci: self.ci,
             n_ccalls: self.n_ccalls,
+            call_depth: self.call_depth,
             open_upvalues: std::mem::take(&mut self.open_upvalues),
             suspended_upvals: Vec::new(),
             error_object: self.error_object.take(),
@@ -613,6 +624,7 @@ impl LuaState {
             self.call_stack = std::mem::take(&mut thread.call_stack);
             self.ci = thread.ci;
             self.n_ccalls = thread.n_ccalls;
+            self.call_depth = thread.call_depth;
             self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
             self.error_object = thread.error_object.take();
 
@@ -697,6 +709,7 @@ impl LuaState {
             co_thread.call_stack = std::mem::take(&mut self.call_stack);
             co_thread.ci = self.ci;
             co_thread.n_ccalls = self.n_ccalls;
+            co_thread.call_depth = self.call_depth;
             co_thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
             co_thread.suspended_upvals = suspended;
             co_thread.error_object = self.error_object.take();
@@ -710,6 +723,7 @@ impl LuaState {
         self.call_stack = resumer.call_stack;
         self.ci = resumer.ci;
         self.n_ccalls = resumer.n_ccalls;
+        self.call_depth = resumer.call_depth;
         self.open_upvalues = resumer.open_upvalues;
         self.error_object = resumer.error_object;
 

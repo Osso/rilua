@@ -149,7 +149,15 @@ impl Parser {
     /// Creates a syntax error with `near '<current_token>'` appended.
     /// Matches PUC-Rio's `luaX_syntaxerror` -> `luaX_lexerror(msg, token)`.
     fn syntax_error_near(&self, msg: &str) -> LuaError {
-        let near = self.current.txt_token();
+        // PUC-Rio's txtToken uses the raw lexer buffer for Name/Number/String,
+        // preserving the original lexeme (e.g. "1.000" instead of "1").
+        let near = match self.current {
+            Token::Number(_) | Token::Str(_) => {
+                let text = self.lexer.last_token_text();
+                format!("'{text}'")
+            }
+            _ => self.current.txt_token(),
+        };
         self.syntax_error(&format!("{msg} near {near}"))
     }
 

@@ -24,6 +24,9 @@ pub struct Lexer {
     source_name: String,
     /// Lookahead token (if peeked).
     lookahead: Option<(Token, Span)>,
+    /// Raw source text of the last-scanned token (PUC-Rio: `luaZ_buffer(ls->buff)`).
+    /// Populated for Number tokens where the lexeme differs from Display.
+    last_token_text: String,
 }
 
 impl Lexer {
@@ -49,6 +52,7 @@ impl Lexer {
             column: 1,
             source_name: name.to_string(),
             lookahead: None,
+            last_token_text: String::new(),
         }
     }
 
@@ -62,6 +66,13 @@ impl Lexer {
     #[must_use]
     pub fn source_name(&self) -> &str {
         &self.source_name
+    }
+
+    /// Returns the raw source text of the last scanned token.
+    /// Used by the parser for error messages (PUC-Rio: `txtToken`).
+    #[must_use]
+    pub fn last_token_text(&self) -> &str {
+        &self.last_token_text
     }
 
     // -- Character primitives --
@@ -150,6 +161,7 @@ impl Lexer {
         loop {
             self.skip_whitespace();
             let span = self.current_span();
+            let token_start = self.pos;
 
             let Some(ch) = self.peek() else {
                 return Ok((Token::Eos, span));
@@ -187,6 +199,7 @@ impl Lexer {
                     let sep = self.count_sep();
                     if sep >= 0 {
                         let s = self.read_long_string(sep, false)?;
+                        self.last_token_text = String::from_utf8_lossy(&self.source[token_start..self.pos]).into();
                         return Ok((Token::Str(s), span));
                     }
                     if sep == -1 {
@@ -252,6 +265,7 @@ impl Lexer {
 
                 b'"' | b'\'' => {
                     let s = self.read_short_string(ch)?;
+                    self.last_token_text = String::from_utf8_lossy(&self.source[token_start..self.pos]).into();
                     return Ok((Token::Str(s), span));
                 }
 
@@ -352,6 +366,7 @@ impl Lexer {
         }
 
         let num_str = String::from_utf8_lossy(&self.source[start..self.pos]);
+        self.last_token_text = num_str.to_string();
 
         // Try parsing. Lua accepts things like "0x1A" which Rust's f64 parse doesn't.
         if num_str.starts_with("0x") || num_str.starts_with("0X") {

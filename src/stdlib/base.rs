@@ -403,6 +403,7 @@ pub fn lua_pcall(state: &mut LuaState) -> LuaResult<u32> {
     // Save state for error recovery.
     let saved_ci = state.ci;
     let saved_n_ccalls = state.n_ccalls;
+    let saved_call_depth = state.call_depth;
 
     // Clear any stale error object.
     state.error_object = None;
@@ -434,6 +435,7 @@ pub fn lua_pcall(state: &mut LuaState) -> LuaResult<u32> {
             state.ci = saved_ci;
             state.base = state.call_stack[state.ci].base;
             state.n_ccalls = saved_n_ccalls;
+            state.call_depth = saved_call_depth;
 
             // Close upvalues opened during the failed call.
             state.close_upvalues(func_pos);
@@ -477,6 +479,7 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
     // Save state for error recovery.
     let saved_ci = state.ci;
     let saved_n_ccalls = state.n_ccalls;
+    let saved_call_depth = state.call_depth;
     state.error_object = None;
 
     // Place function at func_pos, no arguments.
@@ -502,39 +505,41 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
             Ok((1 + n_inner) as u32)
         }
         Err(err) => {
-            // Error: restore state.
-            state.ci = saved_ci;
-            state.base = state.call_stack[state.ci].base;
-            state.n_ccalls = saved_n_ccalls;
-            state.close_upvalues(func_pos);
-
-            // Get the error value.
+            // Get the error value before modifying state.
             let error_val = state.error_object.take().unwrap_or_else(|| {
                 let r = state.gc.intern_string(err.to_string().as_bytes());
                 Val::Str(r)
             });
 
-            // Call the error handler with the error value.
-            state.stack_set(func_pos, handler_val);
-            state.stack_set(func_pos + 1, error_val);
-            state.top = func_pos + 2;
+            state.close_upvalues(func_pos);
 
-            let handler_result = state.call_function(func_pos, 1);
+            // Call the error handler BEFORE restoring ci, so it can see the
+            // full call stack (e.g. debug.traceback). Place the handler call
+            // above the current stack top to avoid clobbering error frames.
+            // PUC-Rio calls the handler via luaG_errormsg before longjmp.
+            let handler_pos = state.top;
+            state.ensure_stack(handler_pos + 2);
+            state.stack_set(handler_pos, handler_val);
+            state.stack_set(handler_pos + 1, error_val);
+            state.top = handler_pos + 2;
 
-            if handler_result.is_ok() {
-                // Handler returned. Result at func_pos.
-                let handler_ret = state.stack_get(func_pos);
-                state.stack_set(func_pos, Val::Bool(false));
-                state.stack_set(func_pos + 1, handler_ret);
+            let handler_result = state.call_function(handler_pos, 1);
+
+            let handler_ret = if handler_result.is_ok() {
+                state.stack_get(handler_pos)
             } else {
-                // Error in error handler: return false + "error in error handling".
-                state.ci = saved_ci;
-                state.base = state.call_stack[state.ci].base;
-                state.n_ccalls = saved_n_ccalls;
                 let msg = state.gc.intern_string(b"error in error handling");
-                state.stack_set(func_pos, Val::Bool(false));
-                state.stack_set(func_pos + 1, Val::Str(msg));
-            }
+                Val::Str(msg)
+            };
+
+            // NOW restore state (after handler has seen the full stack).
+            state.ci = saved_ci;
+            state.base = state.call_stack[state.ci].base;
+            state.n_ccalls = saved_n_ccalls;
+            state.call_depth = saved_call_depth;
+
+            state.stack_set(func_pos, Val::Bool(false));
+            state.stack_set(func_pos + 1, handler_ret);
             state.top = func_pos + 2;
             Ok(2)
         }
@@ -1124,6 +1129,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
     let saved_top = state.top;
     let saved_ci = state.ci;
     let saved_n_ccalls = state.n_ccalls;
+    let saved_call_depth = state.call_depth;
     loop {
         let call_base = state.top;
         state.ensure_stack(call_base + 2);
@@ -1137,6 +1143,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
             state.ci = saved_ci;
             state.base = state.call_stack[state.ci].base;
             state.n_ccalls = saved_n_ccalls;
+            state.call_depth = saved_call_depth;
             state.top = saved_top;
             state.push(Val::Nil);
             let msg = state.gc.intern_string(e.to_string().as_bytes());

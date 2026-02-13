@@ -20,7 +20,7 @@ use super::gc::arena::GcRef;
 use super::instructions::{Instruction, LFIELDS_PER_FLUSH, OpCode, index_k, is_k};
 use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
 use super::proto::{Proto, VARARG_ISVARARG, VARARG_NEEDSARG};
-use super::state::{Gc, LUA_MINSTACK, LuaState, MAXCALLS, MAXCCALLS};
+use super::state::{Gc, LUA_MINSTACK, LuaState, MAXCCALLS};
 use super::table::Table;
 use super::value::{Userdata, Val};
 
@@ -247,27 +247,51 @@ pub enum CallResult {
 }
 
 impl LuaState {
-    /// Calls a function at `func_idx` with C-call boundary tracking.
+    /// Checks `call_depth` against the two-threshold stack overflow model.
+    ///
+    /// PUC-Rio `luaD_call` uses two thresholds:
+    /// - `LUAI_MAXCCALLS` (200): throw recoverable "stack overflow"
+    /// - `LUAI_MAXCCALLS + LUAI_MAXCCALLS/8` (225): unrecoverable error
+    /// Calls between 201-224 are allowed as headroom for error handlers.
+    fn check_stack_overflow(&self) -> LuaResult<()> {
+        if self.call_depth >= MAXCCALLS {
+            let hard_limit = MAXCCALLS + (MAXCCALLS >> 3);
+            if self.call_depth >= hard_limit {
+                return Err(runtime_error_simple("stack overflow"));
+            }
+            if self.call_depth == MAXCCALLS {
+                let where_prefix = get_where(self, 0);
+                return Err(LuaError::Runtime(RuntimeError {
+                    message: format!("{where_prefix}stack overflow"),
+                    level: 0,
+                    traceback: vec![],
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// Calls a function at `func_idx` with call depth and yield boundary tracking.
     ///
     /// This is the rilua equivalent of PUC-Rio's `luaD_call()`. It wraps
-    /// `precall` + `execute` with `n_ccalls` increment/decrement. Used by
+    /// `precall` + `execute` with depth increment/decrement. Used by
     /// stdlib functions (pcall, table.sort, etc.) and metamethods to call
-    /// Lua code. The VM's `OP_CALL` handler uses `precall` + `execute`
-    /// directly without `n_ccalls` tracking.
+    /// Lua code.
     ///
-    /// The `n_ccalls` counter determines the yield boundary: `coroutine.yield()`
-    /// is only allowed when `n_ccalls == 0`, preventing yield across C-call
-    /// boundaries (metamethods, pcall, stdlib callbacks).
+    /// Increments both counters:
+    /// - `call_depth`: stack overflow detection (checked by `check_stack_overflow`)
+    /// - `n_ccalls`: yield boundary (`coroutine.yield()` blocked when > 0)
     pub fn call_function(&mut self, func_idx: usize, num_results: i32) -> LuaResult<()> {
         self.n_ccalls += 1;
-        if self.n_ccalls >= MAXCCALLS {
-            self.n_ccalls -= 1;
-            return Err(runtime_error_simple("C stack overflow"));
-        }
-        let result = (|| match self.precall(func_idx, num_results)? {
-            CallResult::Lua => execute(self),
-            CallResult::Rust => Ok(()),
+        self.call_depth += 1;
+        let result = (|| {
+            self.check_stack_overflow()?;
+            match self.precall(func_idx, num_results)? {
+                CallResult::Lua => execute(self),
+                CallResult::Rust => Ok(()),
+            }
         })();
+        self.call_depth -= 1;
         self.n_ccalls -= 1;
         result
     }
@@ -345,10 +369,6 @@ impl LuaState {
         let saved_pc = self.call_stack[self.ci].saved_pc;
         let _ = saved_pc; // used for restoration in poscall
 
-        // Check call depth limits.
-        if self.call_stack.len() >= MAXCALLS {
-            return Err(runtime_error_simple("stack overflow"));
-        }
 
         let closure = self
             .gc
@@ -795,10 +815,16 @@ fn call_order_tm(state: &mut LuaState, lhs: Val, rhs: Val, event: TMS) -> LuaRes
     state.stack_set(call_base + 2, rhs);
     state.top = call_base + 3;
 
-    match state.precall(call_base, 1)? {
-        CallResult::Lua => execute(state)?,
-        CallResult::Rust => {}
-    }
+    state.call_depth += 1;
+    let cmp_result = (|| {
+        state.check_stack_overflow()?;
+        match state.precall(call_base, 1)? {
+            CallResult::Lua => execute(state),
+            CallResult::Rust => Ok(()),
+        }
+    })();
+    state.call_depth -= 1;
+    cmp_result?;
 
     let result = state.stack_get(call_base);
     Ok(Some(result.is_truthy()))
@@ -1499,17 +1525,16 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     state.call_stack[state.ci].saved_pc = pc;
 
                     let c = instr.c() as i32;
-                    state.precall(cb, c)?;
-
-                    // If precall returned Lua, we need to execute it.
-                    if matches!(state.stack_get(cb), Val::Function(r) if {
-                        state.gc.closures.get(r).map_or(false, |cl| cl.is_lua())
-                    }) {
-                        // This shouldn't happen in the normal TFORLOOP flow
-                        // because iterators are typically Rust functions.
-                        // But handle it: execute the Lua iterator.
-                        execute(state)?;
-                    }
+                    state.call_depth += 1;
+                    let tfor_result = (|| {
+                        state.check_stack_overflow()?;
+                        match state.precall(cb, c)? {
+                            CallResult::Lua => execute(state),
+                            CallResult::Rust => Ok(()),
+                        }
+                    })();
+                    state.call_depth -= 1;
+                    tfor_result?;
 
                     // Restore top to frame top.
                     state.top = state.call_stack[state.ci].top;
@@ -1542,15 +1567,19 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     // Save our pc before the call.
                     state.call_stack[state.ci].saved_pc = pc;
 
-                    match state.precall(ra, num_results)? {
-                        CallResult::Lua => {
-                            // Re-enter execute for the callee.
-                            execute(state)?;
+                    // Track call depth to prevent Rust stack overflow.
+                    // Only call_depth (not n_ccalls) so coroutine.yield()
+                    // still works inside OP_CALL chains.
+                    state.call_depth += 1;
+                    let call_result = (|| {
+                        state.check_stack_overflow()?;
+                        match state.precall(ra, num_results)? {
+                            CallResult::Lua => execute(state),
+                            CallResult::Rust => Ok(()),
                         }
-                        CallResult::Rust => {
-                            // Rust function already completed.
-                        }
-                    }
+                    })();
+                    state.call_depth -= 1;
+                    call_result?;
                     // For fixed results (C != 0), restore top to the frame's
                     // max stack size. For MULTRET (C == 0), leave top as set
                     // by poscall so the caller knows how many results exist.
