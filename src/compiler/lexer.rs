@@ -7,6 +7,7 @@
 //! Line tracking handles all four newline variants: `\n`, `\r`, `\r\n`, `\n\r`.
 
 use crate::error::{LuaError, LuaResult, SyntaxError};
+use crate::vm::execute::{libc_strtod, locale_decimal_point};
 
 use super::token::{RESERVED_WORDS, Span, Token};
 
@@ -201,7 +202,8 @@ impl Lexer {
                     let sep = self.count_sep();
                     if sep >= 0 {
                         let s = self.read_long_string(sep, false)?;
-                        self.last_token_text = String::from_utf8_lossy(&self.source[token_start..self.pos]).into();
+                        self.last_token_text =
+                            String::from_utf8_lossy(&self.source[token_start..self.pos]).into();
                         return Ok((Token::Str(s), span));
                     }
                     if sep == -1 {
@@ -267,7 +269,8 @@ impl Lexer {
 
                 b'"' | b'\'' => {
                     let s = self.read_short_string(ch)?;
-                    self.last_token_text = String::from_utf8_lossy(&self.source[token_start..self.pos]).into();
+                    self.last_token_text =
+                        String::from_utf8_lossy(&self.source[token_start..self.pos]).into();
                     return Ok((Token::Str(s), span));
                 }
 
@@ -324,65 +327,93 @@ impl Lexer {
 
     // -- Numbers --
 
+    /// Reads a number token, matching PUC-Rio's `read_numeral`.
+    ///
+    /// Greedily collects digits and dots in a single loop (matching
+    /// PUC-Rio's `do { save_and_next; } while (isdigit || '.')`), then
+    /// exponent, then trailing alphanumeric. Uses libc `strtod` for
+    /// locale-aware parsing with `trydecpoint` fallback.
     fn read_number(&mut self, first: u8) -> LuaResult<f64> {
         let start = if first == b'.' {
-            // Already consumed the '.', back up to include it
             self.pos - 1
         } else {
             self.pos
         };
 
         if first != b'.' {
-            self.advance(); // consume first digit
+            self.advance();
         }
 
-        // Check for hex
-        if first == b'0' && self.peek().is_some_and(|c| c == b'x' || c == b'X') {
-            self.advance(); // consume 'x' or 'X'
-            // Read hex digits
+        // PUC-Rio: greedily consume digits and dots in one loop.
+        // This means "4.5." consumes both dots, producing "malformed number".
+        while self.peek().is_some_and(|c| c.is_ascii_digit() || c == b'.') {
+            self.advance();
+        }
+
+        // Check for hex prefix (0x/0X) -- hex digits may include a-f.
+        let is_hex = self.pos - start >= 2
+            && self.source[start] == b'0'
+            && (self.source[start + 1] == b'x' || self.source[start + 1] == b'X');
+        if is_hex {
             while self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
                 self.advance();
             }
-        } else {
-            // Read decimal digits
-            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+        }
+
+        // Exponent (e/E for decimal, p/P not in Lua 5.1).
+        if self.peek().is_some_and(|c| c == b'e' || c == b'E') {
+            self.advance();
+            if self.peek().is_some_and(|c| c == b'+' || c == b'-') {
                 self.advance();
-            }
-            // Decimal point (if not already consumed)
-            if first != b'.' && self.peek() == Some(b'.') {
-                self.advance();
-                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                    self.advance();
-                }
-            }
-            // Exponent
-            if self.peek().is_some_and(|c| c == b'e' || c == b'E') {
-                self.advance();
-                if self.peek().is_some_and(|c| c == b'+' || c == b'-') {
-                    self.advance();
-                }
-                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                    self.advance();
-                }
             }
         }
 
-        let num_str = String::from_utf8_lossy(&self.source[start..self.pos]);
+        // PUC-Rio: consume trailing alphanumeric/underscore (produces
+        // "malformed number" for things like "1abc").
+        while self
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            self.advance();
+        }
+
+        let num_bytes = &self.source[start..self.pos];
+        let num_str = String::from_utf8_lossy(num_bytes);
         self.last_token_text = num_str.to_string();
 
-        // Try parsing. Lua accepts things like "0x1A" which Rust's f64 parse doesn't.
-        if num_str.starts_with("0x") || num_str.starts_with("0X") {
+        // Hex: parse with Rust (strtod doesn't handle 0x on all platforms).
+        if is_hex {
             let hex_str = &num_str[2..];
-            match u64::from_str_radix(hex_str, 16) {
+            return match u64::from_str_radix(hex_str, 16) {
                 Ok(v) => Ok(v as f64),
                 Err(_) => Err(self.syntax_error_near("malformed number", &num_str)),
-            }
-        } else {
-            match num_str.parse::<f64>() {
-                Ok(v) => Ok(v),
-                Err(_) => Err(self.syntax_error_near("malformed number", &num_str)),
+            };
+        }
+
+        // Decimal: use strtod (locale-aware).
+        if let Some((val, consumed)) = libc_strtod(num_bytes) {
+            if consumed == num_bytes.len() {
+                return Ok(val);
             }
         }
+
+        // trydecpoint: replace '.' with the locale's decimal point and retry.
+        let decpoint = locale_decimal_point();
+        if decpoint != b'.' {
+            let mut buf: Vec<u8> = num_bytes.to_vec();
+            for b in &mut buf {
+                if *b == b'.' {
+                    *b = decpoint;
+                }
+            }
+            if let Some((val, consumed)) = libc_strtod(&buf) {
+                if consumed == buf.len() {
+                    return Ok(val);
+                }
+            }
+        }
+
+        Err(self.syntax_error_near("malformed number", &num_str))
     }
 
     // -- Strings --

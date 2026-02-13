@@ -436,6 +436,10 @@ pub fn lua_pcall(state: &mut LuaState) -> LuaResult<u32> {
             state.base = state.call_stack[state.ci].base;
             state.n_ccalls = saved_n_ccalls;
             state.call_depth = saved_call_depth;
+            // Clear overflow flag since ci is back below MAXCALLS.
+            if state.ci < crate::vm::state::MAXCALLS {
+                state.ci_overflow = false;
+            }
 
             // Close upvalues opened during the failed call.
             state.close_upvalues(func_pos);
@@ -537,6 +541,9 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
             state.base = state.call_stack[state.ci].base;
             state.n_ccalls = saved_n_ccalls;
             state.call_depth = saved_call_depth;
+            if state.ci < crate::vm::state::MAXCALLS {
+                state.ci_overflow = false;
+            }
 
             state.stack_set(func_pos, Val::Bool(false));
             state.stack_set(func_pos + 1, handler_ret);
@@ -1144,6 +1151,9 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
             state.base = state.call_stack[state.ci].base;
             state.n_ccalls = saved_n_ccalls;
             state.call_depth = saved_call_depth;
+            if state.ci < crate::vm::state::MAXCALLS {
+                state.ci_overflow = false;
+            }
             state.top = saved_top;
             state.push(Val::Nil);
             let msg = state.gc.intern_string(e.to_string().as_bytes());
@@ -1192,7 +1202,16 @@ fn load_string_impl(state: &mut LuaState, source: &[u8], name: &str) -> LuaResul
             crate::patch_string_constants(&mut proto, &mut state.gc);
             let proto = std::rc::Rc::new(proto);
 
-            let lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
+            let num_upvalues = proto.num_upvalues as usize;
+            let mut lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
+            // Binary-loaded functions (string.dump) may have upvalues that
+            // need fresh nil-valued closed slots. Matches PUC-Rio's
+            // luaU_undump which calls luaF_newupval for each nups.
+            for _ in 0..num_upvalues {
+                let uv = crate::vm::closure::Upvalue::new_closed(Val::Nil);
+                let uv_ref = state.gc.alloc_upvalue(uv);
+                lua_cl.upvalues.push(uv_ref);
+            }
             let closure_ref = state
                 .gc
                 .alloc_closure(crate::vm::closure::Closure::Lua(lua_cl));

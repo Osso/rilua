@@ -1732,6 +1732,38 @@ fn compile_assign(
         target_exprs.push(e);
     }
 
+    // check_conflict: when a local is assigned, save it if any earlier
+    // INDEXED target references its register (table or key). Matches
+    // PUC-Rio's `check_conflict` in `lparser.c`. Without this, the
+    // SETTABLE for early targets would use the overwritten register.
+    for i in 0..target_exprs.len() {
+        if target_exprs[i].kind == ExprKind::Local {
+            let local_reg = target_exprs[i].info;
+            let extra = i32::from(compiler.fs().free_reg);
+            let mut conflict = false;
+            for j in 0..i {
+                if target_exprs[j].kind == ExprKind::Indexed {
+                    // Check if table register matches the local.
+                    if target_exprs[j].info == local_reg {
+                        conflict = true;
+                        target_exprs[j].info = extra;
+                    }
+                    // Check if key is a register (not constant) that matches.
+                    let aux = target_exprs[j].aux;
+                    if aux & 256 == 0 && aux == local_reg {
+                        conflict = true;
+                        target_exprs[j].aux = extra;
+                    }
+                }
+            }
+            if conflict {
+                #[allow(clippy::cast_sign_loss)]
+                compiler.emit_abc(OpCode::Move, extra as u32, local_reg as u32, 0, line);
+                compiler.reserve_regs(1)?;
+            }
+        }
+    }
+
     let nvars = targets.len();
     let (nexps, mut last_e) = compile_exprlist(compiler, values, line)?;
 

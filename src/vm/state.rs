@@ -231,8 +231,11 @@ pub struct LuaThread {
     pub ci: usize,
     /// Nested C-call boundary depth (for yield boundary check).
     pub n_ccalls: u16,
-    /// Recursive execute() depth counter (for stack overflow detection).
+    /// Recursive execute() depth counter (for Rust stack overflow detection).
     pub call_depth: u16,
+    /// Set when ci reaches MAXCALLS. Cleared when ci drops below MAXCALLS.
+    /// Allows headroom for error handlers after stack overflow.
+    pub ci_overflow: bool,
     /// Open upvalues.
     pub open_upvalues: Vec<GcRef<Upvalue>>,
     /// Upvalues that were open when the thread was suspended.
@@ -247,6 +250,9 @@ pub struct LuaThread {
     pub error_object: Option<Val>,
     /// Thread status.
     pub status: ThreadStatus,
+    /// Per-thread global table. Each thread can have its own global
+    /// environment, set via `setfenv(thread, table)`.
+    pub global: GcRef<Table>,
 }
 
 impl LuaThread {
@@ -254,7 +260,8 @@ impl LuaThread {
     ///
     /// The function is placed at stack[0], with base=1 and top=1.
     /// Status is `Initial` (ready to be resumed for the first time).
-    pub fn new(func_val: Val) -> Self {
+    /// The thread inherits the given global table from its creator.
+    pub fn new(func_val: Val, global: GcRef<Table>) -> Self {
         let mut stack = vec![Val::Nil; BASIC_STACK_SIZE];
         stack[0] = func_val;
 
@@ -270,28 +277,12 @@ impl LuaThread {
             ci: 0,
             n_ccalls: 0,
             call_depth: 0,
+            ci_overflow: false,
             open_upvalues: Vec::new(),
             suspended_upvals: Vec::new(),
             error_object: None,
             status: ThreadStatus::Initial,
-        }
-    }
-}
-
-impl Default for LuaThread {
-    fn default() -> Self {
-        Self {
-            stack: Vec::new(),
-            base: 0,
-            top: 0,
-            call_stack: Vec::new(),
-            ci: 0,
-            n_ccalls: 0,
-            call_depth: 0,
-            open_upvalues: Vec::new(),
-            suspended_upvals: Vec::new(),
-            error_object: None,
-            status: ThreadStatus::Dead,
+            global,
         }
     }
 }
@@ -331,10 +322,11 @@ pub struct LuaState {
     /// Nested Rust call depth counter (yield boundary: yield only when 0).
     pub n_ccalls: u16,
 
-    /// Recursive execute() depth counter (stack overflow detection).
-    /// Separate from `n_ccalls` because OP_CALL increments this but must
-    /// not block coroutine yields.
+    /// Recursive execute() depth counter (Rust stack overflow detection).
     pub call_depth: u16,
+
+    /// Set when ci reaches MAXCALLS. Cleared when ci drops below MAXCALLS.
+    pub ci_overflow: bool,
 
     /// Global table (_G). Used by GETGLOBAL/SETGLOBAL.
     pub global: GcRef<Table>,
@@ -404,6 +396,7 @@ impl LuaState {
             ci: 0,
             n_ccalls: 0,
             call_depth: 0,
+            ci_overflow: false,
             global,
             registry,
             open_upvalues: Vec::new(),
@@ -598,10 +591,12 @@ impl LuaState {
             ci: self.ci,
             n_ccalls: self.n_ccalls,
             call_depth: self.call_depth,
+            ci_overflow: self.ci_overflow,
             open_upvalues: std::mem::take(&mut self.open_upvalues),
             suspended_upvals: Vec::new(),
             error_object: self.error_object.take(),
             status: ThreadStatus::Normal,
+            global: self.global,
         }
     }
 
@@ -625,8 +620,10 @@ impl LuaState {
             self.ci = thread.ci;
             self.n_ccalls = thread.n_ccalls;
             self.call_depth = thread.call_depth;
+            self.ci_overflow = thread.ci_overflow;
             self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
             self.error_object = thread.error_object.take();
+            self.global = thread.global;
 
             // Reopen upvalues that were closed on suspension.
             // Write their captured values back to the stack slots and
@@ -710,9 +707,11 @@ impl LuaState {
             co_thread.ci = self.ci;
             co_thread.n_ccalls = self.n_ccalls;
             co_thread.call_depth = self.call_depth;
+            co_thread.ci_overflow = self.ci_overflow;
             co_thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
             co_thread.suspended_upvals = suspended;
             co_thread.error_object = self.error_object.take();
+            co_thread.global = self.global;
             co_thread.status = co_status;
         }
 
@@ -724,8 +723,10 @@ impl LuaState {
         self.ci = resumer.ci;
         self.n_ccalls = resumer.n_ccalls;
         self.call_depth = resumer.call_depth;
+        self.ci_overflow = resumer.ci_overflow;
         self.open_upvalues = resumer.open_upvalues;
         self.error_object = resumer.error_object;
+        self.global = resumer.global;
 
         // Reopen the resumer's suspended upvalues. These were closed before
         // the stack swap to prevent cross-thread reads. Now that the

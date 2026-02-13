@@ -91,7 +91,7 @@ pub fn co_create(state: &mut LuaState) -> LuaResult<u32> {
     }
 
     // Create a new thread with the function on its stack.
-    let thread = LuaThread::new(func_val);
+    let thread = LuaThread::new(func_val, state.global);
     let thread_ref = state.gc.alloc_thread(thread);
 
     state.push(Val::Thread(thread_ref));
@@ -410,7 +410,7 @@ pub fn co_wrap(state: &mut LuaState) -> LuaResult<u32> {
         }
     }
 
-    let thread = LuaThread::new(func_val);
+    let thread = LuaThread::new(func_val, state.global);
     let thread_ref = state.gc.alloc_thread(thread);
 
     // Create a Rust closure with the thread as upvalue[0].

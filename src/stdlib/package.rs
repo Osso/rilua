@@ -383,20 +383,76 @@ fn loader_lua(state: &mut LuaState) -> LuaResult<u32> {
 /// Loader 3: C library loader (not supported).
 ///
 /// rilua cannot load C modules because its closure ABI differs from
-/// PUC-Rio's `extern "C" fn(*mut lua_State) -> c_int`. This matches
-/// the `DLCOMPAT_NOMOD` fallback in PUC-Rio.
-#[allow(clippy::unnecessary_wraps)]
+/// PUC-Rio's `extern "C" fn(*mut lua_State) -> c_int`. Returns the
+/// same "no file" error listing as PUC-Rio when files are not found,
+/// matching `loader_C` in `loadlib.c`.
 fn loader_c(state: &mut LuaState) -> LuaResult<u32> {
-    let msg = state.gc.intern_string(b"\n\tC modules not supported");
-    state.push(Val::Str(msg));
+    let name = check_string(state, "loader_c", 0)?;
+    let pkg = get_package_table(state)?;
+
+    let cpath_val = get_field(state, pkg, "cpath");
+    let cpath = match cpath_val {
+        Val::Str(r) => state
+            .gc
+            .string_arena
+            .get(r)
+            .map(|s| String::from_utf8_lossy(s.data()).to_string())
+            .unwrap_or_default(),
+        _ => {
+            return Err(simple_error("'package.cpath' must be a string".to_string()));
+        }
+    };
+
+    let (found, errors) = search_path(&cpath, &name);
+    if found.is_some() {
+        // File exists but we cannot load C modules.
+        let msg = format!("\n\tC modules not supported (cannot load '{name}')");
+        let msg_ref = state.gc.intern_string(msg.as_bytes());
+        state.push(Val::Str(msg_ref));
+    } else {
+        let msg = state.gc.intern_string(errors.as_bytes());
+        state.push(Val::Str(msg));
+    }
     Ok(1)
 }
 
 /// Loader 4: C root loader (not supported).
-#[allow(clippy::unnecessary_wraps)]
+///
+/// Extracts root module name (before first `.`) and searches
+/// `package.cpath`. Matches PUC-Rio's `loader_Croot` in `loadlib.c`.
 fn loader_croot(state: &mut LuaState) -> LuaResult<u32> {
-    let msg = state.gc.intern_string(b"\n\tC modules not supported");
-    state.push(Val::Str(msg));
+    let name = check_string(state, "loader_croot", 0)?;
+
+    // If name has no dot, this loader does nothing (returns 0).
+    let Some(dot_pos) = name.find('.') else {
+        return Ok(0);
+    };
+    let root = &name[..dot_pos];
+
+    let pkg = get_package_table(state)?;
+    let cpath_val = get_field(state, pkg, "cpath");
+    let cpath = match cpath_val {
+        Val::Str(r) => state
+            .gc
+            .string_arena
+            .get(r)
+            .map(|s| String::from_utf8_lossy(s.data()).to_string())
+            .unwrap_or_default(),
+        _ => {
+            return Err(simple_error("'package.cpath' must be a string".to_string()));
+        }
+    };
+
+    let (found, errors) = search_path(&cpath, root);
+    if found.is_some() {
+        // File exists but we cannot load the C function from it.
+        let msg = format!("\n\tno module '{name}' in C root file");
+        let msg_ref = state.gc.intern_string(msg.as_bytes());
+        state.push(Val::Str(msg_ref));
+    } else {
+        let msg = state.gc.intern_string(errors.as_bytes());
+        state.push(Val::Str(msg));
+    }
     Ok(1)
 }
 

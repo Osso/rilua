@@ -20,9 +20,61 @@ use super::gc::arena::GcRef;
 use super::instructions::{Instruction, LFIELDS_PER_FLUSH, OpCode, index_k, is_k};
 use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
 use super::proto::{Proto, VARARG_ISVARARG, VARARG_NEEDSARG};
-use super::state::{Gc, LUA_MINSTACK, LuaState, MAXCCALLS};
+use super::state::{Gc, LUA_MINSTACK, LuaState, MAXCALLS, MAXCCALLS};
 use super::table::Table;
 use super::value::{Userdata, Val};
+
+// libc FFI for locale-aware number parsing (strtod, localeconv).
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn strtod(nptr: *const u8, endptr: *mut *mut u8) -> f64;
+    fn localeconv() -> *const LConv;
+}
+
+/// Minimal `struct lconv` -- we only need the `decimal_point` field.
+#[repr(C)]
+struct LConv {
+    decimal_point: *const u8,
+    // remaining fields omitted
+}
+
+/// Calls libc `strtod` on a NUL-terminated buffer.
+///
+/// Returns `Some((value, bytes_consumed))` on success, `None` if no
+/// conversion was performed (endptr == nptr).
+#[allow(unsafe_code)]
+pub(crate) fn libc_strtod(s: &[u8]) -> Option<(f64, usize)> {
+    // strtod requires NUL-terminated input.
+    let mut buf = Vec::with_capacity(s.len() + 1);
+    buf.extend_from_slice(s);
+    buf.push(0);
+
+    let mut endptr: *mut u8 = std::ptr::null_mut();
+    // SAFETY: buf is a valid NUL-terminated C string, endptr is a valid pointer.
+    let result = unsafe { strtod(buf.as_ptr(), &mut endptr) };
+    let consumed = endptr as usize - buf.as_ptr() as usize;
+    if consumed == 0 {
+        return None;
+    }
+    Some((result, consumed))
+}
+
+/// Returns the locale's decimal point character (from `localeconv()`).
+/// Falls back to `'.'` if unavailable.
+#[allow(unsafe_code)]
+pub(crate) fn locale_decimal_point() -> u8 {
+    // SAFETY: localeconv() returns a pointer to a static struct.
+    let lc = unsafe { localeconv() };
+    if lc.is_null() {
+        return b'.';
+    }
+    let dp = unsafe { (*lc).decimal_point };
+    if dp.is_null() {
+        return b'.';
+    }
+    let ch = unsafe { *dp };
+    if ch == 0 { b'.' } else { ch }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: RK resolution
@@ -61,34 +113,45 @@ pub(crate) fn coerce_to_number(val: Val, gc: &Gc) -> Option<f64> {
 
 /// Parse a byte slice as a Lua number (matching PUC-Rio's `luaO_str2d`).
 ///
-/// Supports decimal, hex (`0x`/`0X` prefix), leading/trailing whitespace.
+/// Uses libc `strtod` for locale-aware decimal parsing. Supports hex
+/// (`0x`/`0X` prefix) via `strtoul`, and leading/trailing whitespace.
 pub(crate) fn str_to_number(data: &[u8]) -> Option<f64> {
-    let s = std::str::from_utf8(data).ok()?;
-    let trimmed = s.trim();
+    // Skip leading whitespace.
+    let start = data.iter().position(|&b| !b.is_ascii_whitespace())?;
+    let trimmed = &data[start..];
     if trimmed.is_empty() {
         return None;
     }
-    // Try hex first
-    if trimmed.len() > 2 && trimmed.starts_with("0x")
-        || trimmed.starts_with("0X")
-        || trimmed.starts_with("-0x")
-        || trimmed.starts_with("-0X")
-        || trimmed.starts_with("+0x")
-        || trimmed.starts_with("+0X")
-    {
-        // Parse hex integer
-        let (sign, hex_str) = if trimmed.starts_with('-') {
-            (-1.0_f64, &trimmed[3..])
-        } else if trimmed.starts_with('+') {
-            (1.0, &trimmed[3..])
+
+    // Use strtod (locale-aware).
+    let (result, consumed) = libc_strtod(trimmed)?;
+
+    // Check for hex constant: strtod may have stopped at 'x'/'X'.
+    let rest = &trimmed[consumed..];
+    if !rest.is_empty() && (rest[0] == b'x' || rest[0] == b'X') {
+        // Hex: parse with strtoul (PUC-Rio fallback).
+        let hex_str = std::str::from_utf8(trimmed).ok()?;
+        let hex_trimmed = hex_str.trim();
+        let (sign, hex_part) = if hex_trimmed.starts_with('-') {
+            (-1.0_f64, &hex_trimmed[1..])
+        } else if hex_trimmed.starts_with('+') {
+            (1.0, &hex_trimmed[1..])
         } else {
-            (1.0, &trimmed[2..])
+            (1.0, hex_trimmed)
         };
-        let val = u64::from_str_radix(hex_str, 16).ok()?;
+        let hex_part = hex_part
+            .strip_prefix("0x")
+            .or_else(|| hex_part.strip_prefix("0X"))?;
+        let val = u64::from_str_radix(hex_part, 16).ok()?;
         return Some(sign * val as f64);
     }
-    // Try decimal
-    trimmed.parse::<f64>().ok()
+
+    // Check that remaining characters are only whitespace.
+    if rest.iter().all(|b| b.is_ascii_whitespace()) {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Coerces a value to a string for concatenation.
@@ -305,6 +368,34 @@ impl LuaState {
     /// `num_results` is the number of results the caller expects, or
     /// `LUA_MULTRET` (-1) for all results.
     pub fn precall(&mut self, func_idx: usize, num_results: i32) -> LuaResult<CallResult> {
+        // Check total call depth (Lua + Rust). Matches PUC-Rio's `growCI`:
+        // - At MAXCALLS (20,000): throw recoverable "stack overflow"
+        //   (error handlers like debug.traceback can still run)
+        // - Above MAXCALLS: allow calls (headroom for error handling)
+        // - At 2*MAXCALLS (40,000): unrecoverable overflow
+        //
+        // PUC-Rio achieves this by doubling the CI array: first overflow
+        // at 20k doubles to 40k capacity. Second overflow at 40k is
+        // unrecoverable. We track with `ci_overflow`: false below limit,
+        // true once past MAXCALLS. Cleared when pcall/xpcall restores ci.
+        let next_ci = self.ci + 1;
+        if self.ci_overflow {
+            // Already in overflow. Allow headroom but cap at 2*MAXCALLS.
+            if next_ci >= MAXCALLS * 2 {
+                return Err(runtime_error_simple("stack overflow"));
+            }
+        } else if next_ci >= MAXCALLS {
+            // First overflow. Allow the CI to grow past MAXCALLS for
+            // error handlers, but throw a recoverable error.
+            self.ci_overflow = true;
+            let where_prefix = get_where(self, 0);
+            return Err(LuaError::Runtime(RuntimeError {
+                message: format!("{where_prefix}stack overflow"),
+                level: 0,
+                traceback: vec![],
+            }));
+        }
+
         let func_val = self.stack_get(func_idx);
         let closure_ref = match func_val {
             Val::Function(r) => r,
@@ -368,7 +459,6 @@ impl LuaState {
         // Save caller's PC.
         let saved_pc = self.call_stack[self.ci].saved_pc;
         let _ = saved_pc; // used for restoration in poscall
-
 
         let closure = self
             .gc
@@ -934,6 +1024,14 @@ fn val_to_string_bytes(val: Val, gc: &Gc, buffer: &mut Vec<u8>) {
 ///
 /// Returns when the outermost Lua call returns.
 pub fn execute(state: &mut LuaState) -> LuaResult<()> {
+    // PUC-Rio's `nexeccalls` pattern: tracks how many Lua functions were
+    // entered via OP_CALL within this execute() invocation. Starts at 1
+    // (the function we were called to run). OP_CALL increments it for
+    // Lua callees; OP_RETURN decrements it and returns when it hits 0.
+    // This avoids recursive execute() calls for Lua-to-Lua calls,
+    // matching PUC-Rio's `goto reentry` model.
+    let mut nexeccalls: u32 = 1;
+
     loop {
         // Cache values from current frame.
         let ci_func = state.call_stack[state.ci].func;
@@ -1567,27 +1665,25 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     // Save our pc before the call.
                     state.call_stack[state.ci].saved_pc = pc;
 
-                    // Track call depth to prevent Rust stack overflow.
-                    // Only call_depth (not n_ccalls) so coroutine.yield()
-                    // still works inside OP_CALL chains.
-                    state.call_depth += 1;
-                    let call_result = (|| {
-                        state.check_stack_overflow()?;
-                        match state.precall(ra, num_results)? {
-                            CallResult::Lua => execute(state),
-                            CallResult::Rust => Ok(()),
+                    match state.precall(ra, num_results)? {
+                        CallResult::Lua => {
+                            // Lua-to-Lua call: no recursive execute(), no
+                            // call_depth increment. Just break to the outer
+                            // loop to re-read the new frame's proto/base.
+                            // This matches PUC-Rio's `goto reentry` pattern.
+                            nexeccalls += 1;
                         }
-                    })();
-                    state.call_depth -= 1;
-                    call_result?;
-                    // For fixed results (C != 0), restore top to the frame's
-                    // max stack size. For MULTRET (C == 0), leave top as set
-                    // by poscall so the caller knows how many results exist.
-                    // Matches PUC-Rio: `if (nresults >= 0) L->top = L->ci->top;`
-                    if c != 0 {
-                        state.top = state.call_stack[state.ci].top;
+                        CallResult::Rust => {
+                            // Rust function already completed in precall.
+                            // Restore top for fixed results.
+                            if c != 0 {
+                                state.top = state.call_stack[state.ci].top;
+                            }
+                            // Break to outer loop to re-read env -- Rust
+                            // functions like module() can change the running
+                            // closure's environment via setfenv.
+                        }
                     }
-                    // Break to outer loop to re-read base and proto.
                     break;
                 }
 
@@ -1668,14 +1764,21 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     }
                     // else: B==0, use everything up to current top.
 
-                    state.poscall(first_result);
+                    let fixed_results = state.poscall(first_result);
 
-                    // In the recursive call model, each execute() instance
-                    // handles exactly one logical function (including tail-call
-                    // replacements). Nested Call opcodes invoke execute()
-                    // recursively, so the only Return this instance ever sees
-                    // is from the function it was called to run. Always exit.
-                    return Ok(());
+                    nexeccalls -= 1;
+                    if nexeccalls == 0 {
+                        // The function that execute() was called to run has
+                        // returned. Exit the execute loop.
+                        return Ok(());
+                    }
+                    // The callee returned but there are still Lua callers
+                    // within this execute() invocation. Restore top if
+                    // fixed results, then re-enter the outer loop.
+                    if fixed_results {
+                        state.top = state.call_stack[state.ci].top;
+                    }
+                    break; // goto reentry
                 }
 
                 // ----- Upvalues -----

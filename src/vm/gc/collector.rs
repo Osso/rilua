@@ -514,14 +514,14 @@ impl Gc {
     /// Traverses a gray thread: marks stack values and open upvalues.
     /// Threads are moved to `grayagain` for atomic re-traversal.
     fn traverse_thread(&mut self, r: GcRef<LuaThread>) {
-        let (stack_vals, open_upvals, suspended_upvals) = {
+        let (stack_vals, open_upvals, suspended_upvals, thread_global) = {
             if let Some(thread) = self.threads.get(r) {
                 let top = thread.top.min(thread.stack.len());
                 let stack: Vec<Val> = thread.stack[..top].to_vec();
                 let upvals: Vec<GcRef<Upvalue>> = thread.open_upvalues.clone();
                 let suspended: Vec<GcRef<Upvalue>> =
                     thread.suspended_upvals.iter().map(|(r, _)| *r).collect();
-                (stack, upvals, suspended)
+                (stack, upvals, suspended, thread.global)
             } else {
                 return;
             }
@@ -529,6 +529,7 @@ impl Gc {
 
         self.threads.set_color(r, Color::Black);
 
+        self.mark_table(thread_global);
         for val in &stack_vals {
             self.mark_value(*val);
         }
@@ -628,19 +629,20 @@ impl Gc {
         for item in grayagain {
             match item {
                 GrayItem::Thread(r) => {
-                    let (stack_vals, open_upvals, suspended_upvals) = {
+                    let (stack_vals, open_upvals, suspended_upvals, thread_global) = {
                         if let Some(thread) = self.threads.get(r) {
                             let top = thread.top.min(thread.stack.len());
                             let stack: Vec<Val> = thread.stack[..top].to_vec();
                             let upvals: Vec<GcRef<Upvalue>> = thread.open_upvalues.clone();
                             let suspended: Vec<GcRef<Upvalue>> =
                                 thread.suspended_upvals.iter().map(|(r, _)| *r).collect();
-                            (stack, upvals, suspended)
+                            (stack, upvals, suspended, thread.global)
                         } else {
                             continue;
                         }
                     };
                     self.threads.set_color(r, Color::Black);
+                    self.mark_table(thread_global);
                     for val in &stack_vals {
                         self.mark_value(*val);
                     }

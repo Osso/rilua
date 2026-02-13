@@ -321,7 +321,14 @@ pub fn db_getfenv(state: &mut LuaState) -> LuaResult<u32> {
                 .and_then(crate::vm::value::Userdata::env);
             Some(e.unwrap_or(state.global))
         }
-        Val::Thread(_) => Some(state.global),
+        Val::Thread(r) => {
+            // Active thread uses state.global; suspended/initial uses stored global.
+            if state.current_thread == Some(r) {
+                Some(state.global)
+            } else {
+                state.gc.threads.get(r).map(|t| t.global)
+            }
+        }
         _ => Some(state.global),
     };
     state.push(Val::Table(env.unwrap_or(state.global)));
@@ -360,6 +367,19 @@ pub fn db_setfenv(state: &mut LuaState) -> LuaResult<u32> {
                 simple_error("'setfenv' cannot change environment of given object".into())
             })?;
             ud.set_env(Some(new_env));
+        }
+        Val::Thread(r) => {
+            // For the active thread, set state.global directly.
+            // For a suspended/initial thread, set its stored global.
+            if state.current_thread == Some(r) {
+                state.global = new_env;
+            } else if let Some(thread) = state.gc.threads.get_mut(r) {
+                thread.global = new_env;
+            } else {
+                return Err(simple_error(
+                    "'setfenv' cannot change environment of given object".into(),
+                ));
+            }
         }
         _ => {
             return Err(simple_error(

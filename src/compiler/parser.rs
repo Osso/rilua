@@ -135,11 +135,17 @@ impl Parser {
 
         // Check if name is a local in the current (innermost) function scope.
         let current = n_scopes - 1;
-        if self.func_scopes[current].local_names.contains(&name.to_string()) {
+        if self.func_scopes[current]
+            .local_names
+            .contains(&name.to_string())
+        {
             return Ok(()); // local variable, not an upvalue
         }
         // Already tracked as an upvalue of the current scope?
-        if self.func_scopes[current].upvalue_names.contains(&name.to_string()) {
+        if self.func_scopes[current]
+            .upvalue_names
+            .contains(&name.to_string())
+        {
             return Ok(()); // already counted
         }
 
@@ -147,7 +153,9 @@ impl Parser {
         let mut found_at = None;
         for i in (0..current).rev() {
             if self.func_scopes[i].local_names.contains(&name.to_string())
-                || self.func_scopes[i].upvalue_names.contains(&name.to_string())
+                || self.func_scopes[i]
+                    .upvalue_names
+                    .contains(&name.to_string())
             {
                 found_at = Some(i);
                 break;
@@ -172,9 +180,7 @@ impl Parser {
                     );
                     return Err(self.syntax_error(&msg));
                 }
-                self.func_scopes[i]
-                    .upvalue_names
-                    .push(name_owned.clone());
+                self.func_scopes[i].upvalue_names.push(name_owned.clone());
             }
         }
         Ok(())
@@ -359,9 +365,10 @@ impl Parser {
 
         // Save local variable state for block scoping (PUC-Rio: enterblock).
         // When the block ends, locals declared inside go out of scope.
-        let saved_locals = self.func_scopes.last().map(|s| {
-            (s.local_count, s.local_names.len())
-        });
+        let saved_locals = self
+            .func_scopes
+            .last()
+            .map(|s| (s.local_count, s.local_names.len()));
 
         let mut stmts = Vec::new();
         loop {

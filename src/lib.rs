@@ -144,7 +144,13 @@ impl Lua {
         patch_string_constants(&mut proto, &mut self.state.gc);
         let proto = Rc::new(proto);
 
-        let lua_cl = LuaClosure::new(proto, self.state.global);
+        let num_upvalues = proto.num_upvalues as usize;
+        let mut lua_cl = LuaClosure::new(proto, self.state.global);
+        for _ in 0..num_upvalues {
+            let uv = vm::closure::Upvalue::new_closed(Val::Nil);
+            let uv_ref = self.state.gc.alloc_upvalue(uv);
+            lua_cl.upvalues.push(uv_ref);
+        }
         let closure_ref = self.state.gc.alloc_closure(Closure::Lua(lua_cl));
         Ok(Function(closure_ref))
     }
@@ -471,7 +477,14 @@ impl Lua {
         patch_string_constants(&mut proto, &mut self.state.gc);
         let proto = Rc::new(proto);
 
-        let lua_cl = LuaClosure::new(proto, self.state.global);
+        let num_upvalues = proto.num_upvalues as usize;
+        let mut lua_cl = LuaClosure::new(proto, self.state.global);
+        // Binary-loaded protos may have upvalues; create fresh nil slots.
+        for _ in 0..num_upvalues {
+            let uv = vm::closure::Upvalue::new_closed(Val::Nil);
+            let uv_ref = self.state.gc.alloc_upvalue(uv);
+            lua_cl.upvalues.push(uv_ref);
+        }
         let closure_ref = self.state.gc.alloc_closure(Closure::Lua(lua_cl));
 
         self.state.stack_set(0, Val::Function(closure_ref));
