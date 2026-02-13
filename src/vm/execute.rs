@@ -290,7 +290,7 @@ fn compare_error(proto: &Proto, pc: usize, left: Val, right: Val) -> LuaError {
 /// Used by NEWTABLE to decode size hints. The format encodes
 /// `(x & 7 + 8) << ((x >> 3) - 1)` for non-zero exponent,
 /// or `x` directly when the exponent is zero.
-fn fb2int(x: u32) -> u32 {
+pub(crate) fn fb2int(x: u32) -> u32 {
     let e = (x >> 3) & 31;
     if e == 0 { x } else { ((x & 7) + 8) << (e - 1) }
 }
@@ -1939,6 +1939,16 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     };
 
                     let offset = (c - 1) * LFIELDS_PER_FLUSH as usize;
+                    let last = offset + n;
+
+                    // Pre-allocate array to exact size needed (PUC-Rio
+                    // luaH_resizearray). Without this, each insert beyond
+                    // the current array size triggers rehash, which rounds
+                    // up to a power of 2.
+                    if let Some(table) = state.gc.tables.get_mut(table_ref) {
+                        table.ensure_array_capacity(last);
+                    }
+
                     for i in 1..=n {
                         let val = state.stack_get(ra + i);
                         let key = Val::Num((offset + i) as f64);

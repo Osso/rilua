@@ -9,6 +9,7 @@ pub mod os;
 pub mod package;
 pub mod string;
 pub mod table;
+pub mod testlib;
 
 use std::ops::{BitOr, BitOrAssign};
 
@@ -53,9 +54,12 @@ impl StdLib {
     pub const PACKAGE: Self = Self(1 << 7);
     /// Coroutine library: `coroutine.create`, `coroutine.resume`, etc.
     pub const COROUTINE: Self = Self(1 << 8);
+    /// Test library: internal VM introspection (`T` global table).
+    /// Not included in ALL; must be explicitly requested.
+    pub const TEST: Self = Self(1 << 9);
     /// No libraries.
     pub const NONE: Self = Self(0);
-    /// All standard libraries.
+    /// All standard libraries (excludes TEST).
     pub const ALL: Self = Self(
         Self::BASE.0
             | Self::STRING.0
@@ -128,6 +132,10 @@ pub fn open_libs_selective(state: &mut LuaState, libs: StdLib) -> LuaResult<()> 
     // Package must be last: populates package.loaded with other libs.
     if libs.contains(StdLib::PACKAGE) {
         package::open_package_lib(state)?;
+    }
+    // Test library is not in ALL; must be explicitly requested.
+    if libs.contains(StdLib::TEST) {
+        open_test_lib(state)?;
     }
     Ok(())
 }
@@ -350,6 +358,23 @@ fn open_coroutine_lib(state: &mut LuaState) -> LuaResult<()> {
     register_table_fn(state, co_table, "running", coroutine::co_running)?;
 
     register_global_val(state, "coroutine", Val::Table(co_table))?;
+    Ok(())
+}
+
+/// Registers the test library as `T` global table.
+///
+/// Provides internal VM introspection functions used by PUC-Rio's test suite.
+/// Not included in `StdLib::ALL`; must be explicitly loaded via `StdLib::TEST`.
+fn open_test_lib(state: &mut LuaState) -> LuaResult<()> {
+    let t_table = state.gc.alloc_table(Table::new());
+
+    register_table_fn(state, t_table, "querytab", testlib::t_querytab)?;
+    register_table_fn(state, t_table, "hash", testlib::t_hash)?;
+    register_table_fn(state, t_table, "int2fb", testlib::t_int2fb)?;
+    register_table_fn(state, t_table, "log2", testlib::t_log2)?;
+    register_table_fn(state, t_table, "listcode", testlib::t_listcode)?;
+
+    register_global_val(state, "T", Val::Table(t_table))?;
     Ok(())
 }
 

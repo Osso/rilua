@@ -2597,7 +2597,7 @@ fn is_multret_expr(expr: &super::ast::Expr) -> bool {
 
 /// Converts an integer to PUC-Rio's "float byte" format (eeeeexxx).
 /// If x < 8: result = x. Otherwise: result = ((e+1) << 3) | (x >> (e-1) - 8).
-fn int2fb(mut x: u32) -> u32 {
+pub(crate) fn int2fb(mut x: u32) -> u32 {
     if x < 8 {
         return x;
     }

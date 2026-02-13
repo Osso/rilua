@@ -9,7 +9,7 @@ use std::env;
 use std::io::{self, BufRead, Write};
 use std::process;
 
-use rilua::{Function, Lua, LuaError, Val};
+use rilua::{Function, Lua, LuaError, StdLib, Val};
 
 // ---------------------------------------------------------------------------
 // Version string (matches PUC-Rio LUA_RELEASE + LUA_COPYRIGHT)
@@ -503,8 +503,14 @@ fn main() {
     let argv: Vec<String> = env::args().collect();
     let progname = argv.first().map(String::as_str);
 
-    // Create state.
-    let Ok(mut lua) = Lua::new() else {
+    // Create state. If RILUA_TEST_LIB=1 is set, include the internal
+    // test library (T global) for PUC-Rio test suite compatibility.
+    let libs = if env::var("RILUA_TEST_LIB").as_deref() == Ok("1") {
+        StdLib::ALL | StdLib::TEST
+    } else {
+        StdLib::ALL
+    };
+    let Ok(mut lua) = Lua::new_with(libs) else {
         l_message(progname, "cannot create state");
         process::exit(1);
     };

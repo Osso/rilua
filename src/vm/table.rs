@@ -254,6 +254,44 @@ impl Table {
         entries
     }
 
+    /// Returns the `last_free` index (offset from start of nodes array).
+    ///
+    /// Used by the test library's `T.querytab` to match PUC-Rio's
+    /// `t->lastfree - t->node` behavior.
+    pub(crate) fn last_free_index(&self) -> u32 {
+        self.last_free
+    }
+
+    /// Queries a hash node by index. Returns (key, value, next) if the
+    /// index is valid.
+    ///
+    /// Used by the test library's `T.querytab` for hash part inspection.
+    /// The `next` field is returned as `Option<u32>` matching the internal
+    /// chain pointer (node index, not pointer offset).
+    pub(crate) fn query_node(&self, idx: u32) -> Option<(Val, Val, Option<u32>)> {
+        let node = self.nodes.get(idx as usize)?;
+        Some((node.key, node.value, node.next))
+    }
+
+    /// Returns the value in the array part at the given 0-based index.
+    ///
+    /// Used by the test library's `T.querytab` for array part inspection.
+    pub(crate) fn array_get(&self, idx: usize) -> Option<Val> {
+        self.array.get(idx).copied()
+    }
+
+    /// Extends the array part to at least `min_size` entries, filling
+    /// new slots with nil.
+    ///
+    /// Matches PUC-Rio's `luaH_resizearray` for the SETLIST case: the
+    /// array is pre-allocated to the exact number of entries being
+    /// written, avoiding a rehash that would round up to a power of 2.
+    pub(crate) fn ensure_array_capacity(&mut self, min_size: usize) {
+        if min_size > self.array.len() {
+            self.array.resize(min_size, Val::Nil);
+        }
+    }
+
     /// Returns indices of hash nodes that contain dead references in weak tables.
     ///
     /// For `weak_keys`: a node is dead if its key is dead.
@@ -520,7 +558,7 @@ impl Table {
     ///
     /// Returns the bucket index where this key should ideally reside.
     /// Different key types use different hash methods matching PUC-Rio.
-    fn main_position(&self, key: &Val, strings: &Arena<LuaString>) -> u32 {
+    pub(crate) fn main_position(&self, key: &Val, strings: &Arena<LuaString>) -> u32 {
         let size = self.hash_size();
         debug_assert!(size > 0, "main_position called on empty hash");
         match key {
@@ -897,12 +935,11 @@ impl Table {
             }
         }
 
-        // Key not found. Skip insertion for nil values (no-op).
-        if value.is_nil() {
-            return Ok(());
-        }
-
         // Insert new key via Brent's algorithm.
+        // Note: PUC-Rio's luaH_set allocates a hash entry even when
+        // the value is nil. This is necessary so nil-assignments to
+        // non-existing keys can fill the hash and trigger rehash,
+        // compacting the table. Skipping would prevent rehash.
         match self.new_key(key, strings) {
             Ok(node_idx) => {
                 self.nodes[node_idx as usize].value = value;

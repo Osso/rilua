@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 20/23 PUC-Rio tests pass, 17 non-trivial) | 1289 total (586 unit + 426 integration + 277 oracle); see `docs/evaluation-2026-02.md` |
+| 9: Compatibility | In progress (9a-9d done; 16/23 PUC-Rio tests pass, 15 non-trivial) | 1293 total (590 unit + 426 integration + 277 oracle); see `docs/evaluation-2026-02.md` |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -150,38 +150,58 @@ All must be resolved before the project is considered complete.
 - ~~Bug #28~~ **FIXED**: `arg_error`/`type_error` formatting ("no value" vs "nil").
 - ~~Bugs #26-#28 (detailed list)~~ **FIXED**: raw byte errors, nesting limits,
   parser-level local/upvalue limits. `errors.lua` now fully passes.
+- ~~Bug #31~~ **FIXED**: SETLIST array pre-allocation. PUC-Rio pre-allocates
+  the array part to the exact count via `luaH_resizearray` before the
+  insert loop. Without this, each insert beyond the current array size
+  triggered rehash, rounding up to powers of 2.
+- ~~Bug #32~~ **FIXED**: nil-value insertion skip. `raw_set_impl` skipped
+  hash entry allocation when setting non-existing keys to nil. PUC-Rio's
+  `luaH_set` always allocates a slot via `newkey`, even for nil values.
+  Removing the skip allows nil-assignments to fill hash slots and trigger
+  rehash, compacting the table layout to match PUC-Rio.
 - `load()` reader streaming: reads entire input before parsing. PUC-Rio
   streams incrementally. Reader call count differs. Affects calls.lua.
-- Per-thread global tables: `setfenv` on coroutine threads not supported.
-  rilua has a single global table; PUC-Rio has per-thread globals
-  (`gt(L)`). Affects closure.lua.
-- Locale-aware number parsing: Rust `f64::parse()` ignores C locale.
-  PUC-Rio uses `strtod()` which respects locale. Fix requires libc FFI.
-  Affects literals.lua.
+- String concat overflow: no length check on concatenation result.
+  Affects big.lua.
+- T module incomplete: only querytab, hash, int2fb, log2, listcode
+  implemented. Missing: testC, resume, setyhook, d2s, and ~25 others.
+  Affects api.lua, closure.lua.
+- Compiler optimizations: no dead code elimination or peephole
+  optimization. Affects code.lua.
+- Debug hooks: `debug.sethook`/`debug.gethook` are stubs. Affects db.lua.
 
 **Debug library (Phase 5h, stubs)**:
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (14 / 23 pass, 11 non-trivial)
+### PUC-Rio test suite status (16 / 23 pass, 15 non-trivial)
 
-Re-baselined Feb 13, 2026. Run via `scripts/compare.sh` from
+Re-baselined Feb 14, 2026. Run with `RILUA_TEST_LIB=1` from
 `./lua-5.1-tests/`. See `docs/evaluation-2026-02.md` for full details.
 
 | Category | Count | Files |
 |----------|-------|-------|
-| Pass | 17 | attrib, closure, constructs, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg |
-| Pass (trivial) | 3 | api, checktable, code (T==nil skips all C-API tests) |
-| Fail (rilua) | 3 | calls, db, verybig (timeout) |
-| Fail (both) | 2 | big (requires checktable C lib), main (CLI subprocess infra) |
+| Pass | 15 | attrib, constructs, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg, verybig |
+| Pass (trivial) | 1 | checktable (defines utility functions only) |
+| Fail (rilua) | 5 | api, calls, closure, code, db |
+| Fail (both) | 2 | big (string concat overflow), main (CLI subprocess infra) |
 
 **Fail details**:
+- `api:21`: `T.d2s` not implemented. Requires `T.testC` mini-interpreter
+  (~500 lines of C-API simulation). Large effort.
 - `calls:250`: `load(reader)` eagerly collects all reader output before
   compiling. PUC-Rio uses streaming ZIO, stopping the reader on parse
   error. Test asserts reader call count (`i==2`), but rilua reads all
   9 characters before detecting the syntax error.
-- `db:20`: `debug.sethook` line hook not implemented (stub).
-- `verybig`: timeout on generated 50k-entry table compilation.
+- `closure:391`: `T.resume` and `T.setyhook` not implemented. Requires
+  T module yield-hook infrastructure for coroutine testing.
+- `code:45`: Compiler optimization expectations. Test asserts dead code
+  elimination (LOADNIL after unconditional jump) that rilua does not
+  perform. Would require peephole optimizer pass.
+- `db:98`: `debug.sethook` line hook not implemented (stub). Hook
+  execution requires VM integration at every line-change point.
+- `big:11`: String concatenation overflow not detected. Concatenating
+  129 copies of 2^25 bytes should error but succeeds.
 
 ### Execution order corrections
 
@@ -1367,6 +1387,19 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
     created empty upvalues vector; `debug.setupvalue` on undumped functions
     failed. Fix: create fresh closed nil upvalues matching `proto.num_upvalues`
     in `load_string_impl`, `run_proto`, `load_bytes`.
+35. ~~**SETLIST array pre-allocation**~~: **FIXED**. PUC-Rio's SETLIST
+    calls `luaH_resizearray(h, last)` before the insert loop to
+    pre-allocate the array to the exact number of entries. Without this,
+    each insert beyond the current array triggered `rehash`, which uses
+    `compute_sizes` and rounds up to powers of 2. Fix: added
+    `Table::ensure_array_capacity` and call in SETLIST before the loop.
+    Unblocked `nextvar.lua` T-enabled table size assertions.
+36. ~~**Nil-value insertion skip**~~: **FIXED**. `raw_set_impl` returned
+    early when setting a non-existing key to nil, preventing hash entry
+    allocation. PUC-Rio's `luaH_set` always calls `newkey` even for nil
+    values, which fills hash slots and can trigger `rehash` to compact
+    the table. Removing the skip matches PUC-Rio's table compaction
+    behavior. Unblocked `nextvar.lua` T-enabled rehash assertions.
 
 Files: `src/compiler/codegen.rs`, `src/compiler/parser.rs`,
 `src/compiler/ast.rs`, `src/compiler/lexer.rs`, `src/vm/execute.rs`,
