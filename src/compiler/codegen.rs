@@ -13,8 +13,8 @@ use super::ast::Block;
 use super::parser;
 
 use crate::vm::instructions::{
-    BITRK, Instruction, LFIELDS_PER_FLUSH, LUAI_MAXUPVALUES, LUAI_MAXVARS, MAXARG_BX, MAXINDEXRK,
-    MAXSTACK, NO_JUMP, NO_REG, OpCode, is_k,
+    BITRK, Instruction, LFIELDS_PER_FLUSH, LUAI_MAXUPVALUES, LUAI_MAXVARS, MAXARG_BX, MAXARG_C,
+    MAXINDEXRK, MAXSTACK, NO_JUMP, NO_REG, OpCode, is_k,
 };
 use crate::vm::proto::{LocalVar, Proto, VARARG_HASARG, VARARG_ISVARARG, VARARG_NEEDSARG};
 use crate::vm::value::Val;
@@ -1517,7 +1517,7 @@ impl Compiler {
     pub(crate) fn code_setlist(&mut self, base: u32, nelems: u32, tostore: u32, line: u32) {
         let c = (nelems - 1) / LFIELDS_PER_FLUSH + 1;
         let b = if tostore == 0 { 0 } else { tostore };
-        if c <= MAXARG_BX {
+        if c <= MAXARG_C {
             self.emit_abc(OpCode::SetList, base, b, c, line);
         } else {
             self.emit_abc(OpCode::SetList, base, b, 0, line);
