@@ -14,6 +14,7 @@ use std::ops::{BitOr, BitOrAssign};
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::vm::closure::{Closure, RustClosure, RustFn};
+use crate::vm::debug_info;
 use crate::vm::gc::arena::GcRef;
 use crate::vm::state::LuaState;
 use crate::vm::table::Table;
@@ -473,20 +474,79 @@ pub fn get_registry_metatable(state: &mut LuaState, name: &str) -> Option<GcRef<
     }
 }
 
-/// Validates that a userdata value has the named metatable from the registry.
+/// Formats a "bad argument" error with function name resolution.
 ///
-/// Returns the userdata `GcRef` if the value is a userdata whose metatable
-/// matches (by identity) the named metatable in the registry. Returns an
-/// error otherwise.
+/// Takes a 1-based argument number and an error message. Resolves the
+/// function name from the current call frame via `getfuncname`. Handles
+/// method calls by decrementing `narg` and using "calling 'name' on bad self"
+/// for self-argument errors.
+///
+/// Matches PUC-Rio's `luaL_argerror` from `lauxlib.c`.
+pub fn arg_error(state: &LuaState, narg: usize, msg: &str) -> LuaError {
+    let name_info = debug_info::getfuncname(state, state.ci, &state.gc.string_arena);
+
+    let message = match name_info {
+        Some(("method", ref name)) => {
+            let adjusted = narg.saturating_sub(1);
+            if adjusted == 0 {
+                format!("calling '{name}' on bad self ({msg})")
+            } else {
+                format!("bad argument #{adjusted} to '{name}' ({msg})")
+            }
+        }
+        Some((_, ref name)) => {
+            format!("bad argument #{narg} to '{name}' ({msg})")
+        }
+        None => {
+            format!("bad argument #{narg} to '?' ({msg})")
+        }
+    };
+
+    LuaError::Runtime(RuntimeError {
+        message,
+        level: 0,
+        traceback: vec![],
+    })
+}
+
+/// Formats a type mismatch error with "no value" for missing arguments.
+///
+/// Takes a 0-based argument index and the expected type name. Checks whether
+/// the argument slot exists on the stack: if not, reports "no value" instead
+/// of "nil". Wraps the inner message via `arg_error`.
+///
+/// Matches PUC-Rio's `luaL_typerror` from `lauxlib.c`.
+pub fn type_error(state: &LuaState, arg_idx: usize, expected: &str) -> LuaError {
+    let actual = if state.base + arg_idx < state.top {
+        state.stack_get(state.base + arg_idx).type_name()
+    } else {
+        "no value"
+    };
+
+    let msg = format!("{expected} expected, got {actual}");
+    arg_error(state, arg_idx + 1, &msg)
+}
+
+/// Validates that the argument at `arg_num` (0-based) is a userdata with
+/// the named metatable from the registry.
+///
+/// Returns the userdata `GcRef` on success. On failure, produces an error
+/// with `arg_error` formatting including "no value" for missing arguments.
 ///
 /// Matches PUC-Rio's `luaL_checkudata` from `lauxlib.c`.
-pub fn check_userdata(state: &mut LuaState, val: Val, name: &str) -> LuaResult<GcRef<Userdata>> {
+pub fn check_userdata(
+    state: &mut LuaState,
+    arg_num: usize,
+    name: &str,
+) -> LuaResult<GcRef<Userdata>> {
+    let val = if state.base + arg_num < state.top {
+        state.stack_get(state.base + arg_num)
+    } else {
+        return Err(type_error(state, arg_num, name));
+    };
+
     let Val::Userdata(ud_ref) = val else {
-        return Err(LuaError::Runtime(RuntimeError {
-            message: format!("{name} expected, got {}", val.type_name()),
-            level: 0,
-            traceback: vec![],
-        }));
+        return Err(type_error(state, arg_num, name));
     };
 
     let expected_mt = get_registry_metatable(state, name);
@@ -494,10 +554,6 @@ pub fn check_userdata(state: &mut LuaState, val: Val, name: &str) -> LuaResult<G
 
     match (expected_mt, actual_mt) {
         (Some(expected), Some(actual)) if expected == actual => Ok(ud_ref),
-        _ => Err(LuaError::Runtime(RuntimeError {
-            message: format!("{name} expected, got userdata"),
-            level: 0,
-            traceback: vec![],
-        })),
+        _ => Err(type_error(state, arg_num, name)),
     }
 }

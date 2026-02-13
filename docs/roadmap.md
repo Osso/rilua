@@ -160,8 +160,11 @@ All must be resolved before the project is considered complete.
 - **Bug #27**: Locale-aware number parsing missing. Rust `f64::parse()`
   ignores C locale. PUC-Rio uses `strtod()` which respects locale.
   Fix requires libc FFI. Affects literals.lua.
-- **Bug #28**: Error message format mismatch in I/O __gc: "got nil"
-  vs PUC-Rio "got no value". Affects errors.lua.
+- ~~**Bug #28**~~: **FIXED**. `arg_error`/`type_error` functions in
+  `src/stdlib/mod.rs` (PUC-Rio's `luaL_argerror`/`luaL_typerror`).
+  Missing args now report "no value" instead of "nil". `check_userdata`
+  produces `bad argument #N to 'name' (TYPE expected, got ACTUAL)`.
+  Affects errors.lua.
 
 **Debug library (Phase 5h, stubs)**:
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
@@ -173,11 +176,12 @@ Re-baselined after Phase 9d bug fixes (Feb 2026). Three test files (api,
 checktable, code) require the `testC` C library and are not applicable
 to rilua. Of the 20 applicable tests, 11 pass and 9 fail.
 
-Bugs #15-#24 fixed: timeouts resolved (parser/compiler infinite-loop
+Bugs #15-#24, #28 fixed: timeouts resolved (parser/compiler infinite-loop
 patterns), TAILCALL stale values, VARARG register targeting, select
 boundary, coroutine cross-thread upvalue corruption, debug.getinfo name
 field, semicolon parsing, error message quoting, ambiguous syntax
-detection, and `not`+`and`/`or` negation (removevalues in codenot).
+detection, `not`+`and`/`or` negation (removevalues in codenot), and
+`luaL_argerror`/`luaL_typerror` formatting ("no value" vs "nil").
 
 | Result | Count | Files |
 |--------|-------|-------|
@@ -198,9 +202,10 @@ detection, and `not`+`and`/`or` negation (removevalues in codenot).
   implemented.
 - `db`: fails at line 20 -- requires `debug.sethook` line hook execution
   (currently a stub). Also: debug.getinfo name nil fix applied.
-- `errors`: assertion at line 111 -- `checkmessage` for `__gc` error
-  message format mismatch (`"got nil"` vs PUC-Rio `"got no value"`).
-  Also: several "ambiguous syntax" and semicolon errors now fixed.
+- `errors`: assertion at line 126 -- `lineerror` reports wrong line
+  number for `for-in` loops with expression on separate line. Bug #28
+  (arg error formatting) fixed; several "ambiguous syntax" and semicolon
+  errors also fixed.
 - `literals`: assertion at line 162 -- locale-aware `tonumber("3,4")`
   returns nil because Rust `f64::parse` ignores C locale. Fix requires
   libc `strtod` FFI for number parsing.
@@ -1349,10 +1354,18 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
     constant arithmetic expressions at compile time. PUC-Rio folds
     `1 + 2 * 3` to `LOADK 7`; rilua emits `MUL` + `ADD`. Unary `-1`
     also not folded. Correct behavior, just less optimal bytecode.
+26. ~~**Arg error formatting ("no value" vs "nil")**~~: **FIXED**.
+    `check_userdata` reported "got nil" for missing arguments instead of
+    PUC-Rio's "got no value". Also missing `bad argument #N to 'name'`
+    prefix. Fix: added `arg_error` (PUC-Rio `luaL_argerror`) and
+    `type_error` (PUC-Rio `luaL_typerror`) in `src/stdlib/mod.rs`.
+    `check_userdata` now takes 0-based arg index, reads stack directly,
+    distinguishes missing slots from nil values. `getfuncname` resolves
+    function name for the prefix. Unblocked `errors.lua` past line 111.
 
 Files: `src/compiler/codegen.rs`, `src/compiler/parser.rs`,
 `src/compiler/ast.rs`, `src/vm/execute.rs`, `src/stdlib/debug.rs`,
-`src/stdlib/string.rs`, `src/vm/state.rs`.
+`src/stdlib/string.rs`, `src/stdlib/mod.rs`, `src/vm/state.rs`.
 
 **Tests**: Regression tests for each fixed bug. Oracle comparison for
 the specific patterns.

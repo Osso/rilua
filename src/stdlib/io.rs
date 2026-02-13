@@ -210,13 +210,12 @@ fn newfile(state: &mut LuaState) -> LuaResult<(GcRef<Userdata>, Val)> {
     Ok((ud_ref, val))
 }
 
-/// Validates that argument at position `arg_n` is a file userdata and
-/// returns the `GcRef<Userdata>`. Does NOT check if the file is open.
+/// Validates that argument at position `arg_n` (0-based) is a file userdata
+/// and returns the `GcRef<Userdata>`. Does NOT check if the file is open.
 ///
 /// Matches PUC-Rio's `topfile` macro in `liolib.c`.
 fn topfile(state: &mut LuaState, arg_n: usize) -> LuaResult<GcRef<Userdata>> {
-    let val = arg(state, arg_n);
-    super::check_userdata(state, val, FILE_HANDLE)
+    super::check_userdata(state, arg_n, FILE_HANDLE)
 }
 
 /// Validates that arg 0 is an open file and returns the raw `FILE*` pointer.
