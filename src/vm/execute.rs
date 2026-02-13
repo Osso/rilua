@@ -469,8 +469,13 @@ impl LuaState {
             self.top = res;
         }
 
-        // Return true if the caller is a Lua function.
-        wanted != LUA_MULTRET || self.ci > 0
+        // Return true if the caller requested fixed results (not MULTRET).
+        // Matches PUC-Rio: `return (L->nresults - LUA_MULTRET)` which is
+        // non-zero when nresults != LUA_MULTRET. The caller uses this to
+        // decide whether to reset top to the frame's max (fixed results)
+        // or leave it as-is (MULTRET, so the next operation can read the
+        // actual result count from top).
+        wanted != LUA_MULTRET
     }
 
     /// Adjusts the stack for a vararg function call.
@@ -634,44 +639,7 @@ fn runtime_error_simple(message: &str) -> LuaError {
     })
 }
 
-/// Maximum size for short source names (matches PUC-Rio's `LUA_IDSIZE`).
-const LUA_IDSIZE: usize = 60;
-
-/// Converts a source name to a short display form.
-///
-/// - `=name` -> `name` (literal)
-/// - `@filename` -> `filename` or `...filename` (truncated)
-/// - other -> `[string "..."]`
-///
-/// Matches PUC-Rio's `luaO_chunkid`.
-fn chunkid(source: &str) -> String {
-    if let Some(rest) = source.strip_prefix('=') {
-        // Literal name -- strip the '=' prefix.
-        if rest.len() < LUA_IDSIZE {
-            rest.to_string()
-        } else {
-            rest[..LUA_IDSIZE - 1].to_string()
-        }
-    } else if let Some(rest) = source.strip_prefix('@') {
-        // File name.
-        if rest.len() < LUA_IDSIZE {
-            rest.to_string()
-        } else {
-            let skip = rest.len() - (LUA_IDSIZE - 4);
-            format!("...{}", &rest[skip..])
-        }
-    } else {
-        // String source.
-        let first_line = source.split('\n').next().unwrap_or(source);
-        let max_len = LUA_IDSIZE - "[string \"...\"]".len();
-        if first_line.len() <= max_len && !source.contains('\n') {
-            format!("[string \"{first_line}\"]")
-        } else {
-            let truncated = &first_line[..first_line.len().min(max_len)];
-            format!("[string \"{truncated}...\"]")
-        }
-    }
-}
+use crate::error::chunkid;
 
 /// Gets "source:line: " for a given call stack level.
 ///
@@ -1364,19 +1332,25 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         };
                         if let Some(tm_val) = tm {
                             state.call_stack[state.ci].saved_pc = pc;
-                            call_tm_res(state, tm_val, b_val, c_val, state.top)?;
-                            state.stack_get(state.top).is_truthy()
+                            let res = state.top;
+                            call_tm_res(state, tm_val, b_val, c_val, res)?;
+                            // PUC-Rio reads from L->top after callTMres
+                            // decrements it. We saved the result position.
+                            state.stack_get(res).is_truthy()
                         } else {
                             false
                         }
                     };
-                    // PUC-Rio: if (result == A) then dojump; else skip JMP
+                    // PUC-Rio: if (result == A) then dojump; pc++.
+                    // dojump adds sbx to pc (can be negative). We combine
+                    // with the +1 to avoid usize underflow on the intermediate.
                     let expected = a != 0;
                     if equal == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64)) as usize;
+                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                    } else {
+                        pc += 1;
                     }
-                    pc += 1; // skip the JMP instruction
                 }
 
                 OpCode::Lt => {
@@ -1384,13 +1358,13 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
                     state.call_stack[state.ci].saved_pc = pc;
                     let result = val_less_than(b_val, c_val, state, &proto, pc)?;
-                    // PUC-Rio: if (result == A) then dojump; else skip JMP
                     let expected = a != 0;
                     if result == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64)) as usize;
+                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                    } else {
+                        pc += 1;
                     }
-                    pc += 1;
                 }
 
                 OpCode::Le => {
@@ -1398,25 +1372,25 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
                     state.call_stack[state.ci].saved_pc = pc;
                     let result = val_less_equal(b_val, c_val, state, &proto, pc)?;
-                    // PUC-Rio: if (result == A) then dojump; else skip JMP
                     let expected = a != 0;
                     if result == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64)) as usize;
+                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                    } else {
+                        pc += 1;
                     }
-                    pc += 1;
                 }
 
                 // ----- Logic / test -----
                 OpCode::Test => {
                     let val = state.stack_get(ra);
                     let c = instr.c() != 0;
-                    // if (val is falsy) != C then jump
                     if !val.is_truthy() != c {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64)) as usize;
+                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                    } else {
+                        pc += 1;
                     }
-                    pc += 1;
                 }
 
                 OpCode::TestSet => {
@@ -1426,9 +1400,10 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     if !rb.is_truthy() != c {
                         state.stack_set(ra, rb);
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64)) as usize;
+                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                    } else {
+                        pc += 1;
                     }
-                    pc += 1;
                 }
 
                 // ----- Control flow -----
@@ -1639,14 +1614,11 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         CallResult::Rust => {
                             // Rust tail-call completed. poscall already
                             // unwound the Rust frame and placed results.
-                            // The Lua caller's frame is now on top of the
-                            // call stack, so poscall for the Lua frame
-                            // happens via normal RETURN.
-                            // Refresh base from the current (restored) frame.
-                            let nresults = state.call_stack[state.ci].num_results;
-                            if nresults >= 0 {
-                                state.top = state.call_stack[state.ci].top;
-                            }
+                            // Do NOT restore top to ci.top here -- poscall
+                            // set top to reflect the actual result count,
+                            // and the subsequent RETURN (B=0) uses top for
+                            // MULTRET. Matches PUC-Rio: case PCRC just
+                            // refreshes base and continues.
                             base = state.call_stack[state.ci].base;
                             // Continue executing in the current frame.
                             continue;
@@ -2089,6 +2061,68 @@ fn val_equal(a: Val, b: Val, gc: &Gc) -> bool {
     val_raw_equal(a, b, &gc.tables, &gc.string_arena)
 }
 
+// ---------------------------------------------------------------------------
+// Locale-aware string comparison (PUC-Rio's l_strcmp)
+// ---------------------------------------------------------------------------
+
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn strcoll(s1: *const u8, s2: *const u8) -> i32;
+}
+
+/// Compare two Lua strings using `strcoll` (locale-aware), matching
+/// PUC-Rio's `l_strcmp` in `lvm.c`. Handles embedded null bytes by
+/// iterating over null-terminated segments.
+#[allow(unsafe_code)]
+fn l_strcmp(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+    let mut l = left;
+    let mut r = right;
+    loop {
+        // Create null-terminated copies for the current segment.
+        // strcoll reads until '\0', so we find the first '\0' in each slice
+        // (or use the whole slice if no '\0' exists).
+        let l_nul = l.iter().position(|&b| b == 0).unwrap_or(l.len());
+        let r_nul = r.iter().position(|&b| b == 0).unwrap_or(r.len());
+
+        // Build null-terminated buffers for strcoll.
+        let mut l_buf = Vec::with_capacity(l_nul + 1);
+        l_buf.extend_from_slice(&l[..l_nul]);
+        l_buf.push(0);
+        let mut r_buf = Vec::with_capacity(r_nul + 1);
+        r_buf.extend_from_slice(&r[..r_nul]);
+        r_buf.push(0);
+
+        // SAFETY: both buffers are null-terminated.
+        let temp = unsafe { strcoll(l_buf.as_ptr(), r_buf.as_ptr()) };
+        if temp != 0 {
+            return if temp < 0 {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        }
+        // Strings are equal up to a '\0'. Check if either is finished.
+        // The first '\0' in both is at position l_nul/r_nul.
+        // strlen of the segment = l_nul (since that's where the first '\0' is,
+        // or the end of the slice if no '\0').
+        if r_nul >= r.len() {
+            // r is finished at this segment
+            return if l_nul >= l.len() {
+                std::cmp::Ordering::Equal
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        } else if l_nul >= l.len() {
+            // l is finished but r continues
+            return std::cmp::Ordering::Less;
+        }
+        // Both strings continue past the '\0'. Skip past it.
+        let skip = l_nul + 1;
+        l = &l[skip..];
+        r = &r[skip..];
+    }
+}
+
 /// Lua less-than comparison with metamethod support.
 ///
 /// Matches PUC-Rio's `luaV_lessthan`: numbers and strings use raw
@@ -2114,7 +2148,7 @@ fn val_less_than(
                 .string_arena
                 .get(*y)
                 .ok_or_else(|| compare_error(proto, pc, a, b))?;
-            Ok(sx.data() < sy.data())
+            Ok(l_strcmp(sx.data(), sy.data()) == std::cmp::Ordering::Less)
         }
         _ => {
             if std::mem::discriminant(&a) != std::mem::discriminant(&b) {
@@ -2153,7 +2187,7 @@ fn val_less_equal(
                 .string_arena
                 .get(*y)
                 .ok_or_else(|| compare_error(proto, pc, a, b))?;
-            Ok(sx.data() <= sy.data())
+            Ok(l_strcmp(sx.data(), sy.data()) != std::cmp::Ordering::Greater)
         }
         _ => {
             if std::mem::discriminant(&a) != std::mem::discriminant(&b) {

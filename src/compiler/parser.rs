@@ -18,6 +18,9 @@ pub struct Parser {
     current: Token,
     /// Span of the current token.
     span: Span,
+    /// Nesting depth of loop constructs (while, repeat, for).
+    /// Used to validate that `break` only appears inside a loop.
+    loop_depth: u32,
 }
 
 impl Parser {
@@ -29,6 +32,7 @@ impl Parser {
             lexer,
             current,
             span,
+            loop_depth: 0,
         })
     }
 
@@ -239,7 +243,9 @@ impl Parser {
 
         let condition = self.parse_expr()?;
         self.expect(&Token::Do)?;
+        self.loop_depth += 1;
         let body = self.parse_block()?;
+        self.loop_depth -= 1;
         self.check_match(&Token::End, &Token::While, open_line)?;
 
         Ok(Stat::While {
@@ -286,7 +292,9 @@ impl Parser {
             None
         };
         self.expect(&Token::Do)?;
+        self.loop_depth += 1;
         let body = self.parse_block()?;
+        self.loop_depth -= 1;
         self.check_match(&Token::End, &Token::For, open_line)?;
 
         Ok(Stat::NumericFor {
@@ -314,7 +322,9 @@ impl Parser {
         self.expect(&Token::In)?;
         let iterators = self.parse_expr_list()?;
         self.expect(&Token::Do)?;
+        self.loop_depth += 1;
         let body = self.parse_block()?;
+        self.loop_depth -= 1;
         self.check_match(&Token::End, &Token::For, open_line)?;
 
         Ok(Stat::GenericFor {
@@ -330,9 +340,11 @@ impl Parser {
         self.advance()?; // consume 'repeat'
         let open_line = span.line;
 
+        self.loop_depth += 1;
         let body = self.parse_block()?;
         self.check_match(&Token::Until, &Token::Repeat, open_line)?;
         let condition = self.parse_expr()?;
+        self.loop_depth -= 1;
 
         Ok(Stat::Repeat {
             body,
@@ -427,6 +439,12 @@ impl Parser {
 
     fn parse_break(&mut self, span: Span) -> LuaResult<Stat> {
         self.advance()?; // consume 'break'
+        if self.loop_depth == 0 {
+            // PUC-Rio's breakstat validates that break appears inside a loop.
+            // The error includes "near <current_token>" matching luaX_syntaxerror.
+            let near = self.current.txt_token();
+            return Err(self.syntax_error(&format!("no loop to break near {near}")));
+        }
         Ok(Stat::Break { span })
     }
 
@@ -706,7 +724,12 @@ impl Parser {
         }
 
         self.expect_char(b')')?;
+        // Reset loop depth inside function bodies -- break can't cross
+        // function boundaries (PUC-Rio creates a new FuncState).
+        let saved_loop_depth = self.loop_depth;
+        self.loop_depth = 0;
         let body = self.parse_block()?;
+        self.loop_depth = saved_loop_depth;
         // Capture the `end` keyword's line before consuming it.
         // PUC-Rio: f->lastlinedefined = ls->linenumber (at `end`)
         let end_line = self.span.line;
@@ -1099,9 +1122,22 @@ mod tests {
 
     #[test]
     fn break_statement() {
-        let block = parse_ok("break");
+        // Break must appear inside a loop; test inside while.
+        let block = parse_ok("while true do break end");
         assert_eq!(block.len(), 1);
-        assert!(matches!(block[0], Stat::Break { .. }));
+        if let Stat::While { body, .. } = &block[0] {
+            assert_eq!(body.len(), 1);
+            assert!(matches!(body[0], Stat::Break { .. }));
+        } else {
+            panic!("expected while statement");
+        }
+    }
+
+    #[test]
+    fn break_outside_loop() {
+        // PUC-Rio: "no loop to break near '<eof>'"
+        let err = parse_err("break");
+        assert!(err.contains("no loop to break"), "got: {err}");
     }
 
     // -- Assignment --

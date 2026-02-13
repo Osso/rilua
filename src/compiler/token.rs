@@ -184,6 +184,24 @@ impl Token {
         }
     }
 
+    /// Returns the token text for "near" error messages.
+    ///
+    /// Matches PUC-Rio's `txtToken`: for Name, Number, and String tokens,
+    /// returns the actual content quoted with single quotes. For other
+    /// tokens, returns the same as `display_name()`.
+    #[must_use]
+    pub fn txt_token(&self) -> String {
+        match self {
+            Self::Name(s) => format!("'{s}'"),
+            Self::Number(n) => format!("'{n}'"),
+            Self::Str(s) => {
+                let text = String::from_utf8_lossy(s);
+                format!("'{text}'")
+            }
+            _ => self.display_name(),
+        }
+    }
+
     /// Returns `true` if this token is a block-closing keyword.
     ///
     /// Block followers terminate statement lists. Used by the parser

@@ -725,25 +725,28 @@ pub fn lua_select(state: &mut LuaState) -> LuaResult<u32> {
     }
 
     // Numeric index.
+    // Matches PUC-Rio's luaB_select: uses gettop (n) for clamping,
+    // not n-1, so select(1) with 0 extra args returns 0 results.
     let Val::Num(idx_f) = idx_val else {
         return Err(bad_argument("select", 1, "number or string expected"));
     };
     #[allow(clippy::cast_possible_truncation)]
     let mut idx = idx_f as i64;
-    let n_extra = (n - 1) as i64; // Arguments after the index.
+    let n_i64 = n as i64;
 
     if idx < 0 {
-        idx += n_extra + 1; // Negative indexing from end.
+        idx += n_i64; // PUC-Rio: i = n + i (n includes the index arg)
+    } else if idx > n_i64 {
+        idx = n_i64; // PUC-Rio: clamp to n
     }
-    if idx < 1 || idx > n_extra {
+    if idx < 1 {
         return Err(bad_argument("select", 1, "index out of range"));
     }
 
     // Return all arguments from idx onward.
-    // The arguments are at state.base+1 through state.base+n-1.
-    // We want arguments starting at state.base + idx.
+    // PUC-Rio: return n - i.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let result_count = (n_extra - idx + 1) as u32;
+    let result_count = (n_i64 - idx) as u32;
     Ok(result_count)
 }
 

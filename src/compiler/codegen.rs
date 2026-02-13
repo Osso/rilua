@@ -1446,7 +1446,7 @@ impl Compiler {
                 self.code_arith(OpCode::Unm, e, &mut e2, line)?;
             }
             super::ast::UnOp::Not => {
-                self.code_not(e, line);
+                self.code_not(e, line)?;
             }
             super::ast::UnOp::Len => {
                 self.exp2anyreg(e, line)?;
@@ -1457,7 +1457,13 @@ impl Compiler {
     }
 
     /// Emits logical NOT.
-    fn code_not(&mut self, e: &mut ExprContext, line: u32) {
+    ///
+    /// Matches PUC-Rio's `codenot`: discharges the expression, then for
+    /// `Relocable`/`NonReloc` values uses `discharge2anyreg` (NOT
+    /// `discharge2reg(e.info)`) so that `Relocable` expressions get a
+    /// proper register allocation instead of misusing the instruction
+    /// index as a register number.
+    fn code_not(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<()> {
         self.discharge_vars(e, line);
         match e.kind {
             ExprKind::Nil | ExprKind::False => {
@@ -1470,7 +1476,7 @@ impl Compiler {
                 self.invertjump(e);
             }
             ExprKind::Relocable | ExprKind::NonReloc => {
-                self.discharge2reg(e, e.info as u32, line);
+                self.discharge2anyreg(e, line)?;
                 self.free_expr(e);
                 e.info = self.emit_abc(OpCode::Not, 0, e.info as u32, 0, line) as i32;
                 e.kind = ExprKind::Relocable;
@@ -1479,6 +1485,7 @@ impl Compiler {
         }
         // Swap true and false lists
         std::mem::swap(&mut e.t, &mut e.f);
+        Ok(())
     }
 
     /// Returns the current pc (for use as a label/loop target).
@@ -1806,9 +1813,51 @@ fn compile_repeat(
     compiler.goiftrue(&mut cond_e, line)?;
     let condexit = cond_e.f;
 
-    compiler.leave_block(); // scope
-    compiler.patch_list(condexit, repeat_init);
-    compiler.leave_block(); // loop
+    // Check if the scope block has captured upvalues.
+    // PUC-Rio's repeatstat (lparser.c:1020) checks bl2.upval.
+    let scope_has_upval = compiler.fs().blocks.last().is_some_and(|b| b.has_upval);
+
+    if !scope_has_upval {
+        // Simple case: no upvalues, just leave scope and loop back.
+        compiler.leave_block(); // scope
+        compiler.patch_list(condexit, repeat_init);
+    } else {
+        // Upvalue case: condition TRUE means exit loop, FALSE means
+        // close scope and repeat.
+        //
+        // PUC-Rio's approach (lparser.c:1024-1029):
+        //   breakstat(ls);           -- if TRUE, CLOSE + JMP to break
+        //   patchtohere(condexit);   -- FALSE falls through
+        //   leaveblock(scope);       -- CLOSE scope vars
+        //   JMP repeat_init;         -- loop back
+        //   leaveblock(loop);        -- patches break list
+
+        // Emit break: CLOSE + JMP to exit loop.
+        // Walk blocks to find the breakable loop and its active var level.
+        let fs = compiler.fs();
+        let mut close_level = 0u32;
+        for block in fs.blocks.iter().rev() {
+            if block.is_breakable {
+                close_level = u32::from(block.num_active_vars);
+                break;
+            }
+        }
+        compiler.emit_abc(OpCode::Close, close_level, 0, 0, line);
+        let break_jmp = compiler.emit_jump(line) as i32;
+        compiler.add_break_jump(break_jmp)?;
+
+        // FALSE branch: falls through here.
+        compiler.patch_to_here(condexit);
+
+        // Leave scope block (emits CLOSE for scope variables).
+        compiler.leave_block();
+
+        // Jump back to repeat_init.
+        let loop_back = compiler.emit_jump(line);
+        compiler.patch_list(loop_back as i32, repeat_init);
+    }
+
+    compiler.leave_block(); // loop (patches break list)
     Ok(())
 }
 
@@ -2121,27 +2170,32 @@ fn adjust_assign(
 ) -> LuaResult<()> {
     let extra = nvars as i32 - nexps as i32;
     if last.kind == ExprKind::Call || last.kind == ExprKind::VarArg {
-        // Multi-return: adjust to produce needed values
+        // Multi-return: adjust to produce needed values.
+        // Matches PUC-Rio's `adjust_assign` calling `luaK_setreturns`.
+        let is_call = last.kind == ExprKind::Call;
         let needed = extra + 1;
         if needed < 0 {
             // More expressions than variables — set to 1 result
             compiler.set_one_ret(last);
-        } else {
-            // Set to produce `needed` results
+        } else if is_call {
+            // CALL: set C = needed + 1
             let mut instr = compiler.get_instruction(last.info as usize);
-            if last.kind == ExprKind::Call {
-                instr.set_c((needed + 1) as u32);
-            } else {
-                instr.set_b((needed + 1) as u32);
-                last.kind = ExprKind::Relocable;
-            }
+            instr.set_c((needed + 1) as u32);
             compiler.set_instruction(last.info as usize, instr);
+        } else {
+            // VARARG: set B (count) and A (target register).
+            // Matches PUC-Rio's luaK_setreturns for VVARARG.
+            let mut instr = compiler.get_instruction(last.info as usize);
+            instr.set_b((needed + 1) as u32);
+            instr.set_a(u32::from(compiler.fs().free_reg));
+            compiler.set_instruction(last.info as usize, instr);
+            compiler.reserve_regs(1)?;
+            last.kind = ExprKind::Relocable;
         }
-        if needed > 1 {
-            // Reserve extra result registers beyond the call position.
-            // The call position itself is already at free_reg (allocated
-            // by exp2nextreg), so we only need `needed - 1` more slots.
-            // Matches PUC-Rio: `if (extra > 1) luaK_reserveregs(fs, extra - 1);`
+        // For CALL with extra results, reserve additional registers.
+        // VARARG already reserved its one register above.
+        // Matches PUC-Rio: `if (e->k == VCALL && extra > 1) luaK_reserveregs`
+        if is_call && needed > 1 {
             #[allow(clippy::cast_possible_truncation)]
             compiler.reserve_regs((needed - 1) as u32)?;
         }

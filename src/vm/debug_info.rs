@@ -93,11 +93,12 @@ pub fn symbexec(proto: &Proto, lastpc: usize, reg: u32) -> u32 {
 
             OpCode::Jmp | OpCode::ForLoop | OpCode::ForPrep => {
                 // Follow forward jumps that don't skip past lastpc.
+                // PUC-Rio: `if (reg != NO_REG && pc < dest && dest <= lastpc)`
                 let sbx = instr.sbx();
                 #[allow(clippy::cast_possible_wrap)]
                 let dest = pc as i64 + 1 + i64::from(sbx);
                 #[allow(clippy::cast_sign_loss)]
-                if reg != NO_REG && pc < lastpc && dest >= 0 && (dest as usize) <= lastpc {
+                if reg != NO_REG && dest > pc as i64 && (dest as usize) <= lastpc {
                     pc = dest as usize;
                     continue; // Skip the normal pc increment
                 }

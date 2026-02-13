@@ -79,36 +79,7 @@ fn get_thread_offset(state: &LuaState) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Chunkid / short_src (duplicated from execute.rs for standalone use)
-// ---------------------------------------------------------------------------
-
-const LUA_IDSIZE: usize = 60;
-
-pub(crate) fn chunkid(source: &str) -> String {
-    if let Some(rest) = source.strip_prefix('=') {
-        if rest.len() < LUA_IDSIZE {
-            rest.to_string()
-        } else {
-            rest[..LUA_IDSIZE - 1].to_string()
-        }
-    } else if let Some(rest) = source.strip_prefix('@') {
-        if rest.len() < LUA_IDSIZE {
-            rest.to_string()
-        } else {
-            let skip = rest.len() - (LUA_IDSIZE - 4);
-            format!("...{}", &rest[skip..])
-        }
-    } else {
-        let first_line = source.split('\n').next().unwrap_or(source);
-        let max_len = LUA_IDSIZE - "[string \"...\"]".len();
-        if first_line.len() <= max_len && !source.contains('\n') {
-            format!("[string \"{first_line}\"]")
-        } else {
-            let truncated = &first_line[..first_line.len().min(max_len)];
-            format!("[string \"{truncated}...\"]")
-        }
-    }
-}
+pub(crate) use crate::error::chunkid;
 
 /// Gets the current line from a Lua `CallInfo`.
 pub(crate) fn current_line(state: &LuaState, ci_idx: usize) -> i32 {

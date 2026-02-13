@@ -242,10 +242,15 @@ pub fn str_reverse(state: &mut LuaState) -> LuaResult<u32> {
 // ---------------------------------------------------------------------------
 
 /// `string.lower(s)` -- Returns the string with all uppercase letters lowered.
+/// Uses libc `tolower` for locale-aware conversion (matching PUC-Rio).
+#[allow(unsafe_code)]
 pub fn str_lower(state: &mut LuaState) -> LuaResult<u32> {
     check_args("string.lower", state, 1)?;
     let s = check_string(state, "string.lower", 0)?;
-    let lowered: Vec<u8> = s.iter().map(|&c| c.to_ascii_lowercase()).collect();
+    let lowered: Vec<u8> = s
+        .iter()
+        .map(|&c| unsafe { tolower(i32::from(c)) as u8 })
+        .collect();
     let r = state.gc.intern_string(&lowered);
     state.push(Val::Str(r));
     Ok(1)
@@ -256,10 +261,15 @@ pub fn str_lower(state: &mut LuaState) -> LuaResult<u32> {
 // ---------------------------------------------------------------------------
 
 /// `string.upper(s)` -- Returns the string with all lowercase letters raised.
+/// Uses libc `toupper` for locale-aware conversion (matching PUC-Rio).
+#[allow(unsafe_code)]
 pub fn str_upper(state: &mut LuaState) -> LuaResult<u32> {
     check_args("string.upper", state, 1)?;
     let s = check_string(state, "string.upper", 0)?;
-    let uppered: Vec<u8> = s.iter().map(|&c| c.to_ascii_uppercase()).collect();
+    let uppered: Vec<u8> = s
+        .iter()
+        .map(|&c| unsafe { toupper(i32::from(c)) as u8 })
+        .collect();
     let r = state.gc.intern_string(&uppered);
     state.push(Val::Str(r));
     Ok(1)
@@ -393,20 +403,29 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
             b's' => {
                 let val = arg(state, arg_idx);
                 arg_idx += 1;
-                let s = match val {
+                // Lua strings are byte arrays, not UTF-8. We must work
+                // with raw bytes to avoid replacing high bytes with the
+                // UTF-8 replacement character (U+FFFD).
+                let s_bytes: Vec<u8> = match val {
                     Val::Str(r) => state
                         .gc
                         .string_arena
                         .get(r)
-                        .map(|s| String::from_utf8_lossy(s.data()).to_string())
+                        .map(|s| s.data().to_vec())
                         .unwrap_or_default(),
-                    Val::Nil => "nil".to_string(),
-                    Val::Bool(b) => if b { "true" } else { "false" }.to_string(),
-                    Val::Num(_) => format!("{val}"),
-                    _ => format!("{val}"),
+                    Val::Nil => b"nil".to_vec(),
+                    Val::Bool(b) => {
+                        if b {
+                            b"true".to_vec()
+                        } else {
+                            b"false".to_vec()
+                        }
+                    }
+                    Val::Num(_) => format!("{val}").into_bytes(),
+                    _ => format!("{val}").into_bytes(),
                 };
-                let formatted = format_string_with_spec(spec, &s);
-                result.extend_from_slice(formatted.as_bytes());
+                let formatted = format_string_with_spec_bytes(spec, &s_bytes);
+                result.extend_from_slice(&formatted);
             }
             b'q' => {
                 // %q: quoted string (adds quotes and escapes special chars).
@@ -811,15 +830,15 @@ fn strip_trailing_zeros_scientific(s: &str) -> String {
     }
 }
 
-/// Format a string with width/precision from a %s specifier.
-fn format_string_with_spec(spec: &[u8], s: &str) -> String {
-    let spec_str = String::from_utf8_lossy(spec);
-    let chars: Vec<char> = spec_str.chars().collect();
+/// Format a string with width/precision from a `%s` specifier.
+/// Lua strings are byte arrays; we must avoid any UTF-8 conversion so that
+/// raw bytes (like 0xed) pass through unchanged.
+fn format_string_with_spec_bytes(spec: &[u8], s: &[u8]) -> Vec<u8> {
     let mut idx = 1; // Skip '%'.
 
     let mut left_align = false;
-    while idx < chars.len() && "-+ #0".contains(chars[idx]) {
-        if chars[idx] == '-' {
+    while idx < spec.len() && b"-+ #0".contains(&spec[idx]) {
+        if spec[idx] == b'-' {
             left_align = true;
         }
         idx += 1;
@@ -827,36 +846,32 @@ fn format_string_with_spec(spec: &[u8], s: &str) -> String {
 
     let mut width: Option<usize> = None;
     let width_start = idx;
-    while idx < chars.len() && chars[idx].is_ascii_digit() {
+    while idx < spec.len() && spec[idx].is_ascii_digit() {
         idx += 1;
     }
     if idx > width_start {
-        width = chars[width_start..idx]
-            .iter()
-            .collect::<String>()
-            .parse()
-            .ok();
+        width = std::str::from_utf8(&spec[width_start..idx])
+            .ok()
+            .and_then(|s| s.parse().ok());
     }
 
     let mut precision: Option<usize> = None;
-    if idx < chars.len() && chars[idx] == '.' {
+    if idx < spec.len() && spec[idx] == b'.' {
         idx += 1;
         let prec_start = idx;
-        while idx < chars.len() && chars[idx].is_ascii_digit() {
+        while idx < spec.len() && spec[idx].is_ascii_digit() {
             idx += 1;
         }
         precision = if idx > prec_start {
-            chars[prec_start..idx]
-                .iter()
-                .collect::<String>()
-                .parse()
+            std::str::from_utf8(&spec[prec_start..idx])
                 .ok()
+                .and_then(|s| s.parse().ok())
         } else {
             Some(0)
         };
     }
 
-    // Apply precision (truncate string).
+    // Apply precision (truncate string at byte level).
     let truncated = if let Some(prec) = precision {
         if prec < s.len() { &s[..prec] } else { s }
     } else {
@@ -866,14 +881,18 @@ fn format_string_with_spec(spec: &[u8], s: &str) -> String {
     // Apply width.
     let w = width.unwrap_or(0);
     if truncated.len() >= w {
-        truncated.to_string()
+        truncated.to_vec()
     } else {
         let padding = w - truncated.len();
+        let mut out = Vec::with_capacity(w);
         if left_align {
-            format!("{truncated}{:padding$}", "")
+            out.extend_from_slice(truncated);
+            out.resize(out.len() + padding, b' ');
         } else {
-            format!("{:>padding$}{truncated}", "")
+            out.resize(padding, b' ');
+            out.extend_from_slice(truncated);
         }
+        out
     }
 }
 
@@ -1389,19 +1408,42 @@ enum Quantifier {
     None,
 }
 
+// Locale-aware character classification and case conversion via libc.
+// PUC-Rio uses isalpha(), isupper(), tolower(), toupper(), etc. which
+// respect the current C locale (set via os.setlocale).
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn isalpha(c: i32) -> i32;
+    fn iscntrl(c: i32) -> i32;
+    fn isdigit(c: i32) -> i32;
+    fn islower(c: i32) -> i32;
+    fn ispunct(c: i32) -> i32;
+    fn isspace(c: i32) -> i32;
+    fn isupper(c: i32) -> i32;
+    fn isalnum(c: i32) -> i32;
+    fn isxdigit(c: i32) -> i32;
+    fn tolower(c: i32) -> i32;
+    fn toupper(c: i32) -> i32;
+}
+
 /// Match a character against a character class letter.
+/// Uses libc functions for locale-aware classification (matching PUC-Rio).
+#[allow(unsafe_code)]
 fn matchclass(ch: u8, class: u8) -> bool {
+    let c = i32::from(ch);
     let lower_class = class.to_ascii_lowercase();
+    // SAFETY: isalpha et al. are standard C functions that accept any int
+    // value; unsigned char values (0-255) are always valid arguments.
     let result = match lower_class {
-        b'a' => ch.is_ascii_alphabetic(),
-        b'c' => ch.is_ascii_control(),
-        b'd' => ch.is_ascii_digit(),
-        b'l' => ch.is_ascii_lowercase(),
-        b'p' => ch.is_ascii_punctuation(),
-        b's' => ch.is_ascii_whitespace(),
-        b'u' => ch.is_ascii_uppercase(),
-        b'w' => ch.is_ascii_alphanumeric(),
-        b'x' => ch.is_ascii_hexdigit(),
+        b'a' => unsafe { isalpha(c) != 0 },
+        b'c' => unsafe { iscntrl(c) != 0 },
+        b'd' => unsafe { isdigit(c) != 0 },
+        b'l' => unsafe { islower(c) != 0 },
+        b'p' => unsafe { ispunct(c) != 0 },
+        b's' => unsafe { isspace(c) != 0 },
+        b'u' => unsafe { isupper(c) != 0 },
+        b'w' => unsafe { isalnum(c) != 0 },
+        b'x' => unsafe { isxdigit(c) != 0 },
         b'z' => ch == 0,         // PUC-Rio: case 'z': res = (c == 0)
         _ => return ch == class, // Literal match for non-class escapes.
     };

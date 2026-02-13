@@ -138,12 +138,12 @@ pub fn co_resume(state: &mut LuaState) -> LuaResult<u32> {
             state.top = base + 1 + results.len();
             Ok((1 + results.len()) as u32)
         }
-        Err(err_msg) => {
-            // Error: push false + error message.
+        Err(error_val) => {
+            // Error: push false + error value (preserved as-is).
+            // PUC-Rio: lua_pushboolean(L, 0); lua_insert(L, -2); return 2;
             let base = state.base;
-            let msg_ref = state.gc.intern_string(err_msg.as_bytes());
             state.stack_set(base, Val::Bool(false));
-            state.stack_set(base + 1, Val::Str(msg_ref));
+            state.stack_set(base + 1, error_val);
             state.top = base + 2;
             Ok(2)
         }
@@ -191,14 +191,17 @@ fn close_cross_thread_upvalues(state: &mut LuaState, co_ref: GcRef<LuaThread>) {
 
 /// Core resume logic shared by `coroutine.resume` and `coroutine.wrap`.
 ///
-/// Returns `Ok(results)` on success/yield, `Err(error_message)` on error.
+/// Returns `Ok(results)` on success/yield, `Err(error_val)` on error.
+/// The error value is preserved as a `Val` to match PUC-Rio behavior
+/// where non-string error objects (functions, tables, etc.) pass through
+/// `resume`/`wrap` without stringification.
 ///
 /// Reference: `auxresume` in `lbaselib.c`.
 fn auxresume(
     state: &mut LuaState,
     co_ref: GcRef<LuaThread>,
     args: &[Val],
-) -> Result<Vec<Val>, String> {
+) -> Result<Vec<Val>, Val> {
     // Check coroutine status.
     let co_status = state
         .gc
@@ -208,10 +211,14 @@ fn auxresume(
 
     match co_status {
         ThreadStatus::Dead => {
-            return Err("cannot resume dead coroutine".into());
+            let r = state.gc.intern_string(b"cannot resume dead coroutine");
+            return Err(Val::Str(r));
         }
         ThreadStatus::Running | ThreadStatus::Normal => {
-            return Err("cannot resume non-suspended coroutine".into());
+            let r = state
+                .gc
+                .intern_string(b"cannot resume non-suspended coroutine");
+            return Err(Val::Str(r));
         }
         ThreadStatus::Initial | ThreadStatus::Suspended => {
             // OK to resume.
@@ -270,9 +277,14 @@ fn auxresume(
         // function (yield). We need to complete the interrupted call.
         //
         // In PUC-Rio, resume() calls poscall for the interrupted C function,
-        // then luaV_execute. In rilua, yield propagated as an error through
-        // precall, so the CI for yield is still on the stack. We need to
-        // complete poscall for it and then continue execution.
+        // then luaV_execute(L, ci - base_ci). The nexeccalls parameter makes
+        // PUC-Rio's flat loop process ALL remaining CI levels.
+        //
+        // In rilua's recursive model, each execute() handles one function
+        // level. When yield unwound the Rust call stack, the nested
+        // execute() frames were lost. We must loop, calling execute() for
+        // each CI level until the coroutine's base function completes
+        // (ci == 0) or a new yield occurs.
         //
         // The resume args are at state.base..state.top. poscall reads from
         // first_result and places results at the caller's expected position.
@@ -282,11 +294,16 @@ fn auxresume(
         }
 
         // Continue execution from where we left off.
-        if state.ci > 0 {
-            execute::execute(state)
-        } else {
+        // Loop to handle all CI levels that were active when yield happened.
+        // ci[0] is the sentinel base CI — execute only runs for ci > 0.
+        // Each execute() handles one function level (OP_RETURN pops the CI).
+        // When ci reaches 0, the coroutine's function has returned normally.
+        (|| -> LuaResult<()> {
+            while state.ci > 0 {
+                execute::execute(state)?;
+            }
             Ok(())
-        }
+        })()
     };
 
     // Determine outcome and collect results.
@@ -325,23 +342,17 @@ fn auxresume(
             Ok(results)
         }
         Err(err) => {
-            // Coroutine errored. Get error message.
-            let error_msg = if let Some(obj) = state.error_object.take() {
-                match obj {
-                    Val::Str(r) => state.gc.string_arena.get(r).map_or_else(
-                        || err.to_string(),
-                        |s| String::from_utf8_lossy(s.data()).to_string(),
-                    ),
-                    _ => err.to_string(),
-                }
-            } else {
-                err.to_string()
-            };
+            // Coroutine errored. Preserve the error value as-is.
+            // PUC-Rio: lua_xmove(co, L, 1) moves the error value directly.
+            let error_val = state.error_object.take().unwrap_or_else(|| {
+                let r = state.gc.intern_string(err.to_string().as_bytes());
+                Val::Str(r)
+            });
 
             // Save coroutine state as dead and restore resumer.
             state.save_and_restore_by_ref(co_ref, ThreadStatus::Dead, resumer);
             state.current_thread = saved_current_thread;
-            Err(error_msg)
+            Err(error_val)
         }
     }
 }
@@ -467,9 +478,44 @@ fn wrap_aux(state: &mut LuaState) -> LuaResult<u32> {
             state.top = base + results.len();
             Ok(results.len() as u32)
         }
-        Err(err_msg) => {
-            // Propagate error (unlike resume which returns false+msg).
-            Err(simple_error(err_msg))
+        Err(error_val) => {
+            // Propagate error (unlike resume which returns false+error_val).
+            // PUC-Rio luaB_auxwrap: if error is a string, prepend location.
+            // Then lua_error(L) re-raises with the error value.
+            let final_val = if let Val::Str(r) = error_val {
+                // String error: prepend source location (luaL_where pattern).
+                let where_prefix = execute::get_where(state, 1);
+                if where_prefix.is_empty() {
+                    error_val
+                } else {
+                    let original = state
+                        .gc
+                        .string_arena
+                        .get(r)
+                        .map(|s| String::from_utf8_lossy(s.data()).to_string())
+                        .unwrap_or_default();
+                    let full = format!("{where_prefix}{original}");
+                    Val::Str(state.gc.intern_string(full.as_bytes()))
+                }
+            } else {
+                // Non-string error: re-raise as-is.
+                error_val
+            };
+            state.error_object = Some(final_val);
+            let display = match final_val {
+                Val::Str(r) => state
+                    .gc
+                    .string_arena
+                    .get(r)
+                    .map(|s| String::from_utf8_lossy(s.data()).to_string())
+                    .unwrap_or_default(),
+                _ => format!("{final_val}"),
+            };
+            Err(LuaError::Runtime(RuntimeError {
+                message: display,
+                level: 0,
+                traceback: vec![],
+            }))
         }
     }
 }

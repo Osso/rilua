@@ -514,12 +514,14 @@ impl Gc {
     /// Traverses a gray thread: marks stack values and open upvalues.
     /// Threads are moved to `grayagain` for atomic re-traversal.
     fn traverse_thread(&mut self, r: GcRef<LuaThread>) {
-        let (stack_vals, open_upvals) = {
+        let (stack_vals, open_upvals, suspended_upvals) = {
             if let Some(thread) = self.threads.get(r) {
                 let top = thread.top.min(thread.stack.len());
                 let stack: Vec<Val> = thread.stack[..top].to_vec();
                 let upvals: Vec<GcRef<Upvalue>> = thread.open_upvalues.clone();
-                (stack, upvals)
+                let suspended: Vec<GcRef<Upvalue>> =
+                    thread.suspended_upvals.iter().map(|(r, _)| *r).collect();
+                (stack, upvals, suspended)
             } else {
                 return;
             }
@@ -531,6 +533,9 @@ impl Gc {
             self.mark_value(*val);
         }
         for uv_ref in &open_upvals {
+            self.mark_upvalue(*uv_ref);
+        }
+        for uv_ref in &suspended_upvals {
             self.mark_upvalue(*uv_ref);
         }
 
@@ -623,12 +628,14 @@ impl Gc {
         for item in grayagain {
             match item {
                 GrayItem::Thread(r) => {
-                    let (stack_vals, open_upvals) = {
+                    let (stack_vals, open_upvals, suspended_upvals) = {
                         if let Some(thread) = self.threads.get(r) {
                             let top = thread.top.min(thread.stack.len());
                             let stack: Vec<Val> = thread.stack[..top].to_vec();
                             let upvals: Vec<GcRef<Upvalue>> = thread.open_upvalues.clone();
-                            (stack, upvals)
+                            let suspended: Vec<GcRef<Upvalue>> =
+                                thread.suspended_upvals.iter().map(|(r, _)| *r).collect();
+                            (stack, upvals, suspended)
                         } else {
                             continue;
                         }
@@ -638,6 +645,9 @@ impl Gc {
                         self.mark_value(*val);
                     }
                     for uv_ref in &open_upvals {
+                        self.mark_upvalue(*uv_ref);
+                    }
+                    for uv_ref in &suspended_upvals {
                         self.mark_upvalue(*uv_ref);
                     }
                 }

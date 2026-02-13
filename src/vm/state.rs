@@ -233,6 +233,14 @@ pub struct LuaThread {
     pub n_ccalls: u16,
     /// Open upvalues.
     pub open_upvalues: Vec<GcRef<Upvalue>>,
+    /// Upvalues that were open when the thread was suspended.
+    /// Each entry stores (upvalue_ref, original_stack_index).
+    /// On resume, these are reopened: the closed value is written back
+    /// to the stack slot and the upvalue is marked Open again.
+    /// This is necessary because rilua's swap model moves the stack
+    /// between threads, which would leave open upvalues pointing at
+    /// the wrong stack.
+    pub suspended_upvals: Vec<(GcRef<Upvalue>, usize)>,
     /// Error object for error propagation.
     pub error_object: Option<Val>,
     /// Thread status.
@@ -260,6 +268,7 @@ impl LuaThread {
             ci: 0,
             n_ccalls: 0,
             open_upvalues: Vec::new(),
+            suspended_upvals: Vec::new(),
             error_object: None,
             status: ThreadStatus::Initial,
         }
@@ -276,6 +285,7 @@ impl Default for LuaThread {
             ci: 0,
             n_ccalls: 0,
             open_upvalues: Vec::new(),
+            suspended_upvals: Vec::new(),
             error_object: None,
             status: ThreadStatus::Dead,
         }
@@ -578,6 +588,7 @@ impl LuaState {
             ci: self.ci,
             n_ccalls: self.n_ccalls,
             open_upvalues: std::mem::take(&mut self.open_upvalues),
+            suspended_upvals: Vec::new(),
             error_object: self.error_object.take(),
             status: ThreadStatus::Normal,
         }
@@ -604,6 +615,44 @@ impl LuaState {
             self.n_ccalls = thread.n_ccalls;
             self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
             self.error_object = thread.error_object.take();
+
+            // Reopen upvalues that were closed on suspension.
+            // Write their captured values back to the stack slots and
+            // mark them as Open again so the running function and its
+            // closures share the same variable through the stack.
+            let suspended = std::mem::take(&mut thread.suspended_upvals);
+            for (uv_ref, idx) in &suspended {
+                if let Some(uv) = self.gc.upvalues.get(*uv_ref) {
+                    if let crate::vm::closure::UpvalueState::Closed { value } = uv.state {
+                        if *idx < self.stack.len() {
+                            self.stack[*idx] = value;
+                        }
+                    }
+                }
+                if let Some(uv) = self.gc.upvalues.get_mut(*uv_ref) {
+                    uv.state = crate::vm::closure::UpvalueState::Open { stack_index: *idx };
+                }
+                // Re-add to open_upvalues list if not already present.
+                if !self.open_upvalues.contains(uv_ref) {
+                    self.open_upvalues.push(*uv_ref);
+                }
+            }
+            // Re-sort open_upvalues by stack index descending.
+            self.open_upvalues.sort_by(|a, b| {
+                let a_idx = self
+                    .gc
+                    .upvalues
+                    .get(*a)
+                    .and_then(|uv| uv.stack_index())
+                    .unwrap_or(0);
+                let b_idx = self
+                    .gc
+                    .upvalues
+                    .get(*b)
+                    .and_then(|uv| uv.stack_index())
+                    .unwrap_or(0);
+                b_idx.cmp(&a_idx)
+            });
         }
     }
 
@@ -619,6 +668,27 @@ impl LuaState {
         co_status: ThreadStatus,
         resumer: LuaThread,
     ) {
+        // Close open upvalues before the stack swap.
+        //
+        // In rilua's swap model, the coroutine's stack is about to be saved
+        // to the GC arena and the resumer's stack loaded. Open upvalues
+        // pointing into the coroutine's stack would then read from the
+        // wrong stack. We close them (capturing values) and record their
+        // original stack indices so they can be reopened on resume.
+        let mut suspended = Vec::new();
+        for &uv_ref in &self.open_upvalues {
+            if let Some(uv) = self.gc.upvalues.get(uv_ref) {
+                if let Some(idx) = uv.stack_index() {
+                    suspended.push((uv_ref, idx));
+                }
+            }
+        }
+        for &(uv_ref, _) in &suspended {
+            if let Some(uv) = self.gc.upvalues.get_mut(uv_ref) {
+                uv.close(&self.stack);
+            }
+        }
+
         // Save current state into the coroutine.
         if let Some(co_thread) = self.gc.threads.get_mut(co_ref) {
             co_thread.stack = std::mem::take(&mut self.stack);
@@ -628,6 +698,7 @@ impl LuaState {
             co_thread.ci = self.ci;
             co_thread.n_ccalls = self.n_ccalls;
             co_thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
+            co_thread.suspended_upvals = suspended;
             co_thread.error_object = self.error_object.take();
             co_thread.status = co_status;
         }

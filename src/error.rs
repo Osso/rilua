@@ -122,7 +122,51 @@ impl fmt::Display for LuaError {
 
 impl fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: {}", self.source, self.line, self.message)
+        write!(
+            f,
+            "{}:{}: {}",
+            chunkid(&self.source),
+            self.line,
+            self.message
+        )
+    }
+}
+
+/// Maximum size for short source names (matches PUC-Rio's `LUA_IDSIZE`).
+const LUA_IDSIZE: usize = 60;
+
+/// Formats a raw source name for display in error messages.
+///
+/// Matches PUC-Rio's `luaO_chunkid`:
+/// - `"=name"` -> `"name"` (literal, truncated to `LUA_IDSIZE`)
+/// - `"@filename"` -> `"filename"` (file, with `"..."` prefix if too long)
+/// - other -> `[string "first_line..."]`
+pub fn chunkid(source: &str) -> String {
+    if let Some(rest) = source.strip_prefix('=') {
+        // Literal name -- strip the '=' prefix.
+        if rest.len() < LUA_IDSIZE {
+            rest.to_string()
+        } else {
+            rest[..LUA_IDSIZE - 1].to_string()
+        }
+    } else if let Some(rest) = source.strip_prefix('@') {
+        // File name.
+        if rest.len() < LUA_IDSIZE {
+            rest.to_string()
+        } else {
+            let skip = rest.len() - (LUA_IDSIZE - 4);
+            format!("...{}", &rest[skip..])
+        }
+    } else {
+        // String source.
+        let first_line = source.split('\n').next().unwrap_or(source);
+        let max_len = LUA_IDSIZE - "[string \"...\"]".len();
+        if first_line.len() <= max_len && !source.contains('\n') {
+            format!("[string \"{first_line}\"]")
+        } else {
+            let truncated = &first_line[..first_line.len().min(max_len)];
+            format!("[string \"{truncated}...\"]")
+        }
     }
 }
 
@@ -193,10 +237,23 @@ mod tests {
     fn syntax_error_display() {
         let err = LuaError::Syntax(SyntaxError {
             message: "')' expected near 'end'".into(),
-            source: "stdin".into(),
+            source: "=stdin".into(),
             line: 3,
         });
         assert_eq!(err.to_string(), "stdin:3: ')' expected near 'end'");
+    }
+
+    #[test]
+    fn syntax_error_display_string_source() {
+        let err = LuaError::Syntax(SyntaxError {
+            message: "unexpected symbol near 'x'".into(),
+            source: "break label".into(),
+            line: 1,
+        });
+        assert_eq!(
+            err.to_string(),
+            "[string \"break label\"]:1: unexpected symbol near 'x'"
+        );
     }
 
     #[test]

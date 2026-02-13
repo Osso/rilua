@@ -501,6 +501,18 @@ fn loadstring_returns_function() {
 }
 
 #[test]
+fn loadstring_break_outside_loop() {
+    // Bug #22: loadstring("break label") should report "no loop to break"
+    // with source formatted as [string "..."].
+    let (stdout, _, code) = run_rilua("local f, err = loadstring('break label') print(err)");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("[string \"break label\"]:1: no loop to break near 'label'"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
 fn collectgarbage_count() {
     let (stdout, _, code) = run_rilua("print(type(collectgarbage('count')))");
     assert_eq!(code, 0);
@@ -4320,4 +4332,86 @@ fn paren_call_as_statement_is_syntax_error() {
         stderr.contains("'=' expected") || stderr.contains("syntax error"),
         "got: {stderr}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Bug #19: Repeat-until upvalue scoping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn repeat_until_upvalue_scoping() {
+    // Bug #19: closures in repeat body must capture their own copy of
+    // locals when the until condition is checked. Requires CLOSE codegen
+    // when the scope block has captured upvalues.
+    let (_, stderr, code) = run_rilua(
+        r#"
+local results = {}
+local i = 0
+repeat
+  i = i + 1
+  local x = i
+  results[i] = function() return x end
+until i >= 3
+assert(results[1]() == 1)
+assert(results[2]() == 2)
+assert(results[3]() == 3)
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+}
+
+#[test]
+fn tailcall_rust_zero_results() {
+    // Bug #21: when a Rust function (like print) returns 0 values via
+    // TAILCALL, the result should be nil, not a stale stack value.
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+function wrapper(f, ...) return f(...) end
+local a = wrapper(print, "+")
+assert(a == nil, "expected nil, got: " .. tostring(a))
+print("PASSED")
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("PASSED"), "stdout: {stdout}");
+}
+
+#[test]
+fn vararg_local_assign_target_register() {
+    // VARARG instruction A field must target the correct register.
+    // Previously the A field was left as 0, overwriting fixed parameters.
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+function f(n, a, ...)
+  local b, c, d = ...
+  assert(a == 5, "a=" .. tostring(a))
+  assert(b == 4, "b=" .. tostring(b))
+  assert(c == 3, "c=" .. tostring(c))
+  assert(d == 2, "d=" .. tostring(d))
+  print("PASSED")
+end
+f(0, 5, 4, 3, 2, 1)
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("PASSED"), "stdout: {stdout}");
+}
+
+#[test]
+fn select_boundary_cases() {
+    // select(1) with no extra args should return 0 results (not error).
+    // select(-1, 3, 5, 7) should return 7.
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+a = {select(1)}
+assert(next(a) == nil)
+a = {select(-1, 3, 5, 7)}
+assert(a[1] == 7 and a[2] == nil)
+a = {select(-2, 3, 5, 7)}
+assert(a[1] == 5 and a[2] == 7 and a[3] == nil)
+print("PASSED")
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("PASSED"), "stdout: {stdout}");
 }
