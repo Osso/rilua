@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 10/20 applicable PUC-Rio tests pass) | 1285 total (586 unit + 422 integration + 277 oracle) |
+| 9: Compatibility | In progress (9a-9d done; 11/20 applicable PUC-Rio tests pass) | 1289 total (586 unit + 426 integration + 277 oracle) |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -146,12 +146,11 @@ All must be resolved before the project is considered complete.
   "ambiguous syntax (function call x new statement)".
 
 **Remaining bugs (discovered during 9d)**:
-- **Bug #24**: `not` applied to `and`/`or` expressions silently drops
-  the negation. `not (nil and true)` returns `nil` instead of `true`.
-  Root cause: compiler does not propagate `not` inversion into the
-  short-circuit jump logic of `and`/`or` expressions. PUC-Rio's
-  `luaK_prefix(UNM_NOT)` swaps true/false lists. Affects constructs.lua,
-  verybig.lua.
+- ~~Bug #24: `not` applied to `and`/`or` expressions silently drops the
+  negation~~ **FIXED**: Added `remove_values()` to `code_not()` to convert
+  TESTSET -> TEST instructions after swapping true/false jump lists
+  (matching PUC-Rio's `removevalues()` in `codenot()`). Unlocked
+  constructs.lua.
 - **Bug #25**: `load()` with reader function reads entire input before
   parsing. PUC-Rio streams reader output incrementally into the lexer.
   Reader call count differs. Affects calls.lua.
@@ -168,23 +167,23 @@ All must be resolved before the project is considered complete.
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (10 / 20 applicable pass)
+### PUC-Rio test suite status (11 / 20 applicable pass)
 
 Re-baselined after Phase 9d bug fixes (Feb 2026). Three test files (api,
 checktable, code) require the `testC` C library and are not applicable
-to rilua. Of the 20 applicable tests, 10 pass and 10 fail.
+to rilua. Of the 20 applicable tests, 11 pass and 9 fail.
 
-Bugs #15-#23 fixed: timeouts resolved (parser/compiler infinite-loop
+Bugs #15-#24 fixed: timeouts resolved (parser/compiler infinite-loop
 patterns), TAILCALL stale values, VARARG register targeting, select
 boundary, coroutine cross-thread upvalue corruption, debug.getinfo name
-field, semicolon parsing, error message quoting, and ambiguous syntax
-detection.
+field, semicolon parsing, error message quoting, ambiguous syntax
+detection, and `not`+`and`/`or` negation (removevalues in codenot).
 
 | Result | Count | Files |
 |--------|-------|-------|
-| Pass | 10 | events, files, gc, locals, math, nextvar, pm, sort, strings, vararg |
+| Pass | 11 | constructs, events, files, gc, locals, math, nextvar, pm, sort, strings, vararg |
 | N/A | 3 | api, checktable, code (require testC C library) |
-| Fail | 10 | attrib, big, calls, closure, constructs, db, errors, literals, main, verybig |
+| Fail | 9 | attrib, big, calls, closure, db, errors, literals, main, verybig |
 
 **Fail details**:
 - `attrib`: requires file creation test infrastructure (writes
@@ -197,9 +196,6 @@ detection.
 - `closure`: `setfenv` on coroutine threads not supported. Fails at
   line 416 (`debug.setfenv(co, a)`). Per-thread global tables not
   implemented.
-- `constructs`: assertion at line 235 -- bug #24 (`not` applied to
-  `and`/`or` expression drops the negation). Compiler does not propagate
-  `not` inversion into short-circuit `and`/`or` jump logic.
 - `db`: fails at line 20 -- requires `debug.sethook` line hook execution
   (currently a stub). Also: debug.getinfo name nil fix applied.
 - `errors`: assertion at line 111 -- `checkmessage` for `__gc` error
@@ -210,8 +206,9 @@ detection.
   libc `strtod` FFI for number parsing.
 - `main`: requires CLI subprocess execution with `LUA_PATH` manipulation.
   `require` path search fails for `/tmp/lua_*` temp files.
-- `verybig`: assertion at line 120033 of generated code -- bug #24
-  (same `not`+`and`/`or` codegen issue as constructs.lua).
+- `verybig`: assertion at line 120033 of generated code. Bug #24 fix
+  resolved the `not`+`and`/`or` issue but verybig.lua has additional
+  failures in the generated code (different expression combinations).
 
 ### Execution order corrections
 
