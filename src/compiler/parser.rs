@@ -4,11 +4,31 @@
 //! Uses Pratt parsing for expressions with operator precedence.
 //! Error messages match PUC-Rio's format for compatibility.
 
-use crate::error::{LuaError, LuaResult, SyntaxError};
+use crate::error::{LuaError, LuaResult, SyntaxError, chunkid};
+use crate::vm::instructions::{LUAI_MAXUPVALUES, LUAI_MAXVARS};
 
 use super::ast::{BinOp, Block, Expr, FuncBody, FuncName, Stat, TableField, UnOp};
 use super::lexer::Lexer;
 use super::token::{Span, Token};
+
+/// Per-function scope tracking for local/upvalue limit checking.
+/// Mirrors PUC-Rio's FuncState fields (nactvar, upvalues[]).
+/// Needed because PUC-Rio's single-pass design catches these limits
+/// before encountering missing `end` keywords in intentionally
+/// incomplete code (e.g., the PUC-Rio test suite).
+struct FuncScope {
+    /// Line where this function was defined (0 for top-level chunk).
+    line_defined: u32,
+    /// Current count of registered local variables in this function.
+    local_count: u32,
+    /// Names of currently active local variables in this function.
+    /// Used for upvalue resolution: when a name isn't found here,
+    /// it's looked up in parent scopes.
+    local_names: Vec<String>,
+    /// Names of upvalues already resolved for this function.
+    /// Prevents double-counting the same upvalue from multiple references.
+    upvalue_names: Vec<String>,
+}
 
 /// Parser state.
 pub struct Parser {
@@ -24,7 +44,17 @@ pub struct Parser {
     /// Nesting depth of loop constructs (while, repeat, for).
     /// Used to validate that `break` only appears inside a loop.
     loop_depth: u32,
+    /// Syntax nesting depth (PUC-Rio: `L->nCcalls` in `enterlevel`/`leavelevel`).
+    /// Prevents stack overflow from deeply nested syntax constructs.
+    syntax_depth: u32,
+    /// Stack of function scopes for local variable limit checking.
+    /// Each function (including the top-level chunk) gets its own scope.
+    func_scopes: Vec<FuncScope>,
 }
+
+/// Maximum syntax nesting depth before "too many syntax levels" error.
+/// PUC-Rio uses `LUAI_MAXCCALLS` (200) for this.
+const MAX_SYNTAX_LEVELS: u32 = 200;
 
 impl Parser {
     /// Creates a new parser for the given source bytes.
@@ -37,7 +67,117 @@ impl Parser {
             span,
             lastline: 1,
             loop_depth: 0,
+            syntax_depth: 0,
+            // Top-level chunk is itself a function scope (line 0).
+            func_scopes: vec![FuncScope {
+                line_defined: 0,
+                local_count: 0,
+                local_names: Vec::new(),
+                upvalue_names: Vec::new(),
+            }],
         })
+    }
+
+    // -- Nesting depth (PUC-Rio: enterlevel/leavelevel) --
+
+    /// Increments syntax nesting depth, erroring if too deep.
+    fn enter_level(&mut self) -> LuaResult<()> {
+        self.syntax_depth += 1;
+        if self.syntax_depth > MAX_SYNTAX_LEVELS {
+            return Err(self.syntax_error("chunk has too many syntax levels"));
+        }
+        Ok(())
+    }
+
+    /// Decrements syntax nesting depth.
+    fn leave_level(&mut self) {
+        self.syntax_depth -= 1;
+    }
+
+    // -- Function scope tracking (PUC-Rio: FuncState.nactvar) --
+
+    /// Registers `count` new local variables in the current function scope.
+    /// Returns an error if the total exceeds `LUAI_MAXVARS` (200).
+    /// Matches PUC-Rio's `new_localvar` limit check.
+    fn register_locals(&mut self, count: u32) -> LuaResult<()> {
+        if let Some(scope) = self.func_scopes.last_mut() {
+            if scope.local_count + count > LUAI_MAXVARS {
+                let msg = format!(
+                    "function at line {} has more than {} local variables",
+                    scope.line_defined, LUAI_MAXVARS
+                );
+                return Err(self.syntax_error(&msg));
+            }
+            scope.local_count += count;
+        }
+        Ok(())
+    }
+
+    /// Registers named local variables (tracks both count and names).
+    /// Used when names are available (local declarations, function params).
+    fn register_locals_named(&mut self, names: &[String]) -> LuaResult<()> {
+        self.register_locals(names.len() as u32)?;
+        if let Some(scope) = self.func_scopes.last_mut() {
+            scope.local_names.extend(names.iter().cloned());
+        }
+        Ok(())
+    }
+
+    /// Checks if a name reference creates upvalues in the function scope chain.
+    /// Mirrors PUC-Rio's `singlevar` → `indexupvalue` cascade.
+    /// When a name is found in a parent scope, all intermediate function
+    /// scopes gain an upvalue entry.
+    fn check_name_upvalue(&mut self, name: &str) -> LuaResult<()> {
+        let n_scopes = self.func_scopes.len();
+        if n_scopes < 2 {
+            return Ok(()); // top-level scope has no upvalues
+        }
+
+        // Check if name is a local in the current (innermost) function scope.
+        let current = n_scopes - 1;
+        if self.func_scopes[current].local_names.contains(&name.to_string()) {
+            return Ok(()); // local variable, not an upvalue
+        }
+        // Already tracked as an upvalue of the current scope?
+        if self.func_scopes[current].upvalue_names.contains(&name.to_string()) {
+            return Ok(()); // already counted
+        }
+
+        // Walk up the chain to find where this name is defined.
+        let mut found_at = None;
+        for i in (0..current).rev() {
+            if self.func_scopes[i].local_names.contains(&name.to_string())
+                || self.func_scopes[i].upvalue_names.contains(&name.to_string())
+            {
+                found_at = Some(i);
+                break;
+            }
+        }
+
+        // If not found anywhere, it's a global — no upvalue created.
+        let Some(found_level) = found_at else {
+            return Ok(());
+        };
+
+        // Cascade: add upvalue to all intermediate scopes from found_level+1
+        // up to and including the current scope.
+        let name_owned = name.to_string();
+        for i in (found_level + 1)..=current {
+            if !self.func_scopes[i].upvalue_names.contains(&name_owned) {
+                let scope = &self.func_scopes[i];
+                if scope.upvalue_names.len() >= LUAI_MAXUPVALUES as usize {
+                    let msg = format!(
+                        "function at line {} has more than {} upvalues",
+                        scope.line_defined, LUAI_MAXUPVALUES
+                    );
+                    return Err(self.syntax_error(&msg));
+                }
+                self.func_scopes[i]
+                    .upvalue_names
+                    .push(name_owned.clone());
+            }
+        }
+        Ok(())
     }
 
     // -- Token helpers --
@@ -143,6 +283,7 @@ impl Parser {
             message: msg.to_string(),
             source: self.lexer.source_name().to_string(),
             line: self.span.line,
+            raw_message: None,
         })
     }
 
@@ -158,7 +299,38 @@ impl Parser {
             }
             _ => self.current.txt_token(),
         };
-        self.syntax_error(&format!("{msg} near {near}"))
+
+        // For non-ASCII byte characters, build a raw_message to preserve the
+        // actual byte value. Rust's char::from(0xFF) produces U+00FF which is
+        // 2 bytes in UTF-8 (0xC3, 0xBF), but PUC-Rio's C strings keep the
+        // raw byte. We build the full "source:line: msg near 'BYTE'" as raw
+        // bytes so that loadstring can push it onto the Lua stack verbatim.
+        let raw_message = if let Token::Char(b) = self.current {
+            if !b.is_ascii() {
+                let source = chunkid(self.lexer.source_name());
+                let mut raw = Vec::new();
+                raw.extend_from_slice(source.as_bytes());
+                raw.push(b':');
+                raw.extend_from_slice(self.span.line.to_string().as_bytes());
+                raw.extend_from_slice(b": ");
+                raw.extend_from_slice(msg.as_bytes());
+                raw.extend_from_slice(b" near '");
+                raw.push(b);
+                raw.push(b'\'');
+                Some(raw)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        LuaError::Syntax(SyntaxError {
+            message: format!("{msg} near {near}"),
+            source: self.lexer.source_name().to_string(),
+            line: self.span.line,
+            raw_message,
+        })
     }
 
     fn error_expected(&self, what: &str) -> LuaError {
@@ -183,6 +355,14 @@ impl Parser {
         // chunk -> { stat [`;'] }
         // Lua 5.1: semicolons are optional separators after statements,
         // NOT empty statements. PUC-Rio: testnext(ls, ';') only after stat.
+        self.enter_level()?;
+
+        // Save local variable state for block scoping (PUC-Rio: enterblock).
+        // When the block ends, locals declared inside go out of scope.
+        let saved_locals = self.func_scopes.last().map(|s| {
+            (s.local_count, s.local_names.len())
+        });
+
         let mut stmts = Vec::new();
         loop {
             if self.current.is_block_follow() {
@@ -200,6 +380,16 @@ impl Parser {
                 break;
             }
         }
+
+        // Restore local variable state (PUC-Rio: leaveblock → removevars).
+        if let Some((count, names_len)) = saved_locals {
+            if let Some(scope) = self.func_scopes.last_mut() {
+                scope.local_count = count;
+                scope.local_names.truncate(names_len);
+            }
+        }
+
+        self.leave_level();
         Ok(stmts)
     }
 
@@ -305,6 +495,11 @@ impl Parser {
 
     fn parse_numeric_for(&mut self, name: String, open_line: u32, span: Span) -> LuaResult<Stat> {
         // for name = start, stop [, step] do block end
+        // PUC-Rio registers 4 locals: (for index), (for limit), (for step), name.
+        // Track the user-visible name for upvalue resolution; the 3 implicit
+        // locals have internal names that user code can't reference.
+        self.register_locals(3)?;
+        self.register_locals_named(&[name.clone()])?;
         self.expect_char(b'=')?;
         let start = self.parse_expr()?;
         self.expect_char(b',')?;
@@ -342,6 +537,10 @@ impl Parser {
             let (name, _) = self.expect_name()?;
             names.push(name);
         }
+        // PUC-Rio registers 3 implicit locals + user names:
+        // (for generator), (for state), (for control), name1, name2, ...
+        self.register_locals(3)?;
+        self.register_locals_named(&names)?;
         self.expect(&Token::In)?;
         let iter_line = self.span.line;
         let iterators = self.parse_expr_list()?;
@@ -421,6 +620,8 @@ impl Parser {
 
         if self.test_next(&Token::Function)? {
             let (name, _) = self.expect_name()?;
+            // The function name is a local variable.
+            self.register_locals_named(&[name.clone()])?;
             let body = self.parse_func_body(span)?;
             return Ok(Stat::LocalFunc { name, body, span });
         }
@@ -432,6 +633,9 @@ impl Parser {
             let (name, _) = self.expect_name()?;
             names.push(name);
         }
+
+        // Check local variable limit (PUC-Rio: new_localvar checks nactvar).
+        self.register_locals_named(&names)?;
 
         let values = if self.test_next_char(b'=')? {
             self.parse_expr_list()?
@@ -521,6 +725,7 @@ impl Parser {
 
     /// Pratt parser: parse sub-expression with minimum precedence `limit`.
     fn parse_sub_expr(&mut self, limit: u8) -> LuaResult<Expr> {
+        self.enter_level()?;
         let span = self.span;
 
         // Unary prefix operators
@@ -553,6 +758,7 @@ impl Parser {
             };
         }
 
+        self.leave_level();
         Ok(expr)
     }
 
@@ -668,6 +874,8 @@ impl Parser {
             Token::Name(_) => {
                 let (tok, _) = self.advance()?;
                 if let Token::Name(name) = tok {
+                    // Check for upvalue limit (PUC-Rio: singlevar → indexupvalue).
+                    self.check_name_upvalue(&name)?;
                     Ok(Expr::Name(name, span))
                 } else {
                     Err(self.syntax_error("unexpected token"))
@@ -754,12 +962,27 @@ impl Parser {
         }
 
         self.expect_char(b')')?;
+
+        // Push a new function scope for local variable tracking.
+        // Parameters count as locals (PUC-Rio: new_localvar for each param).
+        self.func_scopes.push(FuncScope {
+            line_defined: def_span.line,
+            local_count: 0,
+            local_names: Vec::new(),
+            upvalue_names: Vec::new(),
+        });
+        self.register_locals_named(&params)?;
+
         // Reset loop depth inside function bodies -- break can't cross
         // function boundaries (PUC-Rio creates a new FuncState).
         let saved_loop_depth = self.loop_depth;
         self.loop_depth = 0;
         let body = self.parse_block()?;
         self.loop_depth = saved_loop_depth;
+
+        // Pop function scope.
+        self.func_scopes.pop();
+
         // Capture the `end` keyword's line before consuming it.
         // PUC-Rio: f->lastlinedefined = ls->linenumber (at `end`)
         let end_line = self.span.line;

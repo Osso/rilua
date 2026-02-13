@@ -1201,7 +1201,13 @@ fn load_string_impl(state: &mut LuaState, source: &[u8], name: &str) -> LuaResul
         }
         Err(e) => {
             state.push(Val::Nil);
-            let msg = state.gc.intern_string(e.to_string().as_bytes());
+            // Use raw bytes for syntax errors to preserve non-UTF-8 bytes
+            // (e.g. \xFF in token names). Falls back to Display for others.
+            let msg_bytes = match &e {
+                crate::error::LuaError::Syntax(syn) => syn.to_lua_bytes(),
+                _ => e.to_string().into_bytes(),
+            };
+            let msg = state.gc.intern_string(&msg_bytes);
             state.push(Val::Str(msg));
             Ok(2)
         }

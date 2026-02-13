@@ -119,6 +119,7 @@ impl Lexer {
             message: msg.to_string(),
             source: self.source_name.clone(),
             line: self.line,
+            raw_message: None,
         })
     }
 
@@ -127,6 +128,7 @@ impl Lexer {
             message: format!("{msg} near '{near}'"),
             source: self.source_name.clone(),
             line: self.line,
+            raw_message: None,
         })
     }
 

@@ -68,6 +68,10 @@ pub struct SyntaxError {
     pub source: String,
     /// Line number where the error was detected (1-based).
     pub line: u32,
+    /// Raw byte message for error strings containing non-UTF-8 bytes.
+    /// When set, this is used instead of formatting via Display to
+    /// preserve raw bytes (e.g. `\xFF` in token names).
+    pub raw_message: Option<Vec<u8>>,
 }
 
 /// Runtime error with error object and traceback.
@@ -117,6 +121,19 @@ impl fmt::Display for LuaError {
             Self::Io(e) => write!(f, "{e}"),
             Self::Yield(_) => write!(f, "cannot resume dead coroutine"),
         }
+    }
+}
+
+impl SyntaxError {
+    /// Returns the error message as raw bytes for Lua string creation.
+    /// Uses `raw_message` if available (preserves non-UTF-8 bytes),
+    /// otherwise falls back to the Display-formatted UTF-8 message.
+    #[must_use]
+    pub fn to_lua_bytes(&self) -> Vec<u8> {
+        if let Some(ref raw) = self.raw_message {
+            return raw.clone();
+        }
+        self.to_string().into_bytes()
     }
 }
 
@@ -239,6 +256,7 @@ mod tests {
             message: "')' expected near 'end'".into(),
             source: "=stdin".into(),
             line: 3,
+            raw_message: None,
         });
         assert_eq!(err.to_string(), "stdin:3: ')' expected near 'end'");
     }
@@ -249,6 +267,7 @@ mod tests {
             message: "unexpected symbol near 'x'".into(),
             source: "break label".into(),
             line: 1,
+            raw_message: None,
         });
         assert_eq!(
             err.to_string(),
@@ -308,6 +327,7 @@ mod tests {
             message: "unexpected symbol".into(),
             source: "test".into(),
             line: 1,
+            raw_message: None,
         };
         let err: LuaError = syn.into();
         assert!(matches!(err, LuaError::Syntax(_)));

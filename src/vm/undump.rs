@@ -62,6 +62,7 @@ impl<'a> LoadState<'a> {
             message: format!("{}: {} in precompiled chunk", self.name, reason),
             source: self.name.clone(),
             line: 0,
+            raw_message: None,
         })
     }
 

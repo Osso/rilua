@@ -265,6 +265,7 @@ impl Compiler {
             message: msg.to_string(),
             source: self.source_name.clone(),
             line: self.current_line,
+            raw_message: None,
         })
     }
 
@@ -1725,6 +1726,7 @@ fn compile_assign(
                 message: "invalid assignment target".to_string(),
                 source: compiler.source_name.clone(),
                 line,
+                raw_message: None,
             }));
         }
         target_exprs.push(e);
