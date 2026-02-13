@@ -202,10 +202,9 @@ detection, `not`+`and`/`or` negation (removevalues in codenot), and
   implemented.
 - `db`: fails at line 20 -- requires `debug.sethook` line hook execution
   (currently a stub). Also: debug.getinfo name nil fix applied.
-- `errors`: assertion at line 126 -- `lineerror` reports wrong line
-  number for `for-in` loops with expression on separate line. Bug #28
-  (arg error formatting) fixed; several "ambiguous syntax" and semicolon
-  errors also fixed.
+- `errors`: stack overflow at line 147 -- recursive `y()` overflows the
+  Rust call stack. rilua lacks a call depth counter (`LUA_MAXCCALLS`).
+  Bug #28 (arg error formatting) and for-in line info both fixed.
 - `literals`: assertion at line 162 -- locale-aware `tonumber("3,4")`
   returns nil because Rust `f64::parse` ignores C locale. Fix requires
   libc `strtod` FFI for number parsing.

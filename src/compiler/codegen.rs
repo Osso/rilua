@@ -1666,8 +1666,9 @@ fn compile_stat(compiler: &mut Compiler, stat: &super::ast::Stat) -> LuaResult<(
             names,
             iterators,
             body,
+            iter_line,
             ..
-        } => compile_generic_for(compiler, names, iterators, body, line),
+        } => compile_generic_for(compiler, names, iterators, body, line, *iter_line),
 
         Stat::FuncDecl { name, body, .. } => compile_func_decl(compiler, name, body, line),
 
@@ -1988,6 +1989,7 @@ fn compile_generic_for(
     iterators: &[super::ast::Expr],
     body: &Block,
     line: u32,
+    iter_line: u32,
 ) -> LuaResult<()> {
     compiler.enter_block(true); // loop scope (breakable)
     let base = u32::from(compiler.fs().free_reg);
@@ -2027,10 +2029,12 @@ fn compile_generic_for(
     // Patch prep JMP to point to TFORLOOP
     compiler.patch_to_here(prep as i32);
 
+    // PUC-Rio: luaK_fixline(fs, line) -- tag TFORLOOP with the iterator
+    // expression line, not the `for` keyword line.
     #[allow(clippy::cast_possible_truncation)]
-    let endfor = compiler.emit_abc(OpCode::TForLoop, base, 0, nvars as u32, line);
+    let endfor = compiler.emit_abc(OpCode::TForLoop, base, 0, nvars as u32, iter_line);
     // JMP back to the beginning of the loop body
-    let loop_jmp = compiler.emit_jump(line);
+    let loop_jmp = compiler.emit_jump(iter_line);
     compiler.patch_jump(loop_jmp, prep + 1);
 
     let _ = endfor;

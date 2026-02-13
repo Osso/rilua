@@ -335,6 +335,7 @@ impl Parser {
             names.push(name);
         }
         self.expect(&Token::In)?;
+        let iter_line = self.span.line;
         let iterators = self.parse_expr_list()?;
         self.expect(&Token::Do)?;
         self.loop_depth += 1;
@@ -346,6 +347,7 @@ impl Parser {
             names,
             iterators,
             body,
+            iter_line,
             span,
         })
     }

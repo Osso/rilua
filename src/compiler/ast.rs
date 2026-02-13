@@ -62,6 +62,9 @@ pub enum Stat {
         names: Vec<String>,
         iterators: Vec<Expr>,
         body: Block,
+        /// Line number after `in` (where iterator expressions start).
+        /// Used by codegen for TFORLOOP line info (PUC-Rio `luaK_fixline`).
+        iter_line: u32,
         span: Span,
     },
     /// `function funcname funcbody`
