@@ -515,7 +515,12 @@ pub fn db_getinfo(state: &mut LuaState) -> LuaResult<u32> {
                 };
                 (info.name.clone(), namewhat)
             };
-            set_table_str(state, result_table, "name", &name)?;
+            // PUC-Rio: only sets "name" if non-NULL; nil otherwise.
+            if name.is_empty() {
+                set_table_val(state, result_table, "name", Val::Nil)?;
+            } else {
+                set_table_str(state, result_table, "name", &name)?;
+            }
             set_table_str(state, result_table, "namewhat", &namewhat)?;
         }
 
