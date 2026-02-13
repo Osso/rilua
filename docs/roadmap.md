@@ -202,9 +202,10 @@ detection, `not`+`and`/`or` negation (removevalues in codenot), and
   implemented.
 - `db`: fails at line 20 -- requires `debug.sethook` line hook execution
   (currently a stub). Also: debug.getinfo name nil fix applied.
-- `errors`: stack overflow at line 147 -- recursive `y()` overflows the
-  Rust call stack. rilua lacks a call depth counter (`LUA_MAXCCALLS`).
-  Bug #28 (arg error formatting) and for-in line info both fixed.
+- `errors`: fails at line 196 -- `\255` byte in syntax error token
+  produces UTF-8 encoded `ÿ` instead of raw byte `\xFF`. Stack overflow
+  detection, xpcall handler ordering, arg error formatting (#28), for-in
+  line info, and syntax error lexeme preservation all fixed.
 - `literals`: assertion at line 162 -- locale-aware `tonumber("3,4")`
   returns nil because Rust `f64::parse` ignores C locale. Fix requires
   libc `strtod` FFI for number parsing.
@@ -1361,10 +1362,25 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
     `check_userdata` now takes 0-based arg index, reads stack directly,
     distinguishes missing slots from nil values. `getfuncname` resolves
     function name for the prefix. Unblocked `errors.lua` past line 111.
+23. **Stack overflow detection**: Recursive `execute()` calls overflowed
+    the Rust call stack at ~20,000 depth. Fix: added `call_depth: u16`
+    counter separate from `n_ccalls` (yield boundary). OP_CALL, TFORLOOP,
+    and comparison metamethods increment `call_depth` only; `call_function`
+    increments both. Two-threshold model: 200 recoverable, 225 hard limit.
+    Unblocked `errors.lua` past line 147.
+24. **xpcall error handler ordering**: Handler was called after restoring
+    ci, so `debug.traceback` saw an empty call stack. Fix: call handler
+    BEFORE restoring ci/base, at a stack position above current top.
+25. **Syntax error lexeme preservation**: Number tokens showed parsed
+    value (e.g. `'1'` for `1.000`) instead of original source text.
+    Fix: lexer stores raw source text in `last_token_text` for Number
+    and String tokens. Parser's `syntax_error_near` uses it.
+    Unblocked `errors.lua` past line 191.
 
 Files: `src/compiler/codegen.rs`, `src/compiler/parser.rs`,
-`src/compiler/ast.rs`, `src/vm/execute.rs`, `src/stdlib/debug.rs`,
-`src/stdlib/string.rs`, `src/stdlib/mod.rs`, `src/vm/state.rs`.
+`src/compiler/ast.rs`, `src/compiler/lexer.rs`, `src/vm/execute.rs`,
+`src/vm/state.rs`, `src/stdlib/debug.rs`, `src/stdlib/string.rs`,
+`src/stdlib/mod.rs`, `src/stdlib/base.rs`.
 
 **Tests**: Regression tests for each fixed bug. Oracle comparison for
 the specific patterns.
