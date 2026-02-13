@@ -4454,10 +4454,7 @@ fn semicolons_rejected_as_empty_statements() {
     // Lua 5.1: ';' alone is not a valid statement (it is in 5.2+).
     let (_, stderr, code) = run_rilua(";");
     assert_ne!(code, 0, "';' should be rejected");
-    assert!(
-        stderr.contains("unexpected symbol"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("unexpected symbol"), "stderr: {stderr}");
 }
 
 #[test]
@@ -4465,10 +4462,7 @@ fn double_semicolons_rejected() {
     // 'a=1;;' should error on the second ';'
     let (_, stderr, code) = run_rilua("a=1;;");
     assert_ne!(code, 0, "'a=1;;' should be rejected");
-    assert!(
-        stderr.contains("unexpected symbol"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("unexpected symbol"), "stderr: {stderr}");
 }
 
 #[test]
@@ -4476,10 +4470,7 @@ fn return_double_semicolon_rejected() {
     // 'return;;' should error: only one ';' is allowed after return
     let (_, stderr, code) = run_rilua("return;;");
     assert_ne!(code, 0, "'return;;' should be rejected");
-    assert!(
-        stderr.contains("'<eof>' expected"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("'<eof>' expected"), "stderr: {stderr}");
 }
 
 // ---------------------------------------------------------------------------
@@ -4507,8 +4498,49 @@ fn ambiguous_syntax_function_call_new_line() {
     // line than the expression being called.
     let (_, stderr, code) = run_rilua("a=math.sin\n(3)");
     assert_ne!(code, 0, "ambiguous syntax should be rejected");
-    assert!(
-        stderr.contains("ambiguous syntax"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("ambiguous syntax"), "stderr: {stderr}");
+}
+
+// Bug #24: `not` applied to `and`/`or` expressions must negate correctly.
+// PUC-Rio's codenot() calls removevalues() to convert TESTSET -> TEST
+// after swapping the true/false jump lists.
+#[test]
+fn not_and_or_negation_basic() {
+    // not (nil and true) should be true: nil and true => nil, not nil => true
+    let (stdout, stderr, code) = run_rilua("print(not (nil and true))");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "true");
+}
+
+#[test]
+fn not_and_or_negation_complex() {
+    // The expression from PUC-Rio constructs.lua (i=352):
+    //   (1 < 2) == not (F() and (1 < 2))
+    // F() returns nil, so: nil and (1<2) => nil, not nil => true, (1<2) => true
+    // true == true => true
+    let code_str = r#"
+        function F() return nil end
+        local a = (1 < 2) == not (F() and (1 < 2))
+        assert(a == true, "expected true, got " .. tostring(a))
+        print("ok")
+    "#;
+    let (stdout, stderr, code) = run_rilua(code_str);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "ok");
+}
+
+#[test]
+fn not_or_expression() {
+    // not (true or false) should be false
+    let (stdout, stderr, code) = run_rilua("print(not (true or false))");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "false");
+}
+
+#[test]
+fn not_and_false_expression() {
+    // not (false and true) should be true: false and true => false, not false => true
+    let (stdout, stderr, code) = run_rilua("print(not (false and true))");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "true");
 }

@@ -444,6 +444,18 @@ impl Compiler {
         true
     }
 
+    /// Converts all TESTSET instructions in a jump list to TEST.
+    /// Maps to PUC-Rio's `removevalues`: walks the list and calls
+    /// `patchtestreg(node, NO_REG)` which replaces TESTSET with TEST.
+    /// Called after negating an expression (`code_not`) to ensure the
+    /// swapped jump lists don't carry stale value-assignment semantics.
+    fn remove_values(&mut self, mut list: i32) {
+        while list != NO_JUMP {
+            self.patch_test_reg(list as usize, NO_REG);
+            list = self.get_jump_target(list as usize);
+        }
+    }
+
     /// Patches a jump list with separate targets for TESTSET jumps (`vtarget`)
     /// and other jumps (`dtarget`). Maps to PUC-Rio's `patchlistaux`.
     fn patch_list_aux(&mut self, mut list: i32, vtarget: usize, reg: u32, dtarget: usize) {
@@ -1485,6 +1497,11 @@ impl Compiler {
         }
         // Swap true and false lists
         std::mem::swap(&mut e.t, &mut e.f);
+        // PUC-Rio: removevalues on both lists after swap.
+        // Converts TESTSET -> TEST so negated expressions don't carry
+        // stale value-assignment semantics from the original and/or.
+        self.remove_values(e.f);
+        self.remove_values(e.t);
         Ok(())
     }
 
