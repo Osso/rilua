@@ -134,61 +134,73 @@ pub(crate) const RESERVED_WORDS: &[(&str, Token)] = &[
 ];
 
 impl Token {
-    /// Returns the display name for use in error messages.
+    /// Returns the unquoted token name for error messages.
     ///
-    /// Matches PUC-Rio's `luaX_token2str` format:
-    /// - Reserved words and operators: `'and'`, `'=='`, etc.
+    /// Matches PUC-Rio's `luaX_token2str`: returns the raw string without
+    /// surrounding quotes.
+    /// - Reserved words: `and`, `break`, `do`, ...
+    /// - Multi-char operators: `..`, `...`, `==`, ...
     /// - Literals: `<name>`, `<number>`, `<string>`
-    /// - Single chars: `'+'`, `'-'`, etc.
+    /// - Single chars: the character itself (`;`, `+`, `-`, ...)
     /// - End of stream: `<eof>`
     #[must_use]
-    pub fn display_name(&self) -> String {
+    pub fn token2str(&self) -> String {
         match self {
             // Reserved words
-            Self::And => "'and'".into(),
-            Self::Break => "'break'".into(),
-            Self::Do => "'do'".into(),
-            Self::Else => "'else'".into(),
-            Self::ElseIf => "'elseif'".into(),
-            Self::End => "'end'".into(),
-            Self::False => "'false'".into(),
-            Self::For => "'for'".into(),
-            Self::Function => "'function'".into(),
-            Self::If => "'if'".into(),
-            Self::In => "'in'".into(),
-            Self::Local => "'local'".into(),
-            Self::Nil => "'nil'".into(),
-            Self::Not => "'not'".into(),
-            Self::Or => "'or'".into(),
-            Self::Repeat => "'repeat'".into(),
-            Self::Return => "'return'".into(),
-            Self::Then => "'then'".into(),
-            Self::True => "'true'".into(),
-            Self::Until => "'until'".into(),
-            Self::While => "'while'".into(),
+            Self::And => "and".into(),
+            Self::Break => "break".into(),
+            Self::Do => "do".into(),
+            Self::Else => "else".into(),
+            Self::ElseIf => "elseif".into(),
+            Self::End => "end".into(),
+            Self::False => "false".into(),
+            Self::For => "for".into(),
+            Self::Function => "function".into(),
+            Self::If => "if".into(),
+            Self::In => "in".into(),
+            Self::Local => "local".into(),
+            Self::Nil => "nil".into(),
+            Self::Not => "not".into(),
+            Self::Or => "or".into(),
+            Self::Repeat => "repeat".into(),
+            Self::Return => "return".into(),
+            Self::Then => "then".into(),
+            Self::True => "true".into(),
+            Self::Until => "until".into(),
+            Self::While => "while".into(),
             // Multi-char operators
-            Self::Concat => "'..'".into(),
-            Self::Dots => "'...'".into(),
-            Self::Eq => "'=='".into(),
-            Self::Ge => "'>='".into(),
-            Self::Le => "'<='".into(),
-            Self::Ne => "'~='".into(),
+            Self::Concat => "..".into(),
+            Self::Dots => "...".into(),
+            Self::Eq => "==".into(),
+            Self::Ge => ">=".into(),
+            Self::Le => "<=".into(),
+            Self::Ne => "~=".into(),
             // Literals
             Self::Number(_) => "<number>".into(),
             Self::Name(_) => "<name>".into(),
             Self::Str(_) => "<string>".into(),
-            // Single chars
-            Self::Char(c) => format!("'{}'", char::from(*c)),
+            // Single chars (iscntrl check matches PUC-Rio)
+            Self::Char(c) if c.is_ascii_control() => format!("char({c})"),
+            Self::Char(c) => format!("{}", char::from(*c)),
             // End of stream
             Self::Eos => "<eof>".into(),
         }
     }
 
-    /// Returns the token text for "near" error messages.
+    /// Returns the token name quoted with single quotes for error messages.
     ///
-    /// Matches PUC-Rio's `txtToken`: for Name, Number, and String tokens,
-    /// returns the actual content quoted with single quotes. For other
-    /// tokens, returns the same as `display_name()`.
+    /// Wraps `token2str()` result with `'...'` (PUC-Rio's `LUA_QS` pattern).
+    /// Used in `error_expected` and similar contexts.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        format!("'{}'", self.token2str())
+    }
+
+    /// Returns the token text for "near" error messages, quoted with `'...'`.
+    ///
+    /// Matches PUC-Rio's `txtToken` + `LUA_QS`: for Name, Number, and String
+    /// tokens, returns the actual content quoted. For other tokens, returns
+    /// `token2str()` quoted with `'...'`.
     #[must_use]
     pub fn txt_token(&self) -> String {
         match self {
@@ -198,7 +210,7 @@ impl Token {
                 let text = String::from_utf8_lossy(s);
                 format!("'{text}'")
             }
-            _ => self.display_name(),
+            _ => format!("'{}'", self.token2str()),
         }
     }
 
@@ -287,9 +299,10 @@ mod tests {
 
     #[test]
     fn literal_display_names() {
-        assert_eq!(Token::Number(3.0).display_name(), "<number>");
-        assert_eq!(Token::Name("foo".into()).display_name(), "<name>");
-        assert_eq!(Token::Str(b"hello".to_vec()).display_name(), "<string>");
+        // display_name wraps with '...' (LUA_QS)
+        assert_eq!(Token::Number(3.0).display_name(), "'<number>'");
+        assert_eq!(Token::Name("foo".into()).display_name(), "'<name>'");
+        assert_eq!(Token::Str(b"hello".to_vec()).display_name(), "'<string>'");
     }
 
     #[test]
@@ -301,7 +314,16 @@ mod tests {
 
     #[test]
     fn eos_display_name() {
-        assert_eq!(Token::Eos.display_name(), "<eof>");
+        // display_name wraps <eof> with '...' (LUA_QS)
+        assert_eq!(Token::Eos.display_name(), "'<eof>'");
+    }
+
+    #[test]
+    fn token2str_unquoted() {
+        assert_eq!(Token::And.token2str(), "and");
+        assert_eq!(Token::Eos.token2str(), "<eof>");
+        assert_eq!(Token::Char(b'+').token2str(), "+");
+        assert_eq!(Token::Concat.token2str(), "..");
     }
 
     #[test]

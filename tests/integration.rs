@@ -4444,3 +4444,71 @@ print("PASSED")
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("PASSED"), "stdout: {stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// Semicolons: Lua 5.1 rejects standalone semicolons
+// ---------------------------------------------------------------------------
+
+#[test]
+fn semicolons_rejected_as_empty_statements() {
+    // Lua 5.1: ';' alone is not a valid statement (it is in 5.2+).
+    let (_, stderr, code) = run_rilua(";");
+    assert_ne!(code, 0, "';' should be rejected");
+    assert!(
+        stderr.contains("unexpected symbol"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn double_semicolons_rejected() {
+    // 'a=1;;' should error on the second ';'
+    let (_, stderr, code) = run_rilua("a=1;;");
+    assert_ne!(code, 0, "'a=1;;' should be rejected");
+    assert!(
+        stderr.contains("unexpected symbol"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn return_double_semicolon_rejected() {
+    // 'return;;' should error: only one ';' is allowed after return
+    let (_, stderr, code) = run_rilua("return;;");
+    assert_ne!(code, 0, "'return;;' should be rejected");
+    assert!(
+        stderr.contains("'<eof>' expected"),
+        "stderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Error message formatting: tokens quoted with '...' in near context
+// ---------------------------------------------------------------------------
+
+#[test]
+fn eof_token_quoted_in_error_messages() {
+    // '<eof>' should be quoted as "'<eof>'" in error messages
+    let (stdout, _, code) = run_rilua(r#"print(loadstring("repeat until 1; a"))"#);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("near '<eof>'"),
+        "stdout should contain quoted <eof>: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ambiguous syntax: function call on new line
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ambiguous_syntax_function_call_new_line() {
+    // PUC-Rio rejects function calls where '(' starts on a different
+    // line than the expression being called.
+    let (_, stderr, code) = run_rilua("a=math.sin\n(3)");
+    assert_ne!(code, 0, "ambiguous syntax should be rejected");
+    assert!(
+        stderr.contains("ambiguous syntax"),
+        "stderr: {stderr}"
+    );
+}

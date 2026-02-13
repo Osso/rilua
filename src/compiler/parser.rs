@@ -18,6 +18,9 @@ pub struct Parser {
     current: Token,
     /// Span of the current token.
     span: Span,
+    /// Line of the last consumed token (PUC-Rio: `ls->lastline`).
+    /// Set in `advance()` before reading the next token.
+    lastline: u32,
     /// Nesting depth of loop constructs (while, repeat, for).
     /// Used to validate that `break` only appears inside a loop.
     loop_depth: u32,
@@ -32,6 +35,7 @@ impl Parser {
             lexer,
             current,
             span,
+            lastline: 1,
             loop_depth: 0,
         })
     }
@@ -41,6 +45,8 @@ impl Parser {
     /// Advances to the next token, returning the previous one.
     fn advance(&mut self) -> LuaResult<(Token, Span)> {
         let prev = (self.current.clone(), self.span);
+        // PUC-Rio: ls->lastline = ls->linenumber (before reading next token)
+        self.lastline = self.span.line;
         let (tok, span) = self.lexer.next()?;
         self.current = tok;
         self.span = span;
@@ -79,7 +85,7 @@ impl Parser {
             self.advance()?;
             Ok(span)
         } else {
-            Err(self.error_expected(&expected.display_name()))
+            Err(self.error_expected(&expected.token2str()))
         }
     }
 
@@ -113,16 +119,15 @@ impl Parser {
     fn check_match(&mut self, close: &Token, open: &Token, open_line: u32) -> LuaResult<()> {
         if !self.check(close) {
             if open_line == self.lexer.line() {
-                return Err(self.error_expected(&close.display_name()));
+                return Err(self.error_expected(&close.token2str()));
             }
             // PUC-Rio's check_match calls luaX_syntaxerror which always
             // appends "near <token>". We must include this for the REPL's
             // incomplete chunk detection (checks for "<eof>" at end).
-            let near = self.current.display_name();
-            return Err(self.syntax_error(&format!(
-                "{} expected (to close {} at line {open_line}) near {near}",
-                close.display_name(),
-                open.display_name(),
+            return Err(self.syntax_error_near(&format!(
+                "'{}' expected (to close '{}' at line {open_line})",
+                close.token2str(),
+                open.token2str(),
             )));
         }
         self.advance()?;
@@ -131,6 +136,8 @@ impl Parser {
 
     // -- Error helpers --
 
+    /// Creates a syntax error without a `near` token suffix.
+    /// Use `syntax_error_near` for PUC-Rio's `luaX_syntaxerror` equivalent.
     fn syntax_error(&self, msg: &str) -> LuaError {
         LuaError::Syntax(SyntaxError {
             message: msg.to_string(),
@@ -139,9 +146,17 @@ impl Parser {
         })
     }
 
+    /// Creates a syntax error with `near '<current_token>'` appended.
+    /// Matches PUC-Rio's `luaX_syntaxerror` -> `luaX_lexerror(msg, token)`.
+    fn syntax_error_near(&self, msg: &str) -> LuaError {
+        let near = self.current.txt_token();
+        self.syntax_error(&format!("{msg} near {near}"))
+    }
+
     fn error_expected(&self, what: &str) -> LuaError {
-        let near = self.current.display_name();
-        self.syntax_error(&format!("{what} expected near {near}"))
+        // PUC-Rio: luaO_pushfstring(LUA_QS " expected", token2str(token))
+        // then luaX_syntaxerror adds "near" LUA_QS with txtToken.
+        self.syntax_error_near(&format!("'{what}' expected"))
     }
 
     // -- Parsing entry point --
@@ -157,11 +172,11 @@ impl Parser {
 
     /// Parses a block (sequence of statements).
     fn parse_block(&mut self) -> LuaResult<Block> {
+        // chunk -> { stat [`;'] }
+        // Lua 5.1: semicolons are optional separators after statements,
+        // NOT empty statements. PUC-Rio: testnext(ls, ';') only after stat.
         let mut stmts = Vec::new();
         loop {
-            // Skip semicolons (empty statements)
-            while self.test_next_char(b';')? {}
-
             if self.current.is_block_follow() {
                 break;
             }
@@ -276,7 +291,7 @@ impl Parser {
         match &self.current {
             Token::Char(b'=') => self.parse_numeric_for(name, open_line, span),
             Token::Char(b',') | Token::In => self.parse_generic_for(name, open_line, span),
-            _ => Err(self.syntax_error("'=' or 'in' expected")),
+            _ => Err(self.syntax_error_near("'=' or 'in' expected")),
         }
     }
 
@@ -422,7 +437,9 @@ impl Parser {
     }
 
     fn parse_return(&mut self, span: Span) -> LuaResult<Stat> {
-        // return [explist] [';']
+        // stat -> RETURN explist
+        // PUC-Rio's retstat does NOT consume a trailing ';'.
+        // The single optional ';' is consumed by chunk() after the stat.
         self.advance()?; // consume 'return'
 
         let values = if self.current.is_block_follow() || self.check_char(b';') {
@@ -430,9 +447,6 @@ impl Parser {
         } else {
             self.parse_expr_list()?
         };
-
-        // Optional semicolon after return
-        self.test_next_char(b';')?;
 
         Ok(Stat::Return { values, span })
     }
@@ -442,8 +456,7 @@ impl Parser {
         if self.loop_depth == 0 {
             // PUC-Rio's breakstat validates that break appears inside a loop.
             // The error includes "near <current_token>" matching luaX_syntaxerror.
-            let near = self.current.txt_token();
-            return Err(self.syntax_error(&format!("no loop to break near {near}")));
+            return Err(self.syntax_error_near("no loop to break"));
         }
         Ok(Stat::Break { span })
     }
@@ -473,7 +486,7 @@ impl Parser {
                 super::ast::Expr::Call { .. } | super::ast::Expr::MethodCall { .. } => {
                     Ok(Stat::ExprStat { expr, span })
                 }
-                _ => Err(self.error_expected("'='")),
+                _ => Err(self.error_expected("=")),
             }
         }
     }
@@ -657,10 +670,7 @@ impl Parser {
                 self.expect_char(b')')?;
                 Ok(Expr::Paren(Box::new(expr), paren_span))
             }
-            _ => Err(self.syntax_error(&format!(
-                "unexpected symbol near {}",
-                self.current.display_name()
-            ))),
+            _ => Err(self.syntax_error_near("unexpected symbol")),
         }
     }
 
@@ -668,6 +678,13 @@ impl Parser {
     fn parse_func_args(&mut self) -> LuaResult<Vec<Expr>> {
         match &self.current {
             Token::Char(b'(') => {
+                // PUC-Rio: if (line != ls->lastline)
+                //   luaX_syntaxerror("ambiguous syntax (function call x new statement)")
+                if self.span.line != self.lastline {
+                    return Err(
+                        self.syntax_error_near("ambiguous syntax (function call x new statement)")
+                    );
+                }
                 let open_line = self.span.line;
                 self.advance()?;
                 let args = if self.check_char(b')') {
@@ -691,7 +708,7 @@ impl Parser {
                     Err(self.syntax_error("unexpected token"))
                 }
             }
-            _ => Err(self.syntax_error("function arguments expected")),
+            _ => Err(self.syntax_error_near("function arguments expected")),
         }
     }
 
@@ -715,7 +732,10 @@ impl Parser {
                         has_varargs = true;
                         break;
                     }
-                    _ => return Err(self.error_expected("<name> or '...'")),
+                    _ => {
+                        // PUC-Rio: "<name> or '...' expected" via luaX_syntaxerror
+                        return Err(self.syntax_error_near("<name> or '...' expected"));
+                    }
                 }
                 if !self.test_next_char(b',')? {
                     break;
@@ -882,9 +902,11 @@ mod tests {
     }
 
     #[test]
-    fn semicolons_only() {
-        let block = parse_ok(";;;");
-        assert!(block.is_empty());
+    fn semicolons_only_is_error() {
+        // Lua 5.1: semicolons are optional separators after statements,
+        // NOT empty statements. ";;;" alone is a syntax error.
+        let err = parse_err(";;;");
+        assert!(err.contains("expected"), "error: {err}");
     }
 
     // -- Do block --
