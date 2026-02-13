@@ -62,14 +62,16 @@ miss.
 
 #### Reference Binaries
 
-- **lua**: `~/Repos/github.com/lua/lua/lua` (PUC-Rio Lua 5.1.1,
-  git tag `v5.1.1`)
-- **luac**: built from the Lua 5.1.1 source distribution
-  (`https://lua.org/ftp/lua-5.1.1.tar.gz`)
+- **lua** (interpreter): `./lua-5.1.1/src/lua`
+- **luac** (compiler/lister): `./lua-5.1.1/src/luac`
+
+Both are built from the official PUC-Rio Lua 5.1.1 tarball. See
+`AGENTS.md` for download, verification, and build instructions.
 
 The `lua` binary path is configured via the `LUA_REFERENCE_BIN`
-environment variable. Tests that require the reference binary skip
-gracefully if it is not available.
+environment variable (defaults to `./lua-5.1.1/src/lua`). Tests
+that require the reference binary skip gracefully if it is not
+available.
 
 #### Oracle Test Framework
 
@@ -204,9 +206,9 @@ tests/
 
 ### Layer 4: PUC-Rio Official Test Suite
 
-The PUC-Rio Lua 5.1.1 test suite (`tests/lua51/`) is the
+The PUC-Rio Lua 5.1.1 test suite (`./lua-5.1-tests/`) is the
 compatibility target. These are verbatim test files from the
-official Lua repository (tag `v5_1_1`).
+official Lua test tarball. See `AGENTS.md` for download instructions.
 
 | Test File | Area |
 |-----------|------|

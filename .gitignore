@@ -21,6 +21,12 @@ Thumbs.db
 # Lua compiler output
 luac.out
 
+# PUC-Rio Lua 5.1.1 reference (downloaded via AGENTS.md setup)
+/lua-5.1.1/
+/lua-5.1.1.tar.gz
+/lua-5.1-tests/
+/lua5.1-tests/
+/lua-5.1-tests.tar.gz
 
 # Added by cargo
 

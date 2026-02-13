@@ -1,118 +1,141 @@
 # rilua Compatibility and Performance Evaluation
 
-Date: February 12, 2026
+Initial: February 12, 2026
+Updated: February 13, 2026 (Phase 9d bug fixes, tarball-based testing)
 Branch: `rewrite/v2`
 rilua version: 0.1.0 (Phase 9d)
-Reference: PUC-Rio Lua 5.1.1 (tag v5.1.1)
+Reference: PUC-Rio Lua 5.1.1 (official tarball at `./lua-5.1.1/`)
 Platform: AMD Ryzen 7 8840U, Linux 6.18.8, Fedora 43
 
 ## Executive Summary
 
-rilua passes all 1262 internal tests (583 unit + 402 integration + 277
-oracle). Against the PUC-Rio official test suite, 5 of 20 applicable
-tests pass. A single compiler bug (while-true-if-break, #18) causes
-all 8 timeout failures and is the highest-impact fix opportunity.
+rilua passes all 1289 internal tests (586 unit + 426 integration + 277
+oracle). Against the PUC-Rio official test suite (run from
+`./lua-5.1-tests/`), 11 of 20 applicable tests pass with 0 timeouts.
+Bugs #15-#28 have been fixed since the initial evaluation; 7 tests
+still fail due to call depth limits, streaming reader, per-thread
+globals, locale-aware parsing, hook stubs, and CLI subprocess handling.
 Performance ranges from 0.92x to 2.18x vs PUC-Rio on most benchmarks,
 with one outlier (string operations at 9.33x). Memory usage is 1.15x
 to 3.98x higher. Binary sizes are comparable (1.0 MB vs 1.1 MB).
 
+The goal is to reach performance parity with PUC-Rio once all features
+are implemented and rilua is behaviorally identical.
+
 ## 1. Internal Test Suite
 
 ```
-Unit tests:        583 passed    (cargo test --lib)
-Integration tests: 402 passed    (cargo test --test integration)
+Unit tests:        586 passed    (cargo test --lib)
+Integration tests: 426 passed    (cargo test --test integration)
 Oracle tests:      277 passed    (cargo test --test oracle)
-Total:            1262 passed, 0 failed, 0 skipped
+Total:            1289 passed, 0 failed, 0 skipped
 ```
 
-All tests pass with `cargo nextest run --profile ci` (single-threaded,
-deterministic) in 7.0 seconds.
+All tests pass with `cargo test` in under 10 seconds.
 
 ## 2. PUC-Rio Official Test Suite
 
+Test suite: `./lua-5.1-tests/` (23 test files + `all.lua` runner).
+Run via `scripts/compare.sh ./lua-5.1.1/src/lua ./target/debug/rilua`.
+Tests execute from within the test suite directory (required for
+relative `dofile()` calls).
+
 ### Results Matrix
 
-| Test File    | rilua    | PUC-Rio  | Blocker(s)              |
-|--------------|----------|----------|-------------------------|
-| api          | N/A      | PASS     | Requires testC library  |
-| attrib       | FAIL     | FAIL(*)  | File creation infra     |
-| big          | FAIL     | FAIL     | Requires checktable (C) |
-| calls        | TIMEOUT  | PASS     | Bug #17, #18, #21       |
-| checktable   | N/A      | PASS     | Requires testC library  |
-| closure      | TIMEOUT  | PASS     | Bug #18, #19            |
-| code         | N/A      | PASS     | Requires testC library  |
-| constructs   | TIMEOUT  | PASS     | Bug #18                 |
-| db           | FAIL     | PASS     | Bug #23                 |
-| errors       | FAIL     | PASS     | Bug #22                 |
-| events       | TIMEOUT  | PASS     | Bug #18                 |
-| **files**    | **PASS** | PASS     |                         |
-| **gc**       | **PASS** | PASS     |                         |
-| literals     | FAIL     | PASS     | Bug #20                 |
-| **locals**   | **PASS** | PASS     |                         |
-| main         | FAIL     | FAIL(*)  | CLI subprocess infra    |
-| math         | TIMEOUT  | FAIL(*)  | Bug #18                 |
-| nextvar      | TIMEOUT  | PASS     | Bug #18                 |
-| **pm**       | **PASS** | PASS     |                         |
-| **sort**     | **PASS** | PASS     |                         |
-| strings      | TIMEOUT  | PASS     | Bug #18                 |
-| vararg       | FAIL     | PASS     | Bug #21                 |
-| verybig      | TIMEOUT  | FAIL(*)  | Bug #18                 |
+| Test File      | rilua      | PUC-Rio  | Blocker(s)                        |
+|----------------|------------|----------|-----------------------------------|
+| api            | N/A        | PASS     | Requires testC library (T==nil)   |
+| attrib         | FAIL       | PASS     | File creation infra (writes libs/) |
+| big            | FAIL       | FAIL     | Requires checktable (C library)   |
+| calls          | FAIL       | PASS     | `load()` reader streaming (#29)   |
+| checktable     | N/A        | PASS     | Requires testC library (T==nil)   |
+| closure        | FAIL       | PASS     | Per-thread global tables          |
+| code           | N/A        | PASS     | Requires testC library (T==nil)   |
+| **constructs** | **PASS**   | PASS     |                                   |
+| db             | FAIL       | PASS     | Hook stubs (sethook)              |
+| **errors**     | **PASS**   | PASS     |                                   |
+| **events**     | **PASS**   | PASS     |                                   |
+| **files**      | **PASS**   | PASS     |                                   |
+| **gc**         | **PASS**   | PASS     |                                   |
+| literals       | FAIL       | PASS     | Locale-aware number parsing       |
+| **locals**     | **PASS**   | PASS     |                                   |
+| main           | FAIL       | FAIL     | CLI subprocess infra              |
+| **math**       | **PASS**   | PASS     |                                   |
+| **nextvar**    | **PASS**   | PASS     |                                   |
+| pm             | FAIL       | PASS     | Call depth limit (#29)            |
+| **sort**       | **PASS**   | PASS     |                                   |
+| **strings**    | **PASS**   | PASS     |                                   |
+| **vararg**     | **PASS**   | PASS     |                                   |
+| verybig        | TIMEOUT    | PASS     | Expression combinations           |
 
-(*) PUC-Rio also fails these: attrib/main need writable dirs, big needs
-checktable, math needs non-standard printf, verybig is optional.
+N/A: api, checktable, code trivially pass (T==nil skips all assertions)
+but do not exercise rilua. They require a testC equivalent to test.
 
 ### Summary
 
-| Result    | Count | Percentage |
-|-----------|-------|------------|
-| Pass      | 5     | 25%        |
-| N/A       | 3     | (excluded) |
-| Timeout   | 8     | 40%        |
-| Fail      | 7     | 35%        |
+| Result    | Count | Of applicable |
+|-----------|-------|---------------|
+| Pass      | 11    | 55%           |
+| N/A       | 3     | (excluded)    |
+| Timeout   | 1     | 5%            |
+| Fail      | 8     | 40%           |
 
-### Bugs Discovered (9 new)
+### Progress Since Initial Evaluation (Feb 12)
 
-| # | Bug | Impact | Affects |
-|---|-----|--------|---------|
-| 17 | Parenthesized multi-return not truncated | `(f())` keeps multiple returns | calls, vararg |
-| 18 | While-true-if-break compiler JMP target | Infinite loop in `while true do ... if ... break` | 8 timeout tests |
-| 19 | Repeat-until upvalue scoping | Closures share upvalue across iterations | closure |
-| 20 | Coroutine register restoration | Upvalue corruption after yield/resume | literals |
-| 21 | Return-from-C stale value | `return f(...)` leaks stale register when f returns 0 | vararg, calls |
-| 22 | Loadstring error message format | Source name and error text format mismatch | errors |
-| 23 | Debug.getinfo namewhat | Returns "global" instead of "local" for local functions | db |
-| 24 | Constant pool dedup gap | ~5% more constants than PUC-Rio (264 vs 252) | cosmetic |
-| 25 | Missing constant folding | No compile-time arithmetic folding | cosmetic |
+The initial evaluation found 5/20 passing with 8 timeouts. After
+fixing bugs #15-#28:
 
-### Priority Fix Order
+- **8 timeouts resolved**: All caused by Bug #18 (while-true-if-break
+  compiler JMP target). Fix: `compile_while` used `patch_jump` instead
+  of `patch_list`.
+- **6 new passes**: constructs, errors, events, math, nextvar, strings,
+  vararg (11 total, up from 5).
+- **1 regression identified**: pm.lua now fails due to call depth
+  limit (Bug #29, see below). Previously reported as passing but not
+  verified with tarball-based test execution.
 
-Fixing bugs in this order maximizes test progress:
+### Bugs Discovered
 
-1. **Bug #18** (while-true-if-break): **FIXED**. Unblocked math.lua and
-   nextvar.lua (both now pass). constructs.lua progresses to bug #17
-   failure. Fix: `compile_while` used `patch_jump` (single instruction)
-   instead of `patch_list` (walks linked list) for the loop-back JMP.
+Bugs #15-#28 were discovered during the initial evaluation and Phase
+9d. All have been fixed except #24-#25 (cosmetic).
 
-2. **Bug #17** (parenthesized multi-return): Needed for calls.lua.
-   Root cause: `(expr)` in the parser doesn't set a "truncate to 1"
-   flag on call expressions.
+| #  | Bug | Status | Affects |
+|----|-----|--------|---------|
+| 15 | code_not used PC as register | FIXED | constructs |
+| 16 | EQ metamethod result position | FIXED | events |
+| 17 | Parenthesized multi-return not truncated | FIXED | calls |
+| 18 | While-true-if-break JMP target | FIXED | 8 timeouts |
+| 19 | Repeat-until upvalue scoping | FIXED | closure |
+| 20 | Coroutine register restoration | FIXED | literals |
+| 21 | Return-from-C stale value | FIXED | vararg, calls |
+| 22 | Loadstring error message format | FIXED | errors |
+| 23 | Debug.getinfo namewhat | FIXED | db |
+| 24 | Constant pool dedup gap | Open | cosmetic |
+| 25 | Missing constant folding | Open | cosmetic |
+| 26 | Raw byte error messages | FIXED | errors |
+| 27 | Syntax nesting limits | FIXED | errors |
+| 28 | Parser-level local/upvalue limits | FIXED | errors |
 
-3. **Bug #19** (repeat-until upvalue scoping): Needed for closure.lua.
-   Root cause: locals in repeat body aren't closed/reopened per
-   iteration.
+### Remaining Blockers
 
-4. **Bug #21** (return-from-C stale value): Needed for vararg.lua.
-   Root cause: TAILCALL or RETURN for C functions doesn't clear the
-   result area when nresults=0.
+| Test | Blocker | Description |
+|------|---------|-------------|
+| attrib | File infra | Test writes `libs/B.lua` etc. to disk |
+| calls | Streaming reader | `load()` reads entire input before parsing; PUC-Rio streams incrementally |
+| closure | Per-thread globals | `setfenv` on coroutine threads not supported; rilua has a single global table |
+| db | Hook stubs | `debug.sethook` line hook execution not implemented |
+| literals | Locale parsing | Rust `f64::parse()` ignores C locale; needs libc `strtod` FFI |
+| main | CLI subprocess | `require` path search fails for `/tmp/lua_*` temp files |
+| pm | Call depth limit (#29) | `range(0,255)` recurses 256 levels; rilua's `call_depth` limit is 200 for all calls |
+| verybig | Expression combos | Generated code triggers expression evaluation edge cases |
 
-5. **Bug #20** (coroutine register restoration): Needed for
-   literals.lua. Root cause: stack base offset error in resume path.
-
-6. **Bug #22** (loadstring error format): Needed for errors.lua.
-   Two sub-issues: source name format and error message text.
-
-7. **Bug #23** (debug.getinfo namewhat): Needed for db.lua. The
-   getfuncname resolution doesn't check for local function assignments.
+**Bug #29 (call depth model)**: rilua increments `call_depth` for
+every call (Lua and Rust) and checks against `MAXCCALLS` (200).
+PUC-Rio only increments `nCcalls` in `luaD_call` (C entry point);
+Lua-to-Lua calls within `luaV_execute` use `goto reentry` and don't
+increment the counter. This means PUC-Rio Lua functions can recurse
+thousands of levels deep without hitting the 200-call limit. rilua
+needs to separate Lua call depth from the Rust stack overflow guard.
 
 ## 3. Bytecode Comparison
 
@@ -144,6 +167,10 @@ info (line number mappings).
 
 ## 4. Performance Benchmarks
 
+Both interpreters built from tarballs with default optimization flags
+(PUC-Rio: `-O2`, rilua: `cargo build --release`). Microbenchmarks
+from February 12; test suite timings from February 13.
+
 ### Execution Time (best of 3 runs)
 
 | Benchmark     | PUC-Rio (s) | rilua (s)  | Ratio  | Notes |
@@ -170,7 +197,7 @@ Metatable and closure operations are close to parity (1.07x-1.18x).
 |-------------------|---------|--------|-------|
 | large.lua         | 0.007s  | 0.075s | 10.7x |
 
-Compilation is 10x slower than PUC-Rio for large files. The Lua
+Compilation is 10x slower than PUC-Rio for large files. The rilua
 pipeline has an additional AST intermediate step (Luau-style) that
 PUC-Rio doesn't have, which adds overhead. For typical program sizes
 (<1000 lines), both compile in under 5ms.
@@ -204,6 +231,33 @@ overhead than PUC-Rio's `GCObject` union layout.
 | Empty program            | ~2 ms   | ~2 ms |
 
 Startup is equivalent.
+
+### PUC-Rio Test Suite Execution Time
+
+Best of 3 runs per test file, release builds (`-O2` / `--release`).
+Tests execute from within `./lua-5.1-tests/` via `scripts/compare.sh`.
+Only the 11 currently passing test files are measured.
+
+| Test         | PUC-Rio (s) | rilua (s) | Ratio  | Notes |
+|--------------|-------------|-----------|--------|-------|
+| constructs   | 0.227       | 0.521     | 2.29x  | Largest test, syntax + operator coverage |
+| errors       | 0.119       | 0.005     | 0.04x  | rilua Result-based errors vs setjmp/longjmp |
+| events       | 0.002       | 0.002     | --     | < 5ms both |
+| files        | 0.009       | 0.011     | 1.22x  | I/O operations, temp files |
+| gc           | 0.063       | 0.075     | 1.19x  | Allocation + collection cycles |
+| locals       | 0.003       | 0.004     | --     | < 5ms both |
+| math         | 0.003       | 0.005     | --     | < 5ms both |
+| nextvar      | 0.012       | 0.022     | 1.83x  | Table iteration, next(), length |
+| sort         | 0.047       | 0.086     | 1.82x  | table.sort with comparators |
+| strings      | 0.002       | 0.002     | --     | < 5ms both |
+| vararg       | 0.001       | 0.001     | --     | < 5ms both |
+
+Tests under 5ms are too short for meaningful ratio comparison. Of the
+tests with measurable runtime, `constructs` (2.29x), `nextvar` (1.83x),
+and `sort` (1.82x) show where dispatch and table overhead matters.
+`errors` is 25x faster in rilua because `Result<T, E>` propagation
+uses normal control flow, while PUC-Rio's `pcall` saves the entire
+register state via `setjmp` on every protected call.
 
 ## 5. Feature Coverage Summary
 
@@ -250,38 +304,34 @@ Startup is equivalent.
 | Binary chunk loading | Working |
 | Cross-compatibility | Working (both directions) |
 
-## 6. Roadmap for Phase 9d/9e Completion
+## 6. Remaining Work
 
-### Phase 9d: Remaining Bug Fixes
+### Compatibility Fixes (by impact)
 
-Priority order (by impact on PUC-Rio test pass count):
+| Priority | Issue | Tests Unblocked |
+|----------|-------|-----------------|
+| P0 | Call depth model (Bug #29): separate Lua depth from Rust guard | pm |
+| P1 | `load()` streaming reader | calls |
+| P1 | Per-thread global tables (`setfenv` on threads) | closure |
+| P1 | Locale-aware number parsing (libc `strtod` FFI) | literals |
+| P2 | `debug.sethook` line hook execution | db |
+| P2 | attrib.lua file creation infrastructure | attrib |
+| P2 | main.lua CLI subprocess infrastructure | main |
+| P3 | verybig.lua expression edge cases | verybig |
 
-| Priority | Bug | Expected Effort | Tests Unblocked |
-|----------|-----|-----------------|-----------------|
-| P0 | #18 while-true-if-break | Small (codegen.rs JMP patching) | 8 timeouts |
-| P1 | #17 parenthesized multi-return | Small (parser/codegen) | calls |
-| P1 | #19 repeat-until upvalue scoping | Medium (codegen.rs upvalue close) | closure |
-| P1 | #21 return-from-C stale value | Small (execute.rs return cleanup) | vararg |
-| P2 | #20 coroutine register restoration | Medium (state.rs resume path) | literals |
-| P2 | #22 loadstring error format | Small (compiler error formatting) | errors |
-| P2 | #23 debug.getinfo namewhat | Small (debug_info.rs) | db |
+### Performance Targets
 
-Estimated total: ~7 focused bug-fix sessions.
-
-### Phase 9e: Behavioral Equivalence
-
-After Phase 9d bug fixes:
-- Re-run all 20 PUC-Rio tests, expect 15+ to pass
-- Fix remaining edge cases iteratively
-- Address attrib.lua (file infra) and main.lua (subprocess infra)
-- Consider testC equivalent for api/checktable/code coverage
-
-### Performance Optimization Opportunities
+The goal is performance parity with PUC-Rio Lua 5.1.1 once all
+features are implemented and rilua is behaviorally identical.
 
 | Area | Current | Target | Approach |
 |------|---------|--------|----------|
-| String operations | 9.33x | <3x | Optimize string.find/rep/sub hot paths |
+| String operations | 9.33x | <2x | Optimize string.find/rep/sub hot paths |
 | Table operations | 2.00x | <1.5x | Reduce per-element GC overhead |
 | Function calls | 2.18x | <1.5x | Optimize precall/postcall dispatch |
 | Memory (table_ops) | 3.98x | <2x | Compact arena representation |
 | Compilation | 10.7x | <3x | Optimize parser/AST allocation |
+| Recursion | 1.98x | <1.5x | Optimize call/return dispatch |
+
+Performance optimization is deferred until behavioral equivalence is
+achieved. Premature optimization risks making bug fixes harder.

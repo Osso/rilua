@@ -2,15 +2,20 @@
 //! Lua 5.1.1, comparing output for behavioral equivalence.
 //!
 //! The PUC-Rio `lua` binary path is read from the `LUA_REFERENCE_BIN`
-//! environment variable. If not set, defaults to
-//! `~/Repos/github.com/lua/lua/lua`. Tests that require the reference
-//! binary skip gracefully if it is not available.
+//! environment variable. If not set, defaults to `./lua-5.1.1/src/lua`
+//! (built from the official tarball). See `AGENTS.md` for setup
+//! instructions. Tests that require the reference binary skip
+//! gracefully if it is not available.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 /// Default path to the PUC-Rio Lua 5.1.1 binary.
-const DEFAULT_LUA_BIN: &str = concat!(env!("HOME"), "/Repos/github.com/lua/lua/lua");
+///
+/// Built from the official tarball at `./lua-5.1.1/`. See `AGENTS.md`
+/// for download and build instructions. Override with the
+/// `LUA_REFERENCE_BIN` environment variable.
+const DEFAULT_LUA_BIN: &str = "./lua-5.1.1/src/lua";
 
 /// Returns the path to the PUC-Rio Lua 5.1.1 reference binary.
 ///

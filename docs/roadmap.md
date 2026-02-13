@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 11/20 applicable PUC-Rio tests pass) | 1289 total (586 unit + 426 integration + 277 oracle) |
+| 9: Compatibility | In progress (9a-9d done; 11/20 applicable PUC-Rio tests pass) | 1289 total (586 unit + 426 integration + 277 oracle); see `docs/evaluation-2026-02.md` |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -163,11 +163,12 @@ All must be resolved before the project is considered complete.
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (12 / 20 applicable pass)
+### PUC-Rio test suite status (11 / 20 applicable pass)
 
-Re-baselined after Phase 9d bug fixes (Feb 2026). Three test files (api,
-checktable, code) require the `testC` C library and are not applicable
-to rilua. Of the 20 applicable tests, 12 pass and 8 fail.
+Re-baselined after Phase 9d bug fixes and tarball-based testing
+(Feb 13, 2026). Run via `scripts/compare.sh` from `./lua-5.1-tests/`.
+Three test files (api, checktable, code) require the `testC` C library
+and are not applicable. Of the 20 applicable tests, 11 pass and 9 fail.
 
 Bugs #15-#28 fixed: timeouts resolved (parser/compiler infinite-loop
 patterns), TAILCALL stale values, VARARG register targeting, select
@@ -180,9 +181,9 @@ local/upvalue limit checking.
 
 | Result | Count | Files |
 |--------|-------|-------|
-| Pass | 12 | constructs, errors, events, files, gc, locals, math, nextvar, pm, sort, strings, vararg |
+| Pass | 11 | constructs, errors, events, files, gc, locals, math, nextvar, sort, strings, vararg |
 | N/A | 3 | api, checktable, code (require testC C library) |
-| Fail | 8 | attrib, big, calls, closure, db, literals, main, verybig |
+| Fail | 9 | attrib, big, calls, closure, db, literals, main, pm, verybig |
 
 **Fail details**:
 - `attrib`: requires file creation test infrastructure (writes
@@ -194,18 +195,20 @@ local/upvalue limit checking.
   call count differs (`i=9` vs expected `i=2`).
 - `closure`: `setfenv` on coroutine threads not supported. Fails at
   line 416 (`debug.setfenv(co, a)`). Per-thread global tables not
-  implemented. Also: repeat-until upvalue scoping (Bug #19).
+  implemented.
 - `db`: fails at line 20 -- requires `debug.sethook` line hook execution
-  (currently a stub). Also: debug.getinfo namewhat resolution (Bug #23).
+  (currently a stub).
 - `literals`: assertion at line 162 -- locale-aware `tonumber("3,4")`
   returns nil because Rust `f64::parse` ignores C locale. Fix requires
-  libc `strtod` FFI for number parsing. Also: coroutine register
-  restoration (Bug #20).
+  libc `strtod` FFI for number parsing.
 - `main`: requires CLI subprocess execution with `LUA_PATH` manipulation.
   `require` path search fails for `/tmp/lua_*` temp files.
-- `verybig`: assertion at line 120033 of generated code. Bug #24 fix
-  resolved the `not`+`and`/`or` issue but verybig.lua has additional
-  failures in the generated code (different expression combinations).
+- `pm`: stack overflow at line 82 -- `range(0, 255)` recurses 256
+  levels, exceeding rilua's 200-call `call_depth` limit. Bug #29:
+  rilua checks `call_depth` against `MAXCCALLS` (200) for all calls;
+  PUC-Rio only counts C calls against this limit.
+- `verybig`: timeout on generated code. Expression combinations trigger
+  evaluation edge cases beyond Bug #24 fix.
 
 ### Execution order corrections
 
@@ -248,15 +251,14 @@ Userdata infrastructure  [done]
 PUC-Rio Lua 5.1.1 serves as the oracle for behavioral equivalence
 testing throughout development.
 
-- **lua** (interpreter): `~/Repos/github.com/lua/lua/lua` (git tag
-  `v5.1.1`)
-- **luac** (bytecode lister): built from the 5.1.1 source
-  distribution. Use `luac -l` for bytecode listing, `luac -l -l` for
-  listing with constants and locals.
-- **Test suite**: `~/Repos/github.com/lua/tests/` (24 files, tag
-  `v5_1_1`)
+- **lua** (interpreter): `./lua-5.1.1/src/lua`
+- **luac** (bytecode lister): `./lua-5.1.1/src/luac`. Use `luac -l`
+  for bytecode listing, `luac -l -l` for listing with constants and
+  locals.
+- **Test suite**: `./lua-5.1-tests/` (24 files)
 
-See `CLAUDE.md` for distribution archive URLs and SHA256 checksums.
+See `AGENTS.md` for distribution archive URLs, SHA256 checksums,
+and build instructions.
 
 ## Testing Integration
 
@@ -1137,9 +1139,8 @@ integration tests (CLI flags, stdin, multiple files, error cases).
 
 ## Phase 9: Compatibility
 
-**Goal**: Pass PUC-Rio's official test suite (`~/Repos/github.com/lua/tests`,
-tag `v5_1_1`). All 24 test files run and pass when executed through
-`rilua`.
+**Goal**: Pass PUC-Rio's official test suite (`./lua-5.1-tests/`).
+All 24 test files run and pass when executed through `rilua`.
 
 Phase 9 is not a single pass. It contains architectural changes that
 must happen in order, followed by iterative bug fixing. The sub-phases

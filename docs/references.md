@@ -8,7 +8,7 @@ management, and API surface.
 
 ### PUC-Rio Lua 5.1.1 (C)
 
-- **Local path**: `~/Repos/github.com/lua/lua` (tag `v5.1.1`)
+- **Local path**: `./lua-5.1.1/` (built from official tarball; see `AGENTS.md` for setup)
 - **Role**: The specification. All behavioral questions are answered here.
 - **Architecture**: 17,654 lines. Single-pass recursive descent compiler
   emitting 38 register-based opcodes (u32 packed). CallInfo chain for
