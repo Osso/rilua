@@ -712,6 +712,26 @@ impl LuaState {
         self.n_ccalls = resumer.n_ccalls;
         self.open_upvalues = resumer.open_upvalues;
         self.error_object = resumer.error_object;
+
+        // Reopen the resumer's suspended upvalues. These were closed before
+        // the stack swap to prevent cross-thread reads. Now that the
+        // resumer's stack is active again, write the captured values back
+        // to the stack slots and mark the upvalues as Open.
+        for (uv_ref, idx) in resumer.suspended_upvals {
+            if let Some(uv) = self.gc.upvalues.get(uv_ref) {
+                if let crate::vm::closure::UpvalueState::Closed { value } = uv.state {
+                    if idx < self.stack.len() {
+                        self.stack[idx] = value;
+                    }
+                }
+            }
+            if let Some(uv) = self.gc.upvalues.get_mut(uv_ref) {
+                uv.state = crate::vm::closure::UpvalueState::Open { stack_index: idx };
+            }
+            if !self.open_upvalues.contains(&uv_ref) {
+                self.open_upvalues.push(uv_ref);
+            }
+        }
     }
 }
 

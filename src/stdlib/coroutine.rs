@@ -150,43 +150,34 @@ pub fn co_resume(state: &mut LuaState) -> LuaResult<u32> {
     }
 }
 
-/// Closes open upvalues belonging to the function in a coroutine thread.
+/// Closes ALL open upvalues from the current thread and returns pairs
+/// of `(upvalue_ref, stack_index)` for later reopening.
 ///
-/// In rilua's swap model, the main thread's stack is saved before the
-/// coroutine's stack is loaded. Open upvalues from the main thread that
-/// reference its stack would point to invalid data after the swap. This
-/// function closes them, capturing their current values into `Closed`
-/// state, making them stack-independent.
+/// In rilua's swap model, the active thread's stack is about to be saved
+/// and another thread's stack loaded. ANY open upvalue pointing into the
+/// current stack would read from the wrong thread after the swap. We
+/// close them all, capturing their current values into `Closed` state.
 ///
-/// Must be called BEFORE `save_thread_state` while the main thread's
-/// stack is still active in `state.stack`.
-fn close_cross_thread_upvalues(state: &mut LuaState, co_ref: GcRef<LuaThread>) {
-    // Get the function from the coroutine's thread data (at stack[0]).
-    let func_val = state
-        .gc
-        .threads
-        .get(co_ref)
-        .and_then(|t| t.stack.first().copied())
-        .unwrap_or(Val::Nil);
-
-    let Val::Function(closure_ref) = func_val else {
-        return;
-    };
-
-    // Collect upvalue refs from the closure (clone to avoid borrow conflicts).
-    let upvalue_refs: Vec<GcRef<Upvalue>> = match state.gc.closures.get(closure_ref) {
-        Some(Closure::Lua(lc)) => lc.upvalues.clone(),
-        _ => return,
-    };
-
-    // Close each open upvalue using the current (main thread's) stack.
-    for uv_ref in &upvalue_refs {
-        if let Some(uv) = state.gc.upvalues.get_mut(*uv_ref) {
+/// The returned pairs allow `load_thread_by_ref` to reopen the upvalues
+/// when this thread becomes active again.
+///
+/// Must be called BEFORE `save_thread_state` while the thread's stack
+/// is still active in `state.stack`.
+fn close_thread_upvalues(state: &mut LuaState) -> Vec<(GcRef<Upvalue>, usize)> {
+    let mut suspended = Vec::new();
+    for &uv_ref in &state.open_upvalues {
+        if let Some(uv) = state.gc.upvalues.get(uv_ref) {
+            if let Some(idx) = uv.stack_index() {
+                suspended.push((uv_ref, idx));
+            }
+        }
+    }
+    for &(uv_ref, _) in &suspended {
+        if let Some(uv) = state.gc.upvalues.get_mut(uv_ref) {
             uv.close(&state.stack);
         }
-        // Remove from the main thread's open upvalue tracking list.
-        state.open_upvalues.retain(|r| r != uv_ref);
     }
+    suspended
 }
 
 /// Core resume logic shared by `coroutine.resume` and `coroutine.wrap`.
@@ -225,18 +216,19 @@ fn auxresume(
         }
     }
 
-    // For first resume: close the function's upvalues that reference the
-    // current (main) thread's stack. This captures their values before the
-    // stack swap makes them inaccessible.
-    if co_status == ThreadStatus::Initial {
-        close_cross_thread_upvalues(state, co_ref);
-    }
+    // Close ALL open upvalues from the current (resumer) thread before the
+    // stack swap. Any open upvalue pointing into this thread's stack would
+    // read from the wrong data after the coroutine's stack is loaded.
+    // The suspended pairs are stored on the resumer so they can be reopened
+    // when control returns to this thread.
+    let resumer_suspended = close_thread_upvalues(state);
 
     // Save the identity of the calling thread (for nested resume tracking).
     let saved_current_thread = state.current_thread;
 
-    // Save the resumer's state.
-    let resumer = state.save_thread_state();
+    // Save the resumer's state (with suspended upval pairs for reopening).
+    let mut resumer = state.save_thread_state();
+    resumer.suspended_upvals = resumer_suspended;
 
     // Load the coroutine's state into LuaState.
     state.load_thread_by_ref(co_ref, ThreadStatus::Running);

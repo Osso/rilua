@@ -4415,3 +4415,32 @@ print("PASSED")
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("PASSED"), "stdout: {stdout}");
 }
+
+#[test]
+fn coroutine_cross_thread_upvalues() {
+    // Bug #20: closures called from within a coroutine must be able to
+    // read upvalues from the creating thread's stack. The swap model
+    // must close ALL open upvalues before switching stacks.
+    let code_str = r#"
+local t = {"a", "b"}
+local function gen(c, n)
+  if n == 0 then coroutine.yield(c) return end
+  for _, a in pairs(t) do
+    gen(c..a, n-1)
+  end
+end
+local results = {}
+for s in coroutine.wrap(function() gen("", 2) end) do
+  table.insert(results, s)
+end
+assert(table.getn(results) == 4)
+assert(results[1] == "aa")
+assert(results[2] == "ab")
+assert(results[3] == "ba")
+assert(results[4] == "bb")
+print("PASSED")
+"#;
+    let (stdout, stderr, code) = run_rilua(code_str);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("PASSED"), "stdout: {stdout}");
+}
