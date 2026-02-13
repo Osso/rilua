@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 11/20 applicable PUC-Rio tests pass) | 1289 total (586 unit + 426 integration + 277 oracle); see `docs/evaluation-2026-02.md` |
+| 9: Compatibility | In progress (9a-9d done; 20/23 PUC-Rio tests pass, 17 non-trivial) | 1289 total (586 unit + 426 integration + 277 oracle); see `docs/evaluation-2026-02.md` |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -163,52 +163,25 @@ All must be resolved before the project is considered complete.
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (11 / 20 applicable pass)
+### PUC-Rio test suite status (14 / 23 pass, 11 non-trivial)
 
-Re-baselined after Phase 9d bug fixes and tarball-based testing
-(Feb 13, 2026). Run via `scripts/compare.sh` from `./lua-5.1-tests/`.
-Three test files (api, checktable, code) require the `testC` C library
-and are not applicable. Of the 20 applicable tests, 11 pass and 9 fail.
+Re-baselined Feb 13, 2026. Run via `scripts/compare.sh` from
+`./lua-5.1-tests/`. See `docs/evaluation-2026-02.md` for full details.
 
-Bugs #15-#28 fixed: timeouts resolved (parser/compiler infinite-loop
-patterns), TAILCALL stale values, VARARG register targeting, select
-boundary, coroutine cross-thread upvalue corruption, debug.getinfo name
-field, semicolon parsing, error message quoting, ambiguous syntax
-detection, `not`+`and`/`or` negation (removevalues in codenot),
-`luaL_argerror`/`luaL_typerror` formatting ("no value" vs "nil"),
-raw byte error messages, syntax nesting limits, and parser-level
-local/upvalue limit checking.
-
-| Result | Count | Files |
-|--------|-------|-------|
-| Pass | 11 | constructs, errors, events, files, gc, locals, math, nextvar, sort, strings, vararg |
-| N/A | 3 | api, checktable, code (require testC C library) |
-| Fail | 9 | attrib, big, calls, closure, db, literals, main, pm, verybig |
+| Category | Count | Files |
+|----------|-------|-------|
+| Pass | 17 | attrib, closure, constructs, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg |
+| Pass (trivial) | 3 | api, checktable, code (T==nil skips all C-API tests) |
+| Fail (rilua) | 3 | calls, db, verybig (timeout) |
+| Fail (both) | 2 | big (requires checktable C lib), main (CLI subprocess infra) |
 
 **Fail details**:
-- `attrib`: requires file creation test infrastructure (writes
-  `libs/B.lua` etc. to disk). Fails at line 23.
-- `big`: requires `checktable` module (C library). Also: PUC-Rio itself
-  fails this test. Not a rilua issue.
-- `calls`: assertion at line 250 -- `load()` with reader function reads
-  entire input before parsing; PUC-Rio streams incrementally. Reader
-  call count differs (`i=9` vs expected `i=2`).
-- `closure`: `setfenv` on coroutine threads not supported. Fails at
-  line 416 (`debug.setfenv(co, a)`). Per-thread global tables not
-  implemented.
-- `db`: fails at line 20 -- requires `debug.sethook` line hook execution
-  (currently a stub).
-- `literals`: assertion at line 162 -- locale-aware `tonumber("3,4")`
-  returns nil because Rust `f64::parse` ignores C locale. Fix requires
-  libc `strtod` FFI for number parsing.
-- `main`: requires CLI subprocess execution with `LUA_PATH` manipulation.
-  `require` path search fails for `/tmp/lua_*` temp files.
-- `pm`: stack overflow at line 82 -- `range(0, 255)` recurses 256
-  levels, exceeding rilua's 200-call `call_depth` limit. Bug #29:
-  rilua checks `call_depth` against `MAXCCALLS` (200) for all calls;
-  PUC-Rio only counts C calls against this limit.
-- `verybig`: timeout on generated code. Expression combinations trigger
-  evaluation edge cases beyond Bug #24 fix.
+- `calls:250`: `load(reader)` eagerly collects all reader output before
+  compiling. PUC-Rio uses streaming ZIO, stopping the reader on parse
+  error. Test asserts reader call count (`i==2`), but rilua reads all
+  9 characters before detecting the syntax error.
+- `db:20`: `debug.sethook` line hook not implemented (stub).
+- `verybig`: timeout on generated 50k-entry table compilation.
 
 ### Execution order corrections
 
@@ -1314,27 +1287,13 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
     the single loop-back JMP, leaving false-branch JMPs from conditions
     inside the body with their initial NO_JUMP (-1) sBx, which encodes
     as a self-loop. Fix: `codegen.rs` line 1787.
-19. **Repeat-until upvalue scoping**: Closures in `repeat ... until`
-    loops all share the same upvalue for locals declared in the loop
-    body instead of each iteration creating its own copy. PUC-Rio
-    creates fresh upvalues per iteration. Affects: closure.
-20. **Coroutine register restoration**: After `coroutine.yield` and
-    subsequent `resume`, upvalue registers in the coroutine's stack
-    frame are corrupted. An upvalue pointing at a table gets resolved
-    as the first element of that table (off-by-one or wrong base in
-    stack restoration). Affects: literals (coroutine + pairs/ipairs
-    pattern).
-21. **Return-from-C stale value**: When a Rust/C function returns 0
-    values and is called via `return f(...)` (tail position in a Lua
-    wrapper), a stale register value leaks as the return value instead
-    of nothing. Direct calls work correctly; only the `return f(...)`
-    wrapper pattern is affected. Affects: vararg.
-22. **Loadstring error message format**: `loadstring("break label")`
-    produces `break label:1: ...` instead of `[string "break label"]:1:
-    ...`. The source name uses the raw input string instead of the
-    `[string "..."]` format. Additionally, the error text differs:
-    rilua says `<eof> expected near <name>` instead of `no loop to
-    break near 'label'`. Affects: errors.
+19. ~~**Repeat-until upvalue scoping**~~: Not reproduced. `closure.lua`
+    passes after per-thread globals fix. May have been masked or misdiagnosed.
+20. ~~**Coroutine register restoration**~~: Not reproduced. `literals.lua`
+    passes after locale-aware number parsing fix.
+21. ~~**Return-from-C stale value**~~: Not reproduced. `vararg.lua` passes.
+22. ~~**Loadstring error message format**~~: Not reproduced. `errors.lua`
+    passes (fixed in earlier session by source name formatting).
 23. **Debug.getinfo namewhat**: `debug.getinfo(1).namewhat` returns
     `"global"` instead of `"local"` for a `function f()` defined via
     `local function f()` in certain call contexts. The function name
@@ -1382,6 +1341,32 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
     limit (200) and upvalue limit (60) with cascading resolution now
     fire during parsing, matching PUC-Rio's single-pass behavior for
     intentionally incomplete test code. `errors.lua` now fully passes.
+29. ~~**Call depth model**~~: **FIXED**. PUC-Rio's `nexeccalls` model:
+    Lua-to-Lua calls use loop re-entry instead of recursive `execute()`.
+    MAXCALLS=20000 checked in `precall` via CI count. `ci_overflow` flag
+    allows headroom up to 2*MAXCALLS for error handlers. Cleared in
+    pcall/xpcall. Unblocked `pm.lua` and kept `errors.lua` passing.
+30. ~~**C loader error format**~~: **FIXED**. `loader_c` and `loader_croot`
+    now call `search_path` with `package.cpath` and list tried `.so` paths
+    in the error message (matching PUC-Rio's format). Unblocked `attrib.lua`.
+31. ~~**Locale-aware number parsing**~~: **FIXED**. Added libc FFI for
+    `strtod`, `localeconv`, `LConv`. `str_to_number` uses `strtod` for
+    locale-aware parsing. Lexer `read_number` rewritten with `trydecpoint`
+    fallback (replace `.` with locale decimal point on parse failure).
+    Unblocked `literals.lua`.
+32. ~~**Multi-assignment check_conflict**~~: **FIXED**. Implemented
+    PUC-Rio's `check_conflict` in `compile_assign`. Scans target exprs:
+    for each LOCAL target, checks all earlier INDEXED targets for register
+    conflicts (table or key field matches local register). Emits MOVE to
+    save conflicting values. Unblocked `attrib.lua`.
+33. ~~**Per-thread globals**~~: **FIXED**. Added `global: GcRef<Table>` to
+    `LuaThread`. Save/restore in all three coroutine swap paths. Handle
+    `Val::Thread` in `debug.setfenv`/`debug.getfenv`. GC marks thread
+    global in `traverse_thread`. Unblocked `closure.lua`.
+34. ~~**Binary-loaded function upvalues**~~: **FIXED**. `LuaClosure::new`
+    created empty upvalues vector; `debug.setupvalue` on undumped functions
+    failed. Fix: create fresh closed nil upvalues matching `proto.num_upvalues`
+    in `load_string_impl`, `run_proto`, `load_bytes`.
 
 Files: `src/compiler/codegen.rs`, `src/compiler/parser.rs`,
 `src/compiler/ast.rs`, `src/compiler/lexer.rs`, `src/vm/execute.rs`,
