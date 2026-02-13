@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 7/20 applicable PUC-Rio tests pass) | 1271 total (583 unit + 411 integration + 277 oracle) |
+| 9: Compatibility | In progress (9a-9d done; 10/20 applicable PUC-Rio tests pass) | 1285 total (586 unit + 422 integration + 277 oracle) |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -132,53 +132,86 @@ All must be resolved before the project is considered complete.
   closure object as `string.gmatch` (copies value from table, matching
   PUC-Rio's `lua_getfield`/`lua_setfield` pattern).
 
+**Parser strictness (Phase 9d)**:
+- ~~Standalone semicolons accepted~~ **FIXED**: Lua 5.1 grammar is
+  `{stat [';']}` -- semicolons are optional separators after statements,
+  not empty statements. Removed leading-semicolon loop from parse_block.
+- ~~Return consumes extra semicolon~~ **FIXED**: parse_return had its own
+  `test_next_char(';')` plus parse_block's. Removed from parse_return.
+- ~~`<eof>` token not quoted in error messages~~ **FIXED**: Added
+  `token2str()` method (unquoted) and wrapped all `near` context with
+  `'...'` (PUC-Rio's LUA_QS pattern). Error messages now match PUC-Rio.
+- ~~Ambiguous syntax not detected~~ **FIXED**: Added `lastline` tracking
+  to parser. Function call `(` on different line than expression emits
+  "ambiguous syntax (function call x new statement)".
+
+**Remaining bugs (discovered during 9d)**:
+- **Bug #24**: `not` applied to `and`/`or` expressions silently drops
+  the negation. `not (nil and true)` returns `nil` instead of `true`.
+  Root cause: compiler does not propagate `not` inversion into the
+  short-circuit jump logic of `and`/`or` expressions. PUC-Rio's
+  `luaK_prefix(UNM_NOT)` swaps true/false lists. Affects constructs.lua,
+  verybig.lua.
+- **Bug #25**: `load()` with reader function reads entire input before
+  parsing. PUC-Rio streams reader output incrementally into the lexer.
+  Reader call count differs. Affects calls.lua.
+- **Bug #26**: `setfenv` on coroutine threads not supported. rilua has
+  a single global table; PUC-Rio has per-thread globals (`gt(L)`).
+  Affects closure.lua.
+- **Bug #27**: Locale-aware number parsing missing. Rust `f64::parse()`
+  ignores C locale. PUC-Rio uses `strtod()` which respects locale.
+  Fix requires libc FFI. Affects literals.lua.
+- **Bug #28**: Error message format mismatch in I/O __gc: "got nil"
+  vs PUC-Rio "got no value". Affects errors.lua.
+
 **Debug library (Phase 5h, stubs)**:
 - `debug.sethook` / `debug.gethook` are stubs (no hook execution).
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (7 / 20 applicable pass)
+### PUC-Rio test suite status (10 / 20 applicable pass)
 
-Re-baselined after full evaluation (Feb 2026). Three test files (api,
+Re-baselined after Phase 9d bug fixes (Feb 2026). Three test files (api,
 checktable, code) require the `testC` C library and are not applicable
-to rilua. Of the 20 applicable tests, 7 pass, 5 timeout, and 8 fail.
+to rilua. Of the 20 applicable tests, 10 pass and 10 fail.
 
-Bug #18 (while-true-if-break) was fixed, unblocking math.lua and
-nextvar.lua (both now pass), and progressing constructs.lua to an
-assertion failure (bug #17).
+Bugs #15-#23 fixed: timeouts resolved (parser/compiler infinite-loop
+patterns), TAILCALL stale values, VARARG register targeting, select
+boundary, coroutine cross-thread upvalue corruption, debug.getinfo name
+field, semicolon parsing, error message quoting, and ambiguous syntax
+detection.
 
 | Result | Count | Files |
 |--------|-------|-------|
-| Pass | 7 | files, gc, locals, math, nextvar, pm, sort |
+| Pass | 10 | events, files, gc, locals, math, nextvar, pm, sort, strings, vararg |
 | N/A | 3 | api, checktable, code (require testC C library) |
-| Timeout | 5 | calls, closure, events, strings, verybig |
-| Fail | 8 | attrib, big, constructs, db, errors, literals, main, vararg |
-
-**Timeout root causes**:
-- `calls`: bug #21 (return-from-C stale value), plus additional
-  infinite-loop patterns (progresses 4 markers after bug #17 fix)
-- `closure`: bug #19 (repeat-until upvalue scoping)
-- `events`: additional infinite-loop patterns beyond bug #18
-- `strings`: additional infinite-loop patterns beyond bug #18
-- `verybig`: additional infinite-loop patterns beyond bug #18
+| Fail | 10 | attrib, big, calls, closure, constructs, db, errors, literals, main, verybig |
 
 **Fail details**:
 - `attrib`: requires file creation test infrastructure (writes
-  `libs/B.lua` etc. to disk)
+  `libs/B.lua` etc. to disk). Fails at line 23.
 - `big`: requires `checktable` module (C library). Also: PUC-Rio itself
   fails this test. Not a rilua issue.
-- `constructs`: assertion failure at line 235 (progressed past line 131
-  after bug #17 fix). Needs investigation.
-- `db`: bug #23 (debug.getinfo namewhat returns "global" instead of
-  "local")
-- `errors`: bug #22 (loadstring error message format mismatch:
-  source name and error text differ from PUC-Rio)
-- `literals`: bug #20 (coroutine register restoration: upvalue
-  corruption after yield/resume causes pairs to receive a string
-  instead of a table)
-- `main`: requires CLI subprocess execution (test spawns child
-  processes via `os.execute` with rilua binary path)
-- `vararg`: assertion failure at line 42 (progressed past bug #17;
-  likely bug #21 return-from-C stale value)
+- `calls`: assertion at line 250 -- `load()` with reader function reads
+  entire input before parsing; PUC-Rio streams incrementally. Reader
+  call count differs (`i=9` vs expected `i=2`).
+- `closure`: `setfenv` on coroutine threads not supported. Fails at
+  line 416 (`debug.setfenv(co, a)`). Per-thread global tables not
+  implemented.
+- `constructs`: assertion at line 235 -- bug #24 (`not` applied to
+  `and`/`or` expression drops the negation). Compiler does not propagate
+  `not` inversion into short-circuit `and`/`or` jump logic.
+- `db`: fails at line 20 -- requires `debug.sethook` line hook execution
+  (currently a stub). Also: debug.getinfo name nil fix applied.
+- `errors`: assertion at line 111 -- `checkmessage` for `__gc` error
+  message format mismatch (`"got nil"` vs PUC-Rio `"got no value"`).
+  Also: several "ambiguous syntax" and semicolon errors now fixed.
+- `literals`: assertion at line 162 -- locale-aware `tonumber("3,4")`
+  returns nil because Rust `f64::parse` ignores C locale. Fix requires
+  libc `strtod` FFI for number parsing.
+- `main`: requires CLI subprocess execution with `LUA_PATH` manipulation.
+  `require` path search fails for `/tmp/lua_*` temp files.
+- `verybig`: assertion at line 120033 of generated code -- bug #24
+  (same `not`+`and`/`or` codegen issue as constructs.lua).
 
 ### Execution order corrections
 
