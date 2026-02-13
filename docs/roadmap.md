@@ -174,7 +174,7 @@ All must be resolved before the project is considered complete.
 
 Re-baselined after Phase 9d bug fixes (Feb 2026). Three test files (api,
 checktable, code) require the `testC` C library and are not applicable
-to rilua. Of the 20 applicable tests, 11 pass and 9 fail.
+to rilua. Of the 20 applicable tests, 12 pass and 8 fail.
 
 Bugs #15-#24, #28 fixed: timeouts resolved (parser/compiler infinite-loop
 patterns), TAILCALL stale values, VARARG register targeting, select
@@ -202,10 +202,10 @@ detection, `not`+`and`/`or` negation (removevalues in codenot), and
   implemented.
 - `db`: fails at line 20 -- requires `debug.sethook` line hook execution
   (currently a stub). Also: debug.getinfo name nil fix applied.
-- `errors`: fails at line 196 -- `\255` byte in syntax error token
-  produces UTF-8 encoded `ÿ` instead of raw byte `\xFF`. Stack overflow
-  detection, xpcall handler ordering, arg error formatting (#28), for-in
-  line info, and syntax error lexeme preservation all fixed.
+- `errors`: **PASS** -- all tests pass. Raw byte preservation, syntax
+  nesting limits, upvalue/local limits, stack overflow detection, xpcall
+  handler ordering, arg error formatting, and error message fixes all
+  applied.
 - `literals`: assertion at line 162 -- locale-aware `tonumber("3,4")`
   returns nil because Rust `f64::parse` ignores C locale. Fix requires
   libc `strtod` FFI for number parsing.
@@ -1376,11 +1376,25 @@ discovered iteratively by running PUC-Rio test files after 9a-9c.
     Fix: lexer stores raw source text in `last_token_text` for Number
     and String tokens. Parser's `syntax_error_near` uses it.
     Unblocked `errors.lua` past line 191.
+26. **Raw byte in syntax errors**: `\xFF` byte in token name was expanded
+    to 2-byte UTF-8 `\xC3\xBF` via `char::from(0xFF)`. Fix: added
+    `SyntaxError.raw_message: Option<Vec<u8>>` for full error message as
+    raw bytes. Parser builds raw_message for non-ASCII `Token::Char`.
+    `loadstring` uses `to_lua_bytes()` to push raw bytes onto Lua stack.
+27. **Syntax nesting depth limit**: Added `enter_level`/`leave_level` in
+    parser matching PUC-Rio's `enterlevel`/`leavelevel` (limit: 200).
+    Called in `parse_block` and `parse_sub_expr`.
+28. **Parser-level local/upvalue limits**: Added per-function scope
+    tracking in parser with block-level save/restore. Local variable
+    limit (200) and upvalue limit (60) with cascading resolution now
+    fire during parsing, matching PUC-Rio's single-pass behavior for
+    intentionally incomplete test code. `errors.lua` now fully passes.
 
 Files: `src/compiler/codegen.rs`, `src/compiler/parser.rs`,
 `src/compiler/ast.rs`, `src/compiler/lexer.rs`, `src/vm/execute.rs`,
 `src/vm/state.rs`, `src/stdlib/debug.rs`, `src/stdlib/string.rs`,
-`src/stdlib/mod.rs`, `src/stdlib/base.rs`.
+`src/stdlib/mod.rs`, `src/stdlib/base.rs`, `src/error.rs`,
+`src/vm/undump.rs`.
 
 **Tests**: Regression tests for each fixed bug. Oracle comparison for
 the specific patterns.
