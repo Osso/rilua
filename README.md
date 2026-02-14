@@ -167,35 +167,30 @@ Arena-based incremental mark-sweep with generational indices:
 
 ### Not Yet Implemented
 
-- **Debug hooks**: `debug.sethook`/`debug.gethook` are registered but do
-  not execute hook callbacks. `debug.debug()` interactive mode is a stub.
+- **`debug.debug()` interactive mode**: Stub (returns immediately).
 - **C library loading**: `package.loadlib` returns "not supported"
   (incompatible ABI). Lua file loading via `require` works.
 - **SIGINT handling**: No signal-based interruption of running code.
-- **Constant folding**: The compiler does not fold constant arithmetic at
-  compile time (`1 + 2` emits `ADD` instead of `LOADK 3`). Results are
-  correct, bytecode is less optimal.
-
-### Known Bugs
-
-Several edge cases remain where rilua diverges from PUC-Rio behavior.
-These are tracked in `docs/roadmap.md` and are being fixed iteratively.
-Key areas:
-
-- `repeat`/`until` loop upvalue scoping (closures share upvalues across
-  iterations instead of getting fresh copies)
-- Coroutine stack restoration after yield/resume in certain patterns
-- `return f(...)` for C functions returning 0 values
-- `loadstring` error message source name formatting
-- `debug.getinfo` `namewhat` field for local functions
 
 ### PUC-Rio Test Suite Compatibility
 
-The following official Lua 5.1.1 test files pass: `files`, `gc`,
-`locals`, `math`, `nextvar`, `pm`, `sort`. Three test files (`api`,
-`checktable`, `code`) require a C test library not applicable to rilua.
-The remaining files fail due to the known bugs listed above. See
-`docs/roadmap.md` for detailed status per test file.
+19 of 23 official Lua 5.1.1 test files pass (18 non-trivial + 1
+trivial). Passing: attrib, calls, checktable, code, constructs, db,
+errors, events, files, gc, literals, locals, math, nextvar, pm, sort,
+strings, vararg, verybig.
+
+Failing tests and reasons:
+
+| Test | Reason |
+|------|--------|
+| `api.lua` | Requires T.testC mini-interpreter |
+| `closure.lua` | T.resume/T.setyhook not implemented |
+| `big.lua` | Yield from main thread + string overflow |
+| `main.lua` | Tests CLI subprocess behavior |
+
+Tests are run individually, not through the official `all.lua` runner.
+See `docs/testing.md` for details on running modes and the comparison
+script.
 
 ## Architecture
 
@@ -237,10 +232,16 @@ cargo fmt -- --check && cargo clippy --all-targets && cargo test && cargo doc --
 
 ## Testing
 
-Four test categories: unit tests inside compiler and VM modules,
+Five test layers: unit tests inside compiler and VM modules,
 integration tests (Lua scripts with `assert()`), oracle comparison
 tests (same Lua code run in both rilua and PUC-Rio, comparing output),
-and the PUC-Rio official test suite as a compatibility target.
+the PUC-Rio official test suite as a compatibility target, and
+behavioral equivalence tests for edge cases.
+
+PUC-Rio tests are run individually (not through `all.lua`).
+See `docs/testing.md` for the testing strategy and
+[lua.org/tests/](https://lua.org/tests/) for the official test
+documentation.
 
 ## License
 
