@@ -1453,6 +1453,37 @@ impl LuaState {
             }
         }
 
+        // Mark values in saved resumer threads. When coroutine.resume swaps
+        // a coroutine's state into LuaState, the resumer's state is pushed
+        // onto saved_threads. Without traversing these, the resumer's stack
+        // values (closures, strings, etc.) are invisible to the GC and get
+        // incorrectly swept during a full GC cycle.
+        for saved in &self.saved_threads {
+            for i in 0..saved.top {
+                if i < saved.stack.len() {
+                    self.gc.mark_value(saved.stack[i]);
+                }
+            }
+            for uv_ref in &saved.open_upvalues {
+                self.gc.mark_upvalue(*uv_ref);
+            }
+            for &(uv_ref, _) in &saved.suspended_upvals {
+                self.gc.mark_upvalue(uv_ref);
+            }
+            if let Some(err_val) = saved.error_object {
+                self.gc.mark_value(err_val);
+            }
+            self.gc.mark_value(saved.hook.hook_func);
+            for ci_idx in 0..=saved.ci {
+                if ci_idx < saved.call_stack.len() {
+                    let func_idx = saved.call_stack[ci_idx].func;
+                    if func_idx < saved.stack.len() {
+                        self.gc.mark_value(saved.stack[func_idx]);
+                    }
+                }
+            }
+        }
+
         // Add to grayagain so the main thread is re-traversed in atomic.
         // This matches PUC-Rio's behavior where threads are always moved
         // to grayagain after traversal (they need re-scanning because
@@ -1498,6 +1529,33 @@ impl LuaState {
                 if func_idx < self.stack.len() {
                     let func_val = self.stack[func_idx];
                     self.gc.mark_value(func_val);
+                }
+            }
+        }
+
+        // Mark saved resumer threads (same as traverse_main_thread).
+        for saved in &self.saved_threads {
+            for i in 0..saved.top {
+                if i < saved.stack.len() {
+                    self.gc.mark_value(saved.stack[i]);
+                }
+            }
+            for uv_ref in &saved.open_upvalues {
+                self.gc.mark_upvalue(*uv_ref);
+            }
+            for &(uv_ref, _) in &saved.suspended_upvals {
+                self.gc.mark_upvalue(uv_ref);
+            }
+            if let Some(err_val) = saved.error_object {
+                self.gc.mark_value(err_val);
+            }
+            self.gc.mark_value(saved.hook.hook_func);
+            for ci_idx in 0..=saved.ci {
+                if ci_idx < saved.call_stack.len() {
+                    let func_idx = saved.call_stack[ci_idx].func;
+                    if func_idx < saved.stack.len() {
+                        self.gc.mark_value(saved.stack[func_idx]);
+                    }
                 }
             }
         }

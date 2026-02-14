@@ -240,13 +240,28 @@ runtime environment before running each test:
 rilua does **not** run `all.lua` directly. Instead, each test file
 is executed individually using two approaches:
 
+**Important**: Tests must be run from the `lua-5.1-tests/` directory.
+Several tests depend on relative paths: `attrib.lua` creates files
+in `libs/`, `math.lua` and `verybig.lua` require `checktable.lua`
+via `LUA_PATH`, and file tests reference paths relative to the test
+directory. Running from the project root will cause false failures.
+
 **Individual file execution** (primary):
 ```bash
-# Run a single test with rilua (from lua-5.1-tests/ directory)
-cd lua-5.1-tests && ../target/release/rilua <test>.lua
+# Run from the test directory (required)
+cd lua-5.1-tests
+mkdir -p libs
 
-# With T module enabled (for tests that use T.listcode, T.hash, etc.)
-RILUA_TEST_LIB=1 ../target/release/rilua <test>.lua
+# Run a single test
+RILUA_TEST_LIB=1 LUA_PATH="?;./?.lua" ../target/release/rilua <test>.lua
+
+# Run all tests
+for f in *.lua; do
+  [ "$f" = "all.lua" ] && continue
+  echo -n "$(basename $f .lua): "
+  timeout 30 env RILUA_TEST_LIB=1 LUA_PATH="?;./?.lua" \
+    ../target/release/rilua "$f" >/dev/null 2>&1 && echo "PASS" || echo "FAIL"
+done
 ```
 
 **Comparison script** (`scripts/compare.sh`):

@@ -226,9 +226,13 @@ fn auxresume(
     // Save the identity of the calling thread (for nested resume tracking).
     let saved_current_thread = state.current_thread;
 
-    // Save the resumer's state (with suspended upval pairs for reopening).
+    // Save the resumer's state onto saved_threads so the GC can
+    // traverse it during coroutine execution. Without this, the
+    // resumer's stack values (closures, strings, etc.) would be
+    // invisible to the GC and could be incorrectly freed.
     let mut resumer = state.save_thread_state();
     resumer.suspended_upvals = resumer_suspended;
+    state.saved_threads.push(resumer);
 
     // Load the coroutine's state into LuaState.
     state.load_thread_by_ref(co_ref, ThreadStatus::Running);
@@ -311,6 +315,13 @@ fn auxresume(
             }
 
             // Save coroutine state back (dead) and restore resumer.
+            // Pop is safe: we push exactly once before execute, pop once after.
+            let Some(resumer) = state.saved_threads.pop() else {
+                let r = state
+                    .gc
+                    .intern_string(b"internal error: missing resumer state");
+                return Err(Val::Str(r));
+            };
             state.save_and_restore_by_ref(co_ref, ThreadStatus::Dead, resumer);
             state.current_thread = saved_current_thread;
             Ok(results)
@@ -325,6 +336,13 @@ fn auxresume(
             }
 
             // Save coroutine state as suspended and restore resumer.
+            // Pop is safe: we push exactly once before execute, pop once after.
+            let Some(resumer) = state.saved_threads.pop() else {
+                let r = state
+                    .gc
+                    .intern_string(b"internal error: missing resumer state");
+                return Err(Val::Str(r));
+            };
             state.save_and_restore_by_ref(co_ref, ThreadStatus::Suspended, resumer);
             state.current_thread = saved_current_thread;
             Ok(results)
@@ -338,6 +356,13 @@ fn auxresume(
             });
 
             // Save coroutine state as dead and restore resumer.
+            // Pop is safe: we push exactly once before execute, pop once after.
+            let Some(resumer) = state.saved_threads.pop() else {
+                let r = state
+                    .gc
+                    .intern_string(b"internal error: missing resumer state");
+                return Err(Val::Str(r));
+            };
             state.save_and_restore_by_ref(co_ref, ThreadStatus::Dead, resumer);
             state.current_thread = saved_current_thread;
             Err(error_val)

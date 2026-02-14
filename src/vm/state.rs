@@ -437,6 +437,17 @@ pub struct LuaState {
 
     /// Per-thread debug hook state for the currently running thread.
     pub hook: HookState,
+
+    /// Saved resumer thread states for nested coroutine execution.
+    ///
+    /// When `coroutine.resume` swaps a coroutine's state into `LuaState`,
+    /// the resumer's state is pushed here. This makes the resumer's stack
+    /// values visible to the GC during coroutine execution (the GC
+    /// traverses this chain in `traverse_main_thread`).
+    ///
+    /// Each entry corresponds to one level of nested `resume()` calls.
+    /// The deepest resumer is at index 0 (the main thread when no nesting).
+    pub saved_threads: Vec<LuaThread>,
 }
 
 impl LuaState {
@@ -480,6 +491,7 @@ impl LuaState {
             rng_state: 1, // C standard: default as if srand(1) was called.
             current_thread: None,
             hook: HookState::new(),
+            saved_threads: Vec::new(),
         }
     }
 
