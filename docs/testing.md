@@ -9,7 +9,7 @@ compatibility target.**
 
 Current: 1304 tests (596 unit, 431 integration, 277 oracle).
 All oracle test cases pass against PUC-Rio 5.1.1. All 5 layers
-are active. PUC-Rio official test suite: 19 of 23 files pass.
+are active. PUC-Rio official test suite: 20 of 23 files pass.
 
 ## Test Layers
 
@@ -299,14 +299,18 @@ environment variable. Implemented functions:
 | `T.int2fb` | Converts integer to float-byte encoding |
 | `T.log2` | Returns floor(log2(x)) |
 | `T.listcode` | Returns list of opcodes for a function |
+| `T.setyhook` | Sets yield-on-hook for a coroutine thread |
+| `T.resume` | Resumes a coroutine (no arguments) |
+| `T.d2s` | Converts f64 to 8-byte native-endian string |
+| `T.s2d` | Converts 8-byte native-endian string to f64 |
 
-Not implemented: `T.testC` (C API mini-interpreter), `T.resume`
-(yield hooks), `T.setyhook` (yield-on-count), `T.checkmemory`,
+Not implemented: `T.testC` (C API mini-interpreter), `T.checkmemory`,
 `T.totalmem`.
 
-Three tests (`api.lua`, `checktable.lua`, `code.lua`) use T
-extensively. When `T` is nil, guarded sections (`if T then ...
-end`) are skipped. `code.lua` passes fully with `RILUA_TEST_LIB=1`.
+Four tests (`api.lua`, `checktable.lua`, `closure.lua`, `code.lua`)
+use T extensively. When `T` is nil, guarded sections (`if T then ...
+end`) are skipped. `code.lua` and `closure.lua` pass fully with
+`RILUA_TEST_LIB=1`.
 
 #### Test Files
 
@@ -339,19 +343,18 @@ end`) are skipped. `code.lua` passes fully with `RILUA_TEST_LIB=1`.
 
 #### Current Status
 
-19 of 23 files pass (run with `RILUA_TEST_LIB=1`):
+20 of 23 files pass (run with `RILUA_TEST_LIB=1`):
 
-**Passing** (18 non-trivial + 1 trivial):
-attrib, calls, checktable, code, constructs, db, errors, events,
-files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg,
-verybig.
+**Passing** (19 non-trivial + 1 trivial):
+attrib, calls, checktable, closure, code, constructs, db, errors,
+events, files, gc, literals, locals, math, nextvar, pm, sort, strings,
+vararg, verybig.
 
-**Failing** (2 rilua-specific):
+**Failing** (1 rilua-specific):
 
 | Test | Reason |
 |------|--------|
 | `api.lua` | Requires T.testC mini-interpreter (~500 lines) |
-| `closure.lua` | T.resume/T.setyhook not implemented (yield hooks) |
 
 **Always-fail** (2):
 

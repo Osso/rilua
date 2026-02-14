@@ -9,15 +9,20 @@
 //! - `T.int2fb(n)` - float-byte encoding (luaO_int2fb / luaO_fb2int)
 //! - `T.log2(n)` - integer log2 (luaO_log2)
 //! - `T.listcode(f)` - disassemble function bytecode
+//! - `T.setyhook(thread, mask, count)` - set yield-on-hook
+//! - `T.resume(thread)` - resume coroutine (no args)
+//! - `T.d2s(number)` - f64 to 8-byte native-endian string
+//! - `T.s2d(string)` - 8-byte native-endian string to f64
 
 use crate::compiler::codegen::int2fb;
 use crate::error::LuaResult;
 use crate::vm::closure::Closure;
 use crate::vm::execute::fb2int;
 use crate::vm::instructions::{Instruction, OpMode};
-use crate::vm::state::LuaState;
+use crate::vm::state::{LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET};
 use crate::vm::value::Val;
 
+use super::coroutine;
 use super::{arg_error, type_error};
 
 // -------------------------------------------------------------------------
@@ -364,6 +369,192 @@ fn buildop(instr: Instruction, line: u32, pc: usize) -> String {
             format!("({line:4}) {pc:4} - {name:<12}{a:4} {sbx:4}")
         }
     }
+}
+
+// -------------------------------------------------------------------------
+// T.setyhook(thread, mask, count)
+// -------------------------------------------------------------------------
+
+/// Sets a yield-on-hook for a coroutine thread. Instead of calling a hook
+/// function, the execute loop yields directly at hook dispatch points.
+///
+/// `mask` is a string with characters: 'c' (call), 'r' (return), 'l' (line).
+/// `count` is the count hook period (fires every N instructions).
+/// If `count > 0` and no explicit count bit in mask, MASK_COUNT is added.
+/// Pass nil or no arguments to clear all hooks.
+///
+/// Matches PUC-Rio's `setyhook` from `ltests.c`.
+pub fn t_setyhook(state: &mut LuaState) -> LuaResult<u32> {
+    let arg0 = if state.base < state.top {
+        state.stack_get(state.base)
+    } else {
+        // No arguments: clear hooks on the current thread.
+        state.hook.hook_mask = 0;
+        state.hook.yield_on_hook = false;
+        return Ok(0);
+    };
+
+    // First argument must be a thread.
+    let Val::Thread(thread_ref) = arg0 else {
+        // Nil argument: clear hooks on current thread.
+        if arg0.is_nil() {
+            state.hook.hook_mask = 0;
+            state.hook.yield_on_hook = false;
+            return Ok(0);
+        }
+        return Err(type_error(state, 0, "thread"));
+    };
+
+    // Parse mask string (arg 1).
+    let mask_str = if state.base + 1 < state.top {
+        match state.stack_get(state.base + 1) {
+            Val::Str(r) => state
+                .gc
+                .string_arena
+                .get(r)
+                .map(|s| String::from_utf8_lossy(s.data()).to_string())
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    // Parse count (arg 2).
+    let count: i32 = if state.base + 2 < state.top {
+        match state.stack_get(state.base + 2) {
+            Val::Num(n) => n as i32,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+
+    let mut mask: u8 = 0;
+    for ch in mask_str.chars() {
+        match ch {
+            'c' => mask |= MASK_CALL,
+            'r' => mask |= MASK_RET,
+            'l' => mask |= MASK_LINE,
+            _ => {}
+        }
+    }
+
+    // If count > 0 and no explicit count mask, add it.
+    if count > 0 {
+        mask |= MASK_COUNT;
+    }
+
+    // Apply to the target thread. Since the thread may not be currently
+    // running, we need to set the hook on the stored LuaThread.
+    if let Some(thread) = state.gc.threads.get_mut(thread_ref) {
+        thread.hook.hook_mask = mask;
+        thread.hook.base_hook_count = count;
+        thread.hook.hook_count = count;
+        thread.hook.yield_on_hook = mask != 0;
+    }
+
+    Ok(0)
+}
+
+// -------------------------------------------------------------------------
+// T.resume(thread)
+// -------------------------------------------------------------------------
+
+/// Resumes a coroutine thread with no arguments.
+///
+/// Returns `true` on success/yield, or `false, error_message` on error.
+///
+/// Matches PUC-Rio's `coresume` from `ltests.c`.
+pub fn t_resume(state: &mut LuaState) -> LuaResult<u32> {
+    let arg0 = if state.base < state.top {
+        state.stack_get(state.base)
+    } else {
+        return Err(type_error(state, 0, "thread"));
+    };
+
+    let Val::Thread(co_ref) = arg0 else {
+        return Err(type_error(state, 0, "thread"));
+    };
+
+    match coroutine::auxresume(state, co_ref, &[]) {
+        Ok(_results) => {
+            let base = state.base;
+            state.stack_set(base, Val::Bool(true));
+            state.top = base + 1;
+            Ok(1)
+        }
+        Err(error_val) => {
+            let base = state.base;
+            state.stack_set(base, Val::Bool(false));
+            state.stack_set(base + 1, error_val);
+            state.top = base + 2;
+            Ok(2)
+        }
+    }
+}
+
+// -------------------------------------------------------------------------
+// T.d2s(number) -> string (8 bytes, native endian)
+// -------------------------------------------------------------------------
+
+/// Converts an f64 to its 8-byte native-endian binary representation.
+///
+/// Matches PUC-Rio's `double2s` from `ltests.c`.
+pub fn t_d2s(state: &mut LuaState) -> LuaResult<u32> {
+    let arg0 = if state.base < state.top {
+        state.stack_get(state.base)
+    } else {
+        return Err(type_error(state, 0, "number"));
+    };
+
+    let Val::Num(n) = arg0 else {
+        return Err(type_error(state, 0, "number"));
+    };
+
+    let bytes = n.to_ne_bytes();
+    let s = state.gc.intern_string(&bytes);
+    state.stack_set(state.base, Val::Str(s));
+    state.top = state.base + 1;
+    Ok(1)
+}
+
+// -------------------------------------------------------------------------
+// T.s2d(string) -> number
+// -------------------------------------------------------------------------
+
+/// Converts an 8-byte native-endian binary string back to an f64.
+///
+/// Matches PUC-Rio's `s2double` from `ltests.c`.
+pub fn t_s2d(state: &mut LuaState) -> LuaResult<u32> {
+    let arg0 = if state.base < state.top {
+        state.stack_get(state.base)
+    } else {
+        return Err(type_error(state, 0, "string"));
+    };
+
+    let Val::Str(str_ref) = arg0 else {
+        return Err(type_error(state, 0, "string"));
+    };
+
+    let empty: &[u8] = &[];
+    let data = state
+        .gc
+        .string_arena
+        .get(str_ref)
+        .map_or(empty, super::super::vm::string::LuaString::data);
+
+    if data.len() < 8 {
+        return Err(arg_error(state, 1, "string must be at least 8 bytes"));
+    }
+
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&data[..8]);
+    let n = f64::from_ne_bytes(buf);
+
+    state.stack_set(state.base, Val::Num(n));
+    state.top = state.base + 1;
+    Ok(1)
 }
 
 #[cfg(test)]

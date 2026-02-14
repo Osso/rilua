@@ -1189,6 +1189,11 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     // (PUC-Rio: traceexec lines 64-68).
                     if state.hook.hook_mask > MASK_LINE && state.hook.hook_count == 0 {
                         state.hook.hook_count = state.hook.base_hook_count;
+                        if state.hook.yield_on_hook {
+                            state.call_stack[state.ci].saved_pc = npc;
+                            state.yielded_in_hook = true;
+                            return Err(LuaError::Yield(0));
+                        }
                         state.callhook("count", -1)?;
                     }
 
@@ -1204,6 +1209,11 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                             newline != oldline
                         };
                         if should_fire {
+                            if state.hook.yield_on_hook {
+                                state.call_stack[state.ci].saved_pc = npc;
+                                state.yielded_in_hook = true;
+                                return Err(LuaError::Yield(0));
+                            }
                             state.callhook("line", newline)?;
                         }
                     }

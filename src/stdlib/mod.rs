@@ -373,6 +373,10 @@ fn open_test_lib(state: &mut LuaState) -> LuaResult<()> {
     register_table_fn(state, t_table, "int2fb", testlib::t_int2fb)?;
     register_table_fn(state, t_table, "log2", testlib::t_log2)?;
     register_table_fn(state, t_table, "listcode", testlib::t_listcode)?;
+    register_table_fn(state, t_table, "setyhook", testlib::t_setyhook)?;
+    register_table_fn(state, t_table, "resume", testlib::t_resume)?;
+    register_table_fn(state, t_table, "d2s", testlib::t_d2s)?;
+    register_table_fn(state, t_table, "s2d", testlib::t_s2d)?;
 
     register_global_val(state, "T", Val::Table(t_table))?;
     Ok(())

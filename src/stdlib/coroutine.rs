@@ -188,7 +188,7 @@ fn close_thread_upvalues(state: &mut LuaState) -> Vec<(GcRef<Upvalue>, usize)> {
 /// `resume`/`wrap` without stringification.
 ///
 /// Reference: `auxresume` in `lbaselib.c`.
-fn auxresume(
+pub(crate) fn auxresume(
     state: &mut LuaState,
     co_ref: GcRef<LuaThread>,
     args: &[Val],
@@ -267,6 +267,23 @@ fn auxresume(
                 CallResult::Lua => execute::execute(state),
                 CallResult::Rust => Ok(()),
             }
+        })()
+    } else if state.yielded_in_hook {
+        // Resuming from a hook yield: the execute loop yielded directly
+        // at a hook dispatch point (via yield_on_hook). No Rust/Lua hook
+        // function was called, so there's no CI to pop with poscall.
+        // Just restore base and continue execution from the saved PC.
+        state.base = state.call_stack[state.ci].base;
+        if state.top < state.base {
+            state.top = state.base;
+        }
+        state.yielded_in_hook = false;
+
+        (|| -> LuaResult<()> {
+            while state.ci > 0 {
+                execute::execute(state)?;
+            }
+            Ok(())
         })()
     } else {
         // Resuming from yield: the coroutine was suspended inside a Rust
@@ -382,8 +399,12 @@ fn auxresume(
 ///
 /// Reference: `luaB_yield` + `lua_yield` in PUC-Rio Lua 5.1.1.
 pub fn co_yield(state: &mut LuaState) -> LuaResult<u32> {
-    // Check yield boundary: can't yield across C-call boundaries.
-    if state.n_ccalls > 0 {
+    // Check yield boundary: can't yield from the main thread or across
+    // C-call boundaries. PUC-Rio checks nCcalls > baseCcalls; here we
+    // use current_thread == None as the main-thread indicator (the main
+    // thread's initial call always increments nCcalls in PUC-Rio, making
+    // yield impossible there).
+    if state.current_thread.is_none() || state.n_ccalls > 0 {
         return Err(simple_error(
             "attempt to yield across metamethod/C-call boundary".into(),
         ));

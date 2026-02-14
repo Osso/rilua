@@ -240,6 +240,10 @@ pub struct HookState {
     /// Countdown for count hooks. Decremented each instruction; fires at 0.
     /// Reset to `base_hook_count` after firing. Matches PUC-Rio's `hookcount`.
     pub hook_count: i32,
+    /// When true, the execute loop yields directly at hook dispatch points
+    /// instead of calling the hook function. Used by `T.setyhook` to test
+    /// yield-from-hook (PUC-Rio's `lua_yield` inside `lua_sethook` callback).
+    pub yield_on_hook: bool,
 }
 
 impl HookState {
@@ -252,6 +256,7 @@ impl HookState {
             allow_hook: true,
             base_hook_count: 0,
             hook_count: 0,
+            yield_on_hook: false,
         }
     }
 
@@ -324,6 +329,10 @@ pub struct LuaThread {
     pub global: GcRef<Table>,
     /// Per-thread debug hook state.
     pub hook: HookState,
+    /// True if this thread yielded directly from a hook dispatch point
+    /// (via `yield_on_hook`). On resume, this skips `poscall` since no
+    /// Rust/Lua hook function was called — there is no CI to pop.
+    pub yielded_in_hook: bool,
 }
 
 impl LuaThread {
@@ -355,6 +364,7 @@ impl LuaThread {
             status: ThreadStatus::Initial,
             global,
             hook: HookState::new(),
+            yielded_in_hook: false,
         }
     }
 }
@@ -438,6 +448,11 @@ pub struct LuaState {
     /// Per-thread debug hook state for the currently running thread.
     pub hook: HookState,
 
+    /// True if the current thread yielded from a hook dispatch point.
+    /// Set by the execute loop when `yield_on_hook` is active, cleared
+    /// by `auxresume` after handling the hook-yield resume path.
+    pub yielded_in_hook: bool,
+
     /// Saved resumer thread states for nested coroutine execution.
     ///
     /// When `coroutine.resume` swaps a coroutine's state into `LuaState`,
@@ -491,6 +506,7 @@ impl LuaState {
             rng_state: 1, // C standard: default as if srand(1) was called.
             current_thread: None,
             hook: HookState::new(),
+            yielded_in_hook: false,
             saved_threads: Vec::new(),
         }
     }
@@ -686,6 +702,7 @@ impl LuaState {
             status: ThreadStatus::Normal,
             global: self.global,
             hook: self.hook.clone(),
+            yielded_in_hook: self.yielded_in_hook,
         }
     }
 
@@ -714,6 +731,7 @@ impl LuaState {
             self.error_object = thread.error_object.take();
             self.global = thread.global;
             self.hook = std::mem::take(&mut thread.hook);
+            self.yielded_in_hook = thread.yielded_in_hook;
 
             // Reopen upvalues that were closed on suspension.
             // Write their captured values back to the stack slots and
@@ -802,6 +820,7 @@ impl LuaState {
             co_thread.error_object = self.error_object.take();
             co_thread.global = self.global;
             co_thread.hook = std::mem::take(&mut self.hook);
+            co_thread.yielded_in_hook = self.yielded_in_hook;
             co_thread.status = co_status;
         }
 
@@ -818,6 +837,7 @@ impl LuaState {
         self.error_object = resumer.error_object;
         self.global = resumer.global;
         self.hook = resumer.hook;
+        self.yielded_in_hook = resumer.yielded_in_hook;
 
         // Reopen the resumer's suspended upvalues. These were closed before
         // the stack swap to prevent cross-thread reads. Now that the
