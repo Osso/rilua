@@ -7,10 +7,9 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Current: 1271 tests (583 unit, 411 integration, 277 oracle).
+Current: 1293 tests (590 unit, 426 integration, 277 oracle).
 All oracle test cases pass against PUC-Rio 5.1.1. All 5 layers
-are active. PUC-Rio official test suite: 7 of 20 applicable
-files pass (files, gc, locals, math, nextvar, pm, sort).
+are active. PUC-Rio official test suite: 16 of 23 files pass.
 
 ## Test Layers
 
@@ -210,16 +209,102 @@ The PUC-Rio Lua 5.1.1 test suite (`./lua-5.1-tests/`) is the
 compatibility target. These are verbatim test files from the
 official Lua test tarball. See `AGENTS.md` for download instructions.
 
+#### Official Running Modes
+
+Per [lua.org/tests/](https://lua.org/tests/), the test suite has
+three running modes:
+
+1. **Portable mode**: `lua -e"_U=true" all.lua` -- skips
+   system-dependent tests and memory-intensive operations.
+2. **Full mode**: `lua all.lua` -- tests every corner of the
+   language. Requires compiled C libraries in `libs/` subdirectory.
+3. **Internal mode**: Recompile Lua with `ltests.c`/`ltests.h` to
+   enable the T (testC) library for internal VM tests.
+
+#### What `all.lua` Does
+
+The `all.lua` runner is not a simple file list. It modifies the
+runtime environment before running each test:
+
+- Sets GC parameters: `collectgarbage("setstepmul", 180)` and
+  `setpause(190)`.
+- Redefines `dofile` to round-trip every test file through
+  `string.dump` + `loadstring`, implicitly testing binary chunk
+  serialization and deserialization.
+- Wraps `big.lua` in `coroutine.wrap` (the file yields values).
+- `calls.lua` expects a `deep` variable set by `main.lua`.
+- Sets a `debug.sethook` call/return hook during cleanup (line 118).
+
+#### How rilua Runs These Tests
+
+rilua does **not** run `all.lua` directly. Instead, each test file
+is executed individually using two approaches:
+
+**Individual file execution** (primary):
+```bash
+# Run a single test with rilua (from lua-5.1-tests/ directory)
+cd lua-5.1-tests && ../target/release/rilua <test>.lua
+
+# With T module enabled (for tests that use T.listcode, T.hash, etc.)
+RILUA_TEST_LIB=1 ../target/release/rilua <test>.lua
+```
+
+**Comparison script** (`scripts/compare.sh`):
+```bash
+# Compare all test files between PUC-Rio and rilua
+scripts/compare.sh ./lua-5.1.1/src/lua ./target/release/rilua
+```
+
+The comparison script runs each `.lua` file individually (except
+`all.lua`) with a 10-second timeout, reporting PASS/FAIL/TIMEOUT
+for both interpreters. This differs from `all.lua` in that:
+
+- No `string.dump`/`loadstring` round-trip (tests run directly).
+- No GC parameter tuning.
+- No inter-test state (`big.lua` runs standalone, not in a
+  coroutine; `calls.lua` runs without `deep` from `main.lua`).
+- Each test gets a fresh interpreter state.
+
+Running `all.lua` directly is a stretch goal that requires all
+individual tests to pass first, plus:
+- `main.lua` passing (CLI subprocess testing).
+- The `string.dump` round-trip working for all test files.
+- `debug.sethook` for the cleanup hook at the end.
+
+#### T Module
+
+rilua provides a partial implementation of PUC-Rio's internal test
+library (`T` global). Activate it with the `RILUA_TEST_LIB=1`
+environment variable. Implemented functions:
+
+| Function | Description |
+|----------|-------------|
+| `T.querytab` | Returns (array size, hash size) for a table |
+| `T.hash` | Returns hash-part index for a key in a table |
+| `T.int2fb` | Converts integer to float-byte encoding |
+| `T.log2` | Returns floor(log2(x)) |
+| `T.listcode` | Returns list of opcodes for a function |
+
+Not implemented: `T.testC` (C API mini-interpreter), `T.resume`
+(yield hooks), `T.setyhook` (yield-on-count), `T.checkmemory`,
+`T.totalmem`.
+
+Three tests (`api.lua`, `checktable.lua`, `code.lua`) use T
+extensively. When `T` is nil, guarded sections (`if T then ...
+end`) are skipped. `code.lua` passes fully with `RILUA_TEST_LIB=1`.
+
+#### Test Files
+
 | Test File | Area |
 |-----------|------|
-| `all.lua` | Test runner |
-| `api.lua` | C API interactions (requires testC) |
+| `all.lua` | Test runner (chains all tests with dump/undump) |
+| `api.lua` | C API interactions (requires T.testC) |
 | `attrib.lua` | require/package system, assignments, operators |
 | `big.lua` | String overflow, large line counts, table constructs |
 | `calls.lua` | Function calls and returns |
-| `checktable.lua` | Table invariant checker (requires testC) |
+| `checktable.lua` | Table invariant checker (utility functions only) |
 | `closure.lua` | Closures, upvalues, and coroutines |
-| `code.lua` | Code generation, optimizations (requires testC) |
+| `code.lua` | Code generation, optimizations (uses T.listcode) |
 | `constructs.lua` | Syntax, operator priority, language constructs |
 | `db.lua` | Debug library |
 | `errors.lua` | Error handling |
@@ -237,34 +322,30 @@ official Lua test tarball. See `AGENTS.md` for download instructions.
 | `vararg.lua` | Vararg functions |
 | `verybig.lua` | Very large programs |
 
-#### Progressive Test Suite Unlocking
+#### Current Status
 
-PUC-Rio test files become passable as features are implemented.
-This table tracks which test files should pass after each phase
-(see `docs/roadmap.md` for phase definitions).
+16 of 23 files pass (run with `RILUA_TEST_LIB=1`):
 
-| After | Test files expected to pass |
-|-------|-----------------------------|
-| Phase 3 (core VM) | -- (test files require stdlib for assertions) |
-| Phase 5a (base lib) | `literals.lua` (partial), `constructs.lua` (partial) |
-| Phase 4 + 5a | `calls.lua`, `locals.lua`, `vararg.lua` |
-| Phase 4 + 5a | `events.lua`, `errors.lua` |
-| Phase 5b (string lib) | `strings.lua`, `pm.lua` |
-| Phase 5c (table lib) | `sort.lua`, `nextvar.lua` |
-| Phase 5d (math lib) | `math.lua` |
-| Phase 5e (io lib) | `files.lua` |
-| Phase 5g (package lib) | `attrib.lua` |
-| Phase 5h (debug lib) | `db.lua` |
-| Phase 6 (coroutines) | `closure.lua` |
-| Phase 7 (GC) | `gc.lua` |
-| Phase 8c (CLI) | `main.lua` |
-| All phases | `big.lua`, `verybig.lua` |
+**Passing** (15 non-trivial + 1 trivial):
+attrib, checktable, code, constructs, errors, events, files, gc,
+literals, locals, math, nextvar, pm, sort, strings, vararg, verybig.
 
-**testC dependency**: Three test files (`api.lua`, `code.lua`,
-`checktable.lua`) require the `T` global (a C test library compiled
-into PUC-Rio's debug builds). These tests skip or degrade gracefully
-when `T` is nil. rilua will need a Rust equivalent of the testC
-infrastructure to fully exercise these tests.
+**Failing** (5):
+
+| Test | Reason |
+|------|--------|
+| `api.lua` | Requires T.testC mini-interpreter (~500 lines) |
+| `calls.lua` | `load(reader)` eagerly collects reader output instead of streaming |
+| `closure.lua` | T.resume/T.setyhook not implemented (yield hooks) |
+| `db.lua` | `debug.sethook` hooks not implemented |
+| `big.lua` | String overflow section passes; rest needs `coroutine.wrap` context from `all.lua` |
+
+**Always-fail** (2):
+
+| Test | Reason |
+|------|--------|
+| `main.lua` | Tests CLI subprocess behavior (requires `os.execute("lua ...")`) |
+| `big.lua` | Standalone execution cannot match `all.lua`'s coroutine wrapper |
 
 **Compatibility flags**: The PUC-Rio test suite was written with
 default compat options enabled (e.g., `LUA_COMPAT_VARARG` enables

@@ -26,12 +26,19 @@ pub enum Stat {
         span: Span,
     },
     /// `do ... end`
-    Do { body: Block, span: Span },
+    Do {
+        body: Block,
+        span: Span,
+        /// Line number of the closing `end` keyword.
+        end_line: u32,
+    },
     /// `while expr do ... end`
     While {
         condition: Expr,
         body: Block,
         span: Span,
+        /// Line number of the closing `end` keyword.
+        end_line: u32,
     },
     /// `repeat ... until expr`
     Repeat {
@@ -47,6 +54,8 @@ pub enum Stat {
         /// Optional `else` block.
         else_body: Option<Block>,
         span: Span,
+        /// Line number of the closing `end` keyword.
+        end_line: u32,
     },
     /// `for name = start, stop[, step] do ... end`
     NumericFor {
@@ -56,6 +65,8 @@ pub enum Stat {
         step: Option<Expr>,
         body: Block,
         span: Span,
+        /// Line number of the closing `end` keyword.
+        end_line: u32,
     },
     /// `for name1, name2, ... in expr1, expr2, ... do ... end`
     GenericFor {
@@ -66,6 +77,8 @@ pub enum Stat {
         /// Used by codegen for TFORLOOP line info (PUC-Rio `luaK_fixline`).
         iter_line: u32,
         span: Span,
+        /// Line number of the closing `end` keyword.
+        end_line: u32,
     },
     /// `function funcname funcbody`
     FuncDecl {

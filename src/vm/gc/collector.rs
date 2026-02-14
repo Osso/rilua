@@ -514,14 +514,20 @@ impl Gc {
     /// Traverses a gray thread: marks stack values and open upvalues.
     /// Threads are moved to `grayagain` for atomic re-traversal.
     fn traverse_thread(&mut self, r: GcRef<LuaThread>) {
-        let (stack_vals, open_upvals, suspended_upvals, thread_global) = {
+        let (stack_vals, open_upvals, suspended_upvals, thread_global, hook_func) = {
             if let Some(thread) = self.threads.get(r) {
                 let top = thread.top.min(thread.stack.len());
                 let stack: Vec<Val> = thread.stack[..top].to_vec();
                 let upvals: Vec<GcRef<Upvalue>> = thread.open_upvalues.clone();
                 let suspended: Vec<GcRef<Upvalue>> =
                     thread.suspended_upvals.iter().map(|(r, _)| *r).collect();
-                (stack, upvals, suspended, thread.global)
+                (
+                    stack,
+                    upvals,
+                    suspended,
+                    thread.global,
+                    thread.hook.hook_func,
+                )
             } else {
                 return;
             }
@@ -530,6 +536,8 @@ impl Gc {
         self.threads.set_color(r, Color::Black);
 
         self.mark_table(thread_global);
+        // Mark the thread's debug hook function.
+        self.mark_value(hook_func);
         for val in &stack_vals {
             self.mark_value(*val);
         }
@@ -1425,6 +1433,12 @@ impl LuaState {
             self.gc.mark_value(err_val);
         }
 
+        // Mark the debug hook function (PUC-Rio marks this in traversestack).
+        // Without this, a collectgarbage() call from hooked code would sweep
+        // the hook closure.
+        let hook_func = self.hook.hook_func;
+        self.gc.mark_value(hook_func);
+
         // Mark call stack function values.
         for ci_idx in 0..=self.ci {
             if ci_idx < self.call_stack.len() {
@@ -1470,6 +1484,10 @@ impl LuaState {
         if let Some(err_val) = self.error_object {
             self.gc.mark_value(err_val);
         }
+
+        // Mark the debug hook function.
+        let hook_func = self.hook.hook_func;
+        self.gc.mark_value(hook_func);
 
         for ci_idx in 0..=self.ci {
             if ci_idx < self.call_stack.len() {

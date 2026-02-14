@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 16/23 PUC-Rio tests pass, 15 non-trivial) | 1293 total (590 unit + 426 integration + 277 oracle); see `docs/evaluation-2026-02.md` |
+| 9: Compatibility | In progress (9a-9d done; 19/23 PUC-Rio tests pass, 18 non-trivial) | see `docs/evaluation-2026-02.md` |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -159,49 +159,48 @@ All must be resolved before the project is considered complete.
   `luaH_set` always allocates a slot via `newkey`, even for nil values.
   Removing the skip allows nil-assignments to fill hash slots and trigger
   rehash, compacting the table layout to match PUC-Rio.
-- `load()` reader streaming: reads entire input before parsing. PUC-Rio
-  streams incrementally. Reader call count differs. Affects calls.lua.
+- ~~`load()` reader streaming~~: **FIXED**. Lexer now supports streaming
+  reader source via `Source::Reader`. calls.lua passes.
 - String concat overflow: no length check on concatenation result.
-  Affects big.lua.
+  Affects big.lua (line 11).
+- Yield from main thread: `coroutine.yield()` called outside a coroutine
+  gives wrong error message ("cannot resume dead coroutine" instead of
+  "cannot yield"). Affects big.lua (line 359).
 - T module incomplete: only querytab, hash, int2fb, log2, listcode
   implemented. Missing: testC, resume, setyhook, d2s, and ~25 others.
   Affects api.lua, closure.lua.
-- Compiler optimizations: no dead code elimination or peephole
-  optimization. Affects code.lua.
-- Debug hooks: `debug.sethook`/`debug.gethook` are stubs. Affects db.lua.
+- ~~Compiler optimizations~~: **FIXED**. LOADNIL coalescing and constant
+  folding implemented. code.lua passes.
+- ~~Debug hooks~~: **FIXED**. `debug.sethook`/`debug.gethook` implemented
+  with line, call, return, and count hook types. Per-thread hook state
+  on LuaThread. Tail call virtual frames in `debug.getinfo`. Coroutine
+  debug introspection (getinfo, getlocal, setlocal, traceback with
+  thread argument). db.lua passes.
 
-**Debug library (Phase 5h, stubs)**:
-- `debug.sethook` / `debug.gethook` are stubs (no hook execution).
+**Debug library (Phase 5h)**:
 - `debug.debug()` interactive mode is a stub.
 
-### PUC-Rio test suite status (16 / 23 pass, 15 non-trivial)
+### PUC-Rio test suite status (19 / 23 pass, 18 non-trivial)
 
 Re-baselined Feb 14, 2026. Run with `RILUA_TEST_LIB=1` from
 `./lua-5.1-tests/`. See `docs/evaluation-2026-02.md` for full details.
 
 | Category | Count | Files |
 |----------|-------|-------|
-| Pass | 15 | attrib, constructs, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg, verybig |
+| Pass | 18 | attrib, calls, code, constructs, db, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg, verybig |
 | Pass (trivial) | 1 | checktable (defines utility functions only) |
-| Fail (rilua) | 5 | api, calls, closure, code, db |
-| Fail (both) | 2 | big (string concat overflow), main (CLI subprocess infra) |
+| Fail (rilua) | 2 | api, closure |
+| Fail (both) | 2 | big (yield error + string overflow), main (CLI subprocess infra) |
 
 **Fail details**:
 - `api:21`: `T.d2s` not implemented. Requires `T.testC` mini-interpreter
   (~500 lines of C-API simulation). Large effort.
-- `calls:250`: `load(reader)` eagerly collects all reader output before
-  compiling. PUC-Rio uses streaming ZIO, stopping the reader on parse
-  error. Test asserts reader call count (`i==2`), but rilua reads all
-  9 characters before detecting the syntax error.
 - `closure:391`: `T.resume` and `T.setyhook` not implemented. Requires
   T module yield-hook infrastructure for coroutine testing.
-- `code:45`: Compiler optimization expectations. Test asserts dead code
-  elimination (LOADNIL after unconditional jump) that rilua does not
-  perform. Would require peephole optimizer pass.
-- `db:98`: `debug.sethook` line hook not implemented (stub). Hook
-  execution requires VM integration at every line-change point.
-- `big:11`: String concatenation overflow not detected. Concatenating
-  129 copies of 2^25 bytes should error but succeeds.
+- `big:359`: `coroutine.yield()` called from main thread produces wrong
+  error ("cannot resume dead coroutine" instead of "cannot yield").
+  Also, string concatenation overflow not detected (line 11):
+  concatenating 129 copies of 2^25 bytes should error but succeeds.
 
 ### Execution order corrections
 
@@ -1506,7 +1505,7 @@ iterative and overlap.
 | Byte sources | Lua files with non-UTF-8 bytes load and run | 9a | Done |
 | Bytecode I/O | `string.dump` + binary chunk loading work | 9b | Done |
 | Error parity | Error messages match PUC-Rio format | 9c | Done |
-| Bug-free codegen | Known compiler/VM bugs fixed | 9d | -- |
+| Bug-free codegen | Known compiler/VM bugs fixed | 9d | In progress (19/23 pass) |
 | Compatible | All 24 PUC-Rio test files pass | 9e | -- |
 
 ## Chunk Summary

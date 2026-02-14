@@ -651,6 +651,107 @@ fn load_function() {
     assert_eq!(stdout, "42\n");
 }
 
+#[test]
+fn load_function_streaming_char_at_a_time() {
+    // Character-at-a-time reader with global assignment (based on calls.lua).
+    // Tests that streaming works for multi-statement code with upvalues.
+    let (stdout, _, code) = run_rilua(
+        r#"
+        x = "x = 10 + 23; local a = function () x = 'hi' end; return 'done'"
+        local i = 0
+        function read1(x)
+          return function ()
+            collectgarbage()
+            i = i + 1
+            return string.sub(x, i, i)
+          end
+        end
+        local a = assert(load(read1(x), "modname"))
+        assert(a() == "done" and _G.x == 33)
+        assert(debug.getinfo(a).source == "modname")
+        print("ok")
+        "#,
+    );
+    assert_eq!(code, 0, "streaming char-at-a-time load should succeed");
+    assert_eq!(stdout, "ok\n");
+}
+
+#[test]
+fn load_function_streaming_syntax_error_stops_early() {
+    // PUC-Rio calls.lua line 250: reader is called lazily, so a syntax
+    // error at character 2 means i == 2, not the full string length.
+    let (stdout, _, code) = run_rilua(
+        r#"
+        local i = 0
+        function read1(x)
+          return function ()
+            collectgarbage()
+            i = i + 1
+            return string.sub(x, i, i)
+          end
+        end
+        local a, b = load(read1("*a = 123"))
+        assert(not a and type(b) == "string" and i == 2)
+        print("ok")
+        "#,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "ok\n");
+}
+
+#[test]
+fn load_function_reader_error_propagates() {
+    // PUC-Rio calls.lua line 252: reader that errors should return nil + message.
+    let (stdout, _, code) = run_rilua(
+        r#"
+        local a, b = load(function () error("hhi") end)
+        assert(not a and string.find(b, "hhi"))
+        print("ok")
+        "#,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "ok\n");
+}
+
+#[test]
+fn load_function_streaming_nested_functions() {
+    // PUC-Rio calls.lua line 266: nested function definitions via streaming reader.
+    let (stdout, _, code) = run_rilua(
+        r#"
+        local i = 0
+        function read1(x)
+          return function ()
+            collectgarbage()
+            i = i + 1
+            return string.sub(x, i, i)
+          end
+        end
+        local x = [[
+          return function (x)
+            return function (y)
+             return function (z)
+               return x+y+z
+             end
+           end
+          end
+        ]]
+        local a = assert(load(read1(x)))
+        assert(a()(2)(3)(10) == 15)
+        print("ok")
+        "#,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "ok\n");
+}
+
+#[test]
+fn load_function_empty_reader() {
+    // Reader that returns nil immediately should produce an empty chunk.
+    let (stdout, _, code) = run_rilua("local f = load(function() return nil end) print(type(f))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "function\n");
+}
+
 // ---------------------------------------------------------------------------
 // string library tests
 // ---------------------------------------------------------------------------

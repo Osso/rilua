@@ -1100,11 +1100,51 @@ pub fn lua_dofile(state: &mut LuaState) -> LuaResult<u32> {
     Ok(n_results as u32)
 }
 
+/// Calls the Lua reader function once and returns its result as bytes.
+///
+/// Returns `Ok(Some(bytes))` for data, `Ok(None)` for end-of-input (nil
+/// or empty string), or `Err` for reader errors.
+fn call_load_reader(state: &mut LuaState, func_val: Val) -> Result<Option<Vec<u8>>, LuaError> {
+    let call_base = state.top;
+    state.ensure_stack(call_base + 2);
+    state.stack_set(call_base, func_val);
+    state.top = call_base + 1;
+
+    state.call_function(call_base, 1)?;
+
+    let result = state.stack_get(call_base);
+    state.top = call_base;
+
+    match result {
+        Val::Nil => Ok(None),
+        Val::Str(r) => {
+            let chunk = state
+                .gc
+                .string_arena
+                .get(r)
+                .map(|s| s.data().to_vec())
+                .unwrap_or_default();
+            if chunk.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(chunk))
+            }
+        }
+        _ => Err(simple_error(
+            "reader function must return a string".to_string(),
+        )),
+    }
+}
+
 /// Implements Lua's `load(func [, chunkname])`.
 ///
-/// Loads a chunk from a reader function. The reader is called repeatedly
-/// with no arguments; it should return a string each time, or nil to signal
-/// end of input.
+/// Loads a chunk by streaming data from a reader function. The reader is
+/// called on demand as the lexer needs more input, matching PUC-Rio's ZIO
+/// model where `luaZ_fill` calls the reader when the buffer is exhausted.
+///
+/// Binary chunks (starting with `\x1bLua`) are collected eagerly since the
+/// undump module requires contiguous data. Text source is streamed through
+/// the lexer -> parser -> codegen pipeline.
 ///
 /// Reference: `luaB_load` in `lbaselib.c`.
 pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
@@ -1125,71 +1165,148 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
         "=(load)".to_string()
     };
 
-    // Call the reader function repeatedly to collect source bytes.
-    // PUC-Rio uses streaming I/O (ZIO) where the lexer pulls data on demand,
-    // so infinite readers terminate naturally via parse errors. We collect
-    // eagerly, so we cap accumulated size to prevent hanging on readers
-    // that never return nil. The limit (10 MB) exceeds any legitimate Lua
-    // source; reaching it means the reader is likely buggy/infinite.
-    const MAX_LOAD_SIZE: usize = 10 * 1024 * 1024;
-    let mut collected: Vec<u8> = Vec::new();
+    // Save state for error recovery (reader calls may modify the call stack).
     let saved_top = state.top;
     let saved_ci = state.ci;
     let saved_n_ccalls = state.n_ccalls;
     let saved_call_depth = state.call_depth;
-    loop {
-        let call_base = state.top;
-        state.ensure_stack(call_base + 2);
-        state.stack_set(call_base, func_val);
-        state.top = call_base + 1;
 
-        let call_result = state.call_function(call_base, 1);
-        if let Err(e) = call_result {
-            // PUC-Rio's lua_load catches reader errors via protected parser.
-            // Restore call stack state and return nil + error message.
-            state.ci = saved_ci;
-            state.base = state.call_stack[state.ci].base;
-            state.n_ccalls = saved_n_ccalls;
-            state.call_depth = saved_call_depth;
-            if state.ci < crate::vm::state::MAXCALLS {
-                state.ci_overflow = false;
-            }
+    // Call the reader once to get the first chunk. This determines whether
+    // we have binary data (needs eager collection) or text (can stream).
+    let first_chunk = match call_load_reader(state, func_val) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            // Empty input: compile empty source.
+            return load_string_impl(state, b"", &chunk_name);
+        }
+        Err(e) => {
+            // Reader error on first call. Restore state and return nil + msg.
+            restore_state(state, saved_ci, saved_n_ccalls, saved_call_depth);
             state.top = saved_top;
             state.push(Val::Nil);
             let msg = state.gc.intern_string(e.to_string().as_bytes());
             state.push(Val::Str(msg));
             return Ok(2);
         }
+    };
 
-        let result = state.stack_get(call_base);
-        state.top = call_base; // Clean up.
+    // Binary chunk detection: first byte is \x1b (LUA_SIGNATURE prefix).
+    // The undump module requires the complete binary data upfront.
+    if first_chunk.first() == Some(&0x1b) {
+        return load_binary_from_reader(
+            state,
+            func_val,
+            first_chunk,
+            &chunk_name,
+            saved_top,
+            saved_ci,
+            saved_n_ccalls,
+            saved_call_depth,
+        );
+    }
 
-        match result {
-            Val::Nil => break, // End of input.
-            Val::Str(r) => {
-                let chunk = state
-                    .gc
-                    .string_arena
-                    .get(r)
-                    .map(|s| s.data().to_vec())
-                    .unwrap_or_default();
-                if chunk.is_empty() {
-                    break; // Empty string also signals end.
-                }
-                collected.extend_from_slice(&chunk);
+    // Text source: stream through the lexer on demand.
+    //
+    // The reader closure reborrows `state` for its entire lifetime. Once
+    // compilation finishes (or fails), the Lexer and closure are dropped,
+    // releasing the borrow so `state` can be used again.
+    let compile_result = {
+        let state_ref: &mut LuaState = state;
+        let mut reader =
+            move || -> Result<Option<Vec<u8>>, LuaError> { call_load_reader(state_ref, func_val) };
+        let lexer =
+            crate::compiler::lexer::Lexer::from_reader(first_chunk, &mut reader, &chunk_name);
+        crate::compiler::compile_with_lexer(lexer, &chunk_name)
+    };
+    // Borrow of `state` released here; `state` is usable again.
+
+    match compile_result {
+        Ok(proto) => {
+            let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+            crate::patch_string_constants(&mut proto, &mut state.gc);
+            let proto = std::rc::Rc::new(proto);
+
+            let num_upvalues = proto.num_upvalues as usize;
+            let mut lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
+            for _ in 0..num_upvalues {
+                let uv = crate::vm::closure::Upvalue::new_closed(Val::Nil);
+                let uv_ref = state.gc.alloc_upvalue(uv);
+                lua_cl.upvalues.push(uv_ref);
+            }
+            let closure_ref = state
+                .gc
+                .alloc_closure(crate::vm::closure::Closure::Lua(lua_cl));
+            state.push(Val::Function(closure_ref));
+            Ok(1)
+        }
+        Err(e) => {
+            state.push(Val::Nil);
+            let msg_bytes = match &e {
+                crate::error::LuaError::Syntax(syn) => syn.to_lua_bytes(),
+                _ => e.to_string().into_bytes(),
+            };
+            let msg = state.gc.intern_string(&msg_bytes);
+            state.push(Val::Str(msg));
+            Ok(2)
+        }
+    }
+}
+
+/// Eagerly collects remaining binary data from the reader and undumps it.
+///
+/// Binary chunks (precompiled bytecode from `string.dump`) cannot be streamed
+/// because the undump module requires a contiguous byte slice.
+#[allow(clippy::too_many_arguments)]
+fn load_binary_from_reader(
+    state: &mut LuaState,
+    func_val: Val,
+    first_chunk: Vec<u8>,
+    chunk_name: &str,
+    saved_top: usize,
+    saved_ci: usize,
+    saved_n_ccalls: u16,
+    saved_call_depth: u16,
+) -> LuaResult<u32> {
+    const MAX_LOAD_SIZE: usize = 10 * 1024 * 1024;
+    let mut collected = first_chunk;
+
+    loop {
+        match call_load_reader(state, func_val) {
+            Ok(Some(bytes)) => {
+                collected.extend_from_slice(&bytes);
                 if collected.len() > MAX_LOAD_SIZE {
                     break;
                 }
             }
-            _ => {
-                return Err(simple_error(
-                    "reader function must return a string".to_string(),
-                ));
+            Ok(None) => break,
+            Err(e) => {
+                restore_state(state, saved_ci, saved_n_ccalls, saved_call_depth);
+                state.top = saved_top;
+                state.push(Val::Nil);
+                let msg = state.gc.intern_string(e.to_string().as_bytes());
+                state.push(Val::Str(msg));
+                return Ok(2);
             }
         }
     }
 
-    load_string_impl(state, &collected, &chunk_name)
+    load_string_impl(state, &collected, chunk_name)
+}
+
+/// Restores call stack state after a failed reader call or compilation.
+fn restore_state(
+    state: &mut LuaState,
+    saved_ci: usize,
+    saved_n_ccalls: u16,
+    saved_call_depth: u16,
+) {
+    state.ci = saved_ci;
+    state.base = state.call_stack[state.ci].base;
+    state.n_ccalls = saved_n_ccalls;
+    state.call_depth = saved_call_depth;
+    if state.ci < crate::vm::state::MAXCALLS {
+        state.ci_overflow = false;
+    }
 }
 
 /// Shared implementation for loadstring/loadfile/load: compiles source
@@ -1457,26 +1574,30 @@ pub fn lua_setfenv(state: &mut LuaState) -> LuaResult<u32> {
 /// Gets the function value at the given call stack level.
 ///
 /// Level 1 = the direct caller, level 2 = its caller, etc.
+/// Uses tail-call-aware level resolution matching PUC-Rio's
+/// `lua_getstack`.
 fn get_func_at_level(state: &LuaState, level: u32) -> LuaResult<Val> {
-    // Walk back from current ci.
-    let mut ci_idx = state.ci;
-    let mut remaining = level;
+    use crate::stdlib::debug::{StackLevel, resolve_stack_level};
 
-    while remaining > 0 && ci_idx > 0 {
-        ci_idx -= 1;
-        remaining -= 1;
-    }
-
-    if remaining > 0 {
-        return Err(bad_argument(
+    match resolve_stack_level(state, level as usize) {
+        Some(StackLevel::Real(ci_idx)) => {
+            let func_idx = state.call_stack[ci_idx].func;
+            Ok(state.stack_get(func_idx))
+        }
+        Some(StackLevel::TailCall) => {
+            // Tail call virtual frames have no function -- error.
+            Err(bad_argument(
+                "getfenv",
+                1,
+                &format!("invalid level {level}"),
+            ))
+        }
+        None => Err(bad_argument(
             "getfenv",
             1,
             &format!("invalid level {level}"),
-        ));
+        )),
     }
-
-    let func_idx = state.call_stack[ci_idx].func;
-    Ok(state.stack_get(func_idx))
 }
 
 /// Sets the environment of a function value.

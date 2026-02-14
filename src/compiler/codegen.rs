@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::error::{LuaError, LuaResult, SyntaxError};
 
 use super::ast::Block;
+use super::lexer::Lexer;
 use super::parser;
 
 use crate::vm::instructions::{
@@ -190,6 +191,10 @@ pub(crate) struct FuncState {
     pub jpc: i32,
     /// PC of last jump target (avoid bad optimizations).
     pub last_target: i32,
+    /// Cached nil constant index (PUC-Rio's `nilK`). We track this
+    /// separately because `Val::Nil` is also used as a placeholder for
+    /// unresolved string constants in the constant pool.
+    nil_k: Option<u32>,
 }
 
 impl FuncState {
@@ -202,7 +207,8 @@ impl FuncState {
             active_vars: Vec::new(),
             blocks: Vec::new(),
             jpc: NO_JUMP,
-            last_target: 0,
+            last_target: -1,
+            nil_k: None,
         }
     }
 
@@ -278,13 +284,47 @@ impl Compiler {
         let pc = fs.proto.code.len();
         fs.proto.code.push(instr.raw());
         fs.proto.line_info.push(line);
-        fs.last_target = pc as i32;
         pc
     }
 
     /// Emits an iABC instruction. Returns the pc.
     pub(crate) fn emit_abc(&mut self, op: OpCode, a: u32, b: u32, c: u32, line: u32) -> usize {
         self.emit(Instruction::abc(op, a, b, c), line)
+    }
+
+    /// Emits LOADNIL for registers `from..from+n-1` with coalescing.
+    ///
+    /// Matches PUC-Rio's `luaK_nil` (lcode.c:35-51):
+    /// - At function start (pc==0), locals are already nil, so skip.
+    /// - If the previous instruction is LOADNIL and covers adjacent registers,
+    ///   extend its B operand instead of emitting a new instruction.
+    /// - Only coalesces when no jump target has been set at the current pc.
+    pub(crate) fn emit_nil(&mut self, from: u32, n: u32, line: u32) {
+        let fs = self.fs();
+        let pc = fs.pc();
+        let last_target = fs.last_target;
+        if (pc as i32) > last_target {
+            // No jump targets at current position — safe to optimize.
+            if pc == 0 {
+                // Function start: all registers are already nil.
+                return;
+            }
+            let prev = self.get_instruction(pc - 1);
+            if prev.opcode() == OpCode::LoadNil {
+                let pfrom = prev.a();
+                let pto = prev.b();
+                if pfrom <= from && from <= pto + 1 {
+                    // Ranges overlap or are adjacent — extend.
+                    if from + n - 1 > pto {
+                        let mut updated = prev;
+                        updated.set_b(from + n - 1);
+                        self.set_instruction(pc - 1, updated);
+                    }
+                    return;
+                }
+            }
+        }
+        self.emit_abc(OpCode::LoadNil, from, from + n - 1, 0, line);
     }
 
     /// Emits an iABx instruction. Returns the pc.
@@ -533,6 +573,28 @@ impl Compiler {
     /// Adds a number constant to the pool. Returns the constant index.
     pub(crate) fn number_constant(&mut self, n: f64) -> LuaResult<u32> {
         self.add_constant(Val::Num(n))
+    }
+
+    /// Returns the constant index for nil, creating one if needed.
+    /// Matches PUC-Rio's `nilK` (lcode.c:266-272).
+    ///
+    /// Uses a cache to avoid creating duplicate nil constants, since
+    /// `add_constant` cannot deduplicate nil (Val::Nil is used as a
+    /// placeholder for unresolved string constants).
+    pub(crate) fn nil_constant(&mut self) -> LuaResult<u32> {
+        if let Some(idx) = self.fs().nil_k {
+            return Ok(idx);
+        }
+        let fs = self.fs_mut();
+        let idx = fs.proto.constants.len();
+        if idx > MAXARG_BX as usize {
+            return Err(self.syntax_error("constant table overflow"));
+        }
+        fs.proto.constants.push(Val::Nil);
+        #[allow(clippy::cast_possible_truncation)]
+        let idx = idx as u32;
+        self.fs_mut().nil_k = Some(idx);
+        Ok(idx)
     }
 
     // -- Register allocation --
@@ -983,7 +1045,7 @@ impl Compiler {
         self.discharge_vars(e, line);
         match e.kind {
             ExprKind::Nil => {
-                self.emit_abc(OpCode::LoadNil, reg, reg, 0, line);
+                self.emit_nil(reg, 1, line);
             }
             ExprKind::False | ExprKind::True => {
                 let bool_val = u32::from(e.kind == ExprKind::True);
@@ -1035,12 +1097,11 @@ impl Compiler {
             ExprKind::True | ExprKind::False | ExprKind::Nil => {
                 // Small enough to encode: use constant
                 if self.fs().proto.constants.len() <= MAXINDEXRK as usize {
-                    let val = match e.kind {
-                        ExprKind::True => Val::Bool(true),
-                        ExprKind::False => Val::Bool(false),
-                        _ => Val::Nil, // ExprKind::Nil and unreachable branches
+                    let k = match e.kind {
+                        ExprKind::Nil => self.nil_constant()?,
+                        ExprKind::True => self.add_constant(Val::Bool(true))?,
+                        _ => self.add_constant(Val::Bool(false))?, // False
                     };
-                    let k = self.add_constant(val)?;
                     e.info = k as i32;
                     e.kind = ExprKind::K;
                     return Ok(k | BITRK);
@@ -1110,6 +1171,21 @@ impl Compiler {
     }
 
     // -- Conditional jumps --
+
+    /// Compiles a boolean condition expression, returning the false-list.
+    /// Maps to PUC-Rio's `cond()` (lparser.c:963-970).
+    ///
+    /// Converts Nil to False before calling `goiftrue`, so that constant
+    /// nil conditions generate unconditional jumps (no TEST instruction).
+    /// This must NOT be used for `and`/`or` expressions where the actual
+    /// value matters.
+    pub(crate) fn compile_condition(&mut self, e: &mut ExprContext, line: u32) -> LuaResult<i32> {
+        if e.kind == ExprKind::Nil {
+            e.kind = ExprKind::False;
+        }
+        self.goiftrue(e, line)?;
+        Ok(e.f)
+    }
 
     /// Converts expression to "go if true" — jumps to the false list on false.
     /// Maps to PUC-Rio's `luaK_goiftrue`.
@@ -1277,6 +1353,43 @@ impl Compiler {
         Ok(())
     }
 
+    /// Attempts constant folding for arithmetic operations.
+    /// Matches PUC-Rio's `constfolding` (lcode.c:630-653).
+    /// Returns true if the operation was folded (result stored in e1).
+    fn const_fold(op: OpCode, e1: &mut ExprContext, e2: &ExprContext) -> bool {
+        if !e1.is_numeral() || !e2.is_numeral() {
+            return false;
+        }
+        let v1 = e1.nval;
+        let v2 = e2.nval;
+        let r = match op {
+            OpCode::Add => v1 + v2,
+            OpCode::Sub => v1 - v2,
+            OpCode::Mul => v1 * v2,
+            OpCode::Div => {
+                if v2 == 0.0 {
+                    return false;
+                }
+                v1 / v2
+            }
+            OpCode::Mod => {
+                if v2 == 0.0 {
+                    return false;
+                }
+                v1 - (v1 / v2).floor() * v2
+            }
+            OpCode::Pow => v1.powf(v2),
+            OpCode::Unm => -v1,
+            OpCode::Len => return false,
+            _ => return false,
+        };
+        if r.is_nan() {
+            return false;
+        }
+        e1.nval = r;
+        true
+    }
+
     /// Emits an arithmetic/general binary operation.
     /// Maps to PUC-Rio's `codearith`.
     pub(crate) fn code_arith(
@@ -1286,6 +1399,10 @@ impl Compiler {
         e2: &mut ExprContext,
         line: u32,
     ) -> LuaResult<()> {
+        // Try constant folding (PUC-Rio lcode.c:630-653).
+        if Self::const_fold(op, e1, e2) {
+            return Ok(());
+        }
         if op == OpCode::Concat {
             // Concat is special: operands must be in consecutive registers
             self.exp2nextreg(e2, line)?;
@@ -1605,6 +1722,24 @@ pub fn compile(source: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
     Ok(Rc::new(proto))
 }
 
+/// Compiles Lua source from a reader-based lexer into a Proto.
+///
+/// The lexer pulls data on demand from its reader function, matching
+/// PUC-Rio's ZIO model where the lexer drives I/O.
+pub fn compile_with_lexer(lexer: Lexer<'_>, name: &str) -> LuaResult<Rc<Proto>> {
+    let block = parser::parse_with_lexer(lexer)?;
+    let mut compiler = Compiler::new(name);
+
+    // Main chunk: vararg function with 0 params
+    compiler.fs_mut().proto.is_vararg = 2; // VARARG_ISVARARG
+    compiler.fs_mut().proto.num_params = 0;
+
+    compile_block(&mut compiler, &block)?;
+
+    let proto = compiler.finish_main();
+    Ok(Rc::new(proto))
+}
+
 /// Compiles a block of statements inside a new scope.
 fn compile_block_scoped(compiler: &mut Compiler, block: &Block) -> LuaResult<()> {
     compiler.enter_block(false);
@@ -1637,11 +1772,19 @@ fn compile_stat(compiler: &mut Compiler, stat: &super::ast::Stat) -> LuaResult<(
 
         Stat::LocalDecl { names, values, .. } => compile_local_decl(compiler, names, values, line),
 
-        Stat::Do { body, .. } => compile_block_scoped(compiler, body),
+        Stat::Do { end_line, body, .. } => {
+            let result = compile_block_scoped(compiler, body);
+            // PUC-Rio: check_match consumes `end`, updating lastline.
+            compiler.current_line = *end_line;
+            result
+        }
 
         Stat::While {
-            condition, body, ..
-        } => compile_while(compiler, condition, body, line),
+            condition,
+            body,
+            end_line,
+            ..
+        } => compile_while(compiler, condition, body, line, *end_line),
 
         Stat::Repeat {
             body, condition, ..
@@ -1651,8 +1794,9 @@ fn compile_stat(compiler: &mut Compiler, stat: &super::ast::Stat) -> LuaResult<(
             conditions,
             bodies,
             else_body,
+            end_line,
             ..
-        } => compile_if(compiler, conditions, bodies, else_body.as_ref(), line),
+        } => compile_if(compiler, conditions, bodies, else_body.as_ref(), *end_line),
 
         Stat::NumericFor {
             name,
@@ -1660,16 +1804,29 @@ fn compile_stat(compiler: &mut Compiler, stat: &super::ast::Stat) -> LuaResult<(
             stop,
             step,
             body,
+            end_line,
             ..
-        } => compile_numeric_for(compiler, name, start, stop, step.as_ref(), body, line),
+        } => compile_numeric_for(
+            compiler,
+            name,
+            start,
+            stop,
+            step.as_ref(),
+            body,
+            line,
+            *end_line,
+        ),
 
         Stat::GenericFor {
             names,
             iterators,
             body,
             iter_line,
+            end_line,
             ..
-        } => compile_generic_for(compiler, names, iterators, body, line, *iter_line),
+        } => compile_generic_for(
+            compiler, names, iterators, body, line, *iter_line, *end_line,
+        ),
 
         Stat::FuncDecl { name, body, .. } => compile_func_decl(compiler, name, body, line),
 
@@ -1833,19 +1990,26 @@ fn compile_while(
     compiler: &mut Compiler,
     condition: &super::ast::Expr,
     body: &Block,
-    line: u32,
+    _line: u32,
+    end_line: u32,
 ) -> LuaResult<()> {
     let whileinit = compiler.get_label();
     let mut cond_e = compile_expr(compiler, condition)?;
-    compiler.goiftrue(&mut cond_e, line)?;
-    let condexit = cond_e.f;
+    // PUC-Rio: cond() parses the condition, so TEST/JMP use the condition's
+    // lastline. Use condition span line as approximation.
+    let cond_line = condition.span().line;
+    let condexit = compiler.compile_condition(&mut cond_e, cond_line)?;
 
     compiler.enter_block(true); // breakable
     compile_block(compiler, body)?;
-    let jmp = compiler.emit_jump(line);
+    // PUC-Rio: luaK_jump uses lastline from the last token in the body.
+    let jmp = compiler.emit_jump(compiler.current_line);
     compiler.patch_list(jmp as i32, whileinit);
     compiler.leave_block();
     compiler.patch_to_here(condexit);
+
+    // PUC-Rio: check_match consumes `end`, updating lastline.
+    compiler.current_line = end_line;
     Ok(())
 }
 
@@ -1862,8 +2026,9 @@ fn compile_repeat(
     compile_block(compiler, body)?;
 
     let mut cond_e = compile_expr(compiler, condition)?;
-    compiler.goiftrue(&mut cond_e, line)?;
-    let condexit = cond_e.f;
+    // PUC-Rio: cond() uses lastline from parsing the condition expression.
+    let cond_line = condition.span().line;
+    let condexit = compiler.compile_condition(&mut cond_e, cond_line)?;
 
     // Check if the scope block has captured upvalues.
     // PUC-Rio's repeatstat (lparser.c:1020) checks bl2.upval.
@@ -1919,33 +2084,37 @@ fn compile_if(
     conditions: &[super::ast::Expr],
     bodies: &[Block],
     else_body: Option<&Block>,
-    line: u32,
+    end_line: u32,
 ) -> LuaResult<()> {
     let mut escape_list = NO_JUMP;
 
     // First condition + body (the 'if' part)
+    // PUC-Rio: cond() parses the expression, so TEST/JMP use the condition's
+    // lastline, not the `if` keyword's line.
     let mut cond_e = compile_expr(compiler, &conditions[0])?;
-    compiler.goiftrue(&mut cond_e, line)?;
-    let mut flist = cond_e.f;
+    let cond_line = conditions[0].span().line;
+    let mut flist = compiler.compile_condition(&mut cond_e, cond_line)?;
 
     compile_block_scoped(compiler, &bodies[0])?;
 
     // Process elseif clauses
     for i in 1..conditions.len() {
-        let jmp = compiler.emit_jump(line) as i32;
+        // PUC-Rio: luaK_jump uses lastline, which is the last consumed token
+        // from the previous block. compiler.current_line approximates this.
+        let jmp = compiler.emit_jump(compiler.current_line) as i32;
         compiler.concat_jumps(&mut escape_list, jmp);
         compiler.patch_to_here(flist);
 
         let mut cond_e = compile_expr(compiler, &conditions[i])?;
-        compiler.goiftrue(&mut cond_e, line)?;
-        flist = cond_e.f;
+        let cond_line = conditions[i].span().line;
+        flist = compiler.compile_condition(&mut cond_e, cond_line)?;
 
         compile_block_scoped(compiler, &bodies[i])?;
     }
 
     // Else clause
     if let Some(else_block) = else_body {
-        let jmp = compiler.emit_jump(line) as i32;
+        let jmp = compiler.emit_jump(compiler.current_line) as i32;
         compiler.concat_jumps(&mut escape_list, jmp);
         compiler.patch_to_here(flist);
         compile_block_scoped(compiler, else_block)?;
@@ -1954,6 +2123,12 @@ fn compile_if(
     }
 
     compiler.patch_to_here(escape_list);
+
+    // PUC-Rio: check_match consumes `end`, updating lastline to the `end`
+    // keyword's line. Update current_line so subsequent instructions (e.g.,
+    // CLOSE from leave_block) use this line.
+    compiler.current_line = end_line;
+
     Ok(())
 }
 
@@ -1965,6 +2140,7 @@ fn compile_numeric_for(
     step: Option<&super::ast::Expr>,
     body: &Block,
     line: u32,
+    end_line: u32,
 ) -> LuaResult<()> {
     compiler.enter_block(true); // loop scope (breakable)
     let base = u32::from(compiler.fs().free_reg);
@@ -2010,10 +2186,13 @@ fn compile_numeric_for(
     compiler.patch_to_here(prep as i32);
 
     // FORLOOP: increment and loop
+    // PUC-Rio: FORLOOP uses lastline, which is the line of the `end` keyword
+    // (check_match just consumed it). Use end_line.
     let endfor = compiler.emit_asbx(OpCode::ForLoop, base, NO_JUMP, line);
     compiler.patch_jump(endfor, prep + 1);
 
     compiler.leave_block(); // loop scope
+    compiler.current_line = end_line;
     Ok(())
 }
 
@@ -2024,6 +2203,7 @@ fn compile_generic_for(
     body: &Block,
     line: u32,
     iter_line: u32,
+    end_line: u32,
 ) -> LuaResult<()> {
     compiler.enter_block(true); // loop scope (breakable)
     let base = u32::from(compiler.fs().free_reg);
@@ -2073,6 +2253,7 @@ fn compile_generic_for(
 
     let _ = endfor;
     compiler.leave_block();
+    compiler.current_line = end_line;
     Ok(())
 }
 
@@ -2263,8 +2444,9 @@ fn adjust_assign(
             let reg = u32::from(compiler.fs().free_reg);
             #[allow(clippy::cast_possible_truncation)]
             compiler.reserve_regs(extra as u32)?;
-            // LOADNIL: sets R(A)..R(B) to nil
-            compiler.emit_abc(OpCode::LoadNil, reg, reg + extra as u32 - 1, 0, line);
+            // LOADNIL with coalescing (PUC-Rio luaK_nil)
+            #[allow(clippy::cast_possible_truncation)]
+            compiler.emit_nil(reg, extra as u32, line);
         }
     }
     Ok(())
@@ -2766,10 +2948,13 @@ mod tests {
     #[test]
     fn discharge_nil() {
         let mut compiler = Compiler::new("test");
+        // Emit a dummy instruction so we're not at pc==0
+        // (at pc==0, LOADNIL is elided because registers start as nil).
+        compiler.emit_abc(OpCode::Return, 0, 1, 0, 1);
         let mut e = ExprContext::new(ExprKind::Nil, 0);
         let reg = compiler.alloc_reg().unwrap();
         compiler.discharge2reg(&mut e, reg, 1);
-        let instr = compiler.get_instruction(0);
+        let instr = compiler.get_instruction(1);
         assert_eq!(instr.opcode(), OpCode::LoadNil);
     }
 
@@ -2834,9 +3019,10 @@ mod tests {
     #[test]
     fn compile_return_nil() {
         let proto = compile(b"return nil", "test").unwrap();
-        // Should have: LOADNIL, RETURN, RETURN
+        // At pc==0, LOADNIL is elided (registers start as nil).
+        // First instruction should be RETURN.
         let instr = Instruction::from_raw(proto.code[0]);
-        assert_eq!(instr.opcode(), OpCode::LoadNil);
+        assert_eq!(instr.opcode(), OpCode::Return);
     }
 
     #[test]
@@ -2884,8 +3070,10 @@ mod tests {
     fn compile_local_nil_init() {
         let proto = compile(b"local x, y", "test").unwrap();
         let ops = opcodes(&proto);
-        // Locals without init get nil (LOADNIL)
-        assert!(ops.contains(&OpCode::LoadNil));
+        // At function start, locals are already nil so LOADNIL is elided.
+        // Only RETURN should remain.
+        assert!(!ops.contains(&OpCode::LoadNil));
+        assert!(ops.contains(&OpCode::Return));
     }
 
     #[test]
@@ -2996,7 +3184,8 @@ mod tests {
 
     #[test]
     fn compile_arithmetic() {
-        let proto = compile(b"return 1 + 2", "test").unwrap();
+        // 1 + 2 is constant-folded to 3, so use a local to prevent folding.
+        let proto = compile(b"local a; return a + 2", "test").unwrap();
         let ops = opcodes(&proto);
         assert!(ops.contains(&OpCode::Add));
     }

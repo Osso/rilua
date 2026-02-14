@@ -31,9 +31,9 @@ struct FuncScope {
 }
 
 /// Parser state.
-pub struct Parser {
+pub struct Parser<'a> {
     /// Lexer providing the token stream.
-    lexer: Lexer,
+    lexer: Lexer<'a>,
     /// Current token.
     current: Token,
     /// Span of the current token.
@@ -56,10 +56,17 @@ pub struct Parser {
 /// PUC-Rio uses `LUAI_MAXCCALLS` (200) for this.
 const MAX_SYNTAX_LEVELS: u32 = 200;
 
-impl Parser {
+impl<'a> Parser<'a> {
     /// Creates a new parser for the given source bytes.
     pub fn new(source: &[u8], name: &str) -> LuaResult<Self> {
-        let mut lexer = Lexer::new(source, name);
+        let lexer = Lexer::new(source, name);
+        Self::from_lexer(lexer)
+    }
+
+    /// Creates a new parser from a pre-built lexer.
+    ///
+    /// Used by `compile_with_reader` to pass a reader-based lexer.
+    pub fn from_lexer(mut lexer: Lexer<'a>) -> LuaResult<Self> {
         let (current, span) = lexer.next()?;
         Ok(Self {
             lexer,
@@ -124,7 +131,7 @@ impl Parser {
     }
 
     /// Checks if a name reference creates upvalues in the function scope chain.
-    /// Mirrors PUC-Rio's `singlevar` → `indexupvalue` cascade.
+    /// Mirrors PUC-Rio's `singlevar` -> `indexupvalue` cascade.
     /// When a name is found in a parent scope, all intermediate function
     /// scopes gain an upvalue entry.
     fn check_name_upvalue(&mut self, name: &str) -> LuaResult<()> {
@@ -162,7 +169,7 @@ impl Parser {
             }
         }
 
-        // If not found anywhere, it's a global — no upvalue created.
+        // If not found anywhere, it's a global -- no upvalue created.
         let Some(found_level) = found_at else {
             return Ok(());
         };
@@ -388,7 +395,7 @@ impl Parser {
             }
         }
 
-        // Restore local variable state (PUC-Rio: leaveblock → removevars).
+        // Restore local variable state (PUC-Rio: leaveblock -> removevars).
         if let Some((count, names_len)) = saved_locals {
             if let Some(scope) = self.func_scopes.last_mut() {
                 scope.local_count = count;
@@ -446,6 +453,9 @@ impl Parser {
             None
         };
 
+        // Capture the `end` keyword's line before consuming it.
+        // PUC-Rio: lastline is updated when check_match consumes `end`.
+        let end_line = self.span.line;
         self.check_match(&Token::End, &Token::If, open_line)?;
 
         Ok(Stat::If {
@@ -453,6 +463,7 @@ impl Parser {
             bodies,
             else_body,
             span,
+            end_line,
         })
     }
 
@@ -466,12 +477,14 @@ impl Parser {
         self.loop_depth += 1;
         let body = self.parse_block()?;
         self.loop_depth -= 1;
+        let end_line = self.span.line;
         self.check_match(&Token::End, &Token::While, open_line)?;
 
         Ok(Stat::While {
             condition,
             body,
             span,
+            end_line,
         })
     }
 
@@ -481,9 +494,14 @@ impl Parser {
         let open_line = span.line;
 
         let body = self.parse_block()?;
+        let end_line = self.span.line;
         self.check_match(&Token::End, &Token::Do, open_line)?;
 
-        Ok(Stat::Do { body, span })
+        Ok(Stat::Do {
+            body,
+            span,
+            end_line,
+        })
     }
 
     fn parse_for(&mut self, span: Span) -> LuaResult<Stat> {
@@ -520,6 +538,7 @@ impl Parser {
         self.loop_depth += 1;
         let body = self.parse_block()?;
         self.loop_depth -= 1;
+        let end_line = self.span.line;
         self.check_match(&Token::End, &Token::For, open_line)?;
 
         Ok(Stat::NumericFor {
@@ -529,6 +548,7 @@ impl Parser {
             step,
             body,
             span,
+            end_line,
         })
     }
 
@@ -555,6 +575,7 @@ impl Parser {
         self.loop_depth += 1;
         let body = self.parse_block()?;
         self.loop_depth -= 1;
+        let end_line = self.span.line;
         self.check_match(&Token::End, &Token::For, open_line)?;
 
         Ok(Stat::GenericFor {
@@ -562,6 +583,7 @@ impl Parser {
             iterators,
             body,
             iter_line,
+            end_line,
             span,
         })
     }
@@ -881,7 +903,7 @@ impl Parser {
             Token::Name(_) => {
                 let (tok, _) = self.advance()?;
                 if let Token::Name(name) = tok {
-                    // Check for upvalue limit (PUC-Rio: singlevar → indexupvalue).
+                    // Check for upvalue limit (PUC-Rio: singlevar -> indexupvalue).
                     self.check_name_upvalue(&name)?;
                     Ok(Expr::Name(name, span))
                 } else {
@@ -1116,6 +1138,12 @@ fn binary_priority(op: BinOp) -> (u8, u8) {
 /// Parses a Lua source string into an AST block.
 pub fn parse(source: &[u8], name: &str) -> LuaResult<Block> {
     let mut parser = Parser::new(source, name)?;
+    parser.parse_chunk()
+}
+
+/// Parses Lua source from a pre-built lexer into an AST block.
+pub fn parse_with_lexer(lexer: Lexer<'_>) -> LuaResult<Block> {
+    let mut parser = Parser::from_lexer(lexer)?;
     parser.parse_chunk()
 }
 

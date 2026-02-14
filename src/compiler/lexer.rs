@@ -5,15 +5,28 @@
 //! hex, scientific), strings (short with escapes, long), and comments.
 //!
 //! Line tracking handles all four newline variants: `\n`, `\r`, `\r\n`, `\n\r`.
+//!
+//! Supports two input modes:
+//! - **Byte slice**: the entire source is available upfront (`Lexer::new`)
+//! - **Reader function**: data is pulled on demand (`Lexer::from_reader`),
+//!   matching PUC-Rio's ZIO model where `luaZ_fill` calls the reader when
+//!   the buffer is exhausted.
 
 use crate::error::{LuaError, LuaResult, SyntaxError};
 use crate::vm::execute::{libc_strtod, locale_decimal_point};
 
 use super::token::{RESERVED_WORDS, Span, Token};
 
+/// Reader function type for streaming input.
+///
+/// Called when the lexer's buffer is exhausted and more data is needed.
+/// Returns `Ok(Some(data))` for new data, `Ok(None)` for end-of-input,
+/// or `Err(e)` for reader errors.
+type ReaderFn<'a> = Box<dyn FnMut() -> Result<Option<Vec<u8>>, LuaError> + 'a>;
+
 /// Lexer state for tokenizing Lua source code.
-pub struct Lexer {
-    /// Source bytes.
+pub struct Lexer<'a> {
+    /// Source bytes (grows when using a reader function).
     source: Vec<u8>,
     /// Current read position.
     pos: usize,
@@ -28,9 +41,16 @@ pub struct Lexer {
     /// Raw source text of the last-scanned token (PUC-Rio: `luaZ_buffer(ls->buff)`).
     /// Populated for Number tokens where the lexeme differs from Display.
     last_token_text: String,
+    /// Reader function for streaming input (None for byte slice mode).
+    reader: Option<ReaderFn<'a>>,
+    /// Error stored from a failed reader call.
+    /// Checked at the Eos point in `scan()` to propagate reader errors.
+    reader_error: Option<LuaError>,
+    /// Whether the reader has signaled end-of-input.
+    reader_exhausted: bool,
 }
 
-impl Lexer {
+impl<'a> Lexer<'a> {
     /// Creates a new lexer for the given source bytes.
     ///
     /// Source is accepted as `&[u8]` because Lua files may contain arbitrary
@@ -54,6 +74,37 @@ impl Lexer {
             source_name: name.to_string(),
             lookahead: None,
             last_token_text: String::new(),
+            reader: None,
+            reader_error: None,
+            reader_exhausted: false,
+        }
+    }
+
+    /// Creates a new lexer that pulls data on demand from a reader function.
+    ///
+    /// The reader is called whenever the internal buffer is exhausted,
+    /// matching PUC-Rio's ZIO model. The initial buffer contains `first_chunk`
+    /// (which may be empty).
+    ///
+    /// No shebang handling is performed for reader-based lexers, matching
+    /// PUC-Rio where shebang skipping is done by `luaL_loadfile`, not
+    /// `lua_load`.
+    pub fn from_reader(
+        first_chunk: Vec<u8>,
+        reader: impl FnMut() -> Result<Option<Vec<u8>>, LuaError> + 'a,
+        name: &str,
+    ) -> Self {
+        Self {
+            source: first_chunk,
+            pos: 0,
+            line: 1,
+            column: 1,
+            source_name: name.to_string(),
+            lookahead: None,
+            last_token_text: String::new(),
+            reader: Some(Box::new(reader)),
+            reader_error: None,
+            reader_exhausted: false,
         }
     }
 
@@ -76,23 +127,100 @@ impl Lexer {
         &self.last_token_text
     }
 
-    // -- Character primitives --
+    // -- Buffer management --
 
-    fn peek(&self) -> Option<u8> {
-        self.source.get(self.pos).copied()
+    /// Attempts to refill the buffer from the reader function.
+    ///
+    /// Returns `true` if data was added, `false` if the reader returned
+    /// None (end-of-input) or an error. Errors are stored in `reader_error`
+    /// for later retrieval.
+    fn refill(&mut self) -> bool {
+        if self.reader_exhausted {
+            return false;
+        }
+        let Some(reader) = self.reader.as_mut() else {
+            return false;
+        };
+        match reader() {
+            Ok(Some(data)) => {
+                if data.is_empty() {
+                    // Empty chunk signals end of input (PUC-Rio behavior).
+                    self.reader_exhausted = true;
+                    false
+                } else {
+                    self.source.extend_from_slice(&data);
+                    true
+                }
+            }
+            Ok(None) => {
+                self.reader_exhausted = true;
+                false
+            }
+            Err(e) => {
+                self.reader_error = Some(e);
+                self.reader_exhausted = true;
+                false
+            }
+        }
     }
 
-    fn peek_ahead(&self, offset: usize) -> Option<u8> {
-        self.source.get(self.pos + offset).copied()
+    /// Ensures at least `needed` bytes are available from `self.pos`.
+    ///
+    /// Calls `refill()` repeatedly until enough data is buffered or the
+    /// reader is exhausted. Returns `true` if the requested amount is
+    /// available.
+    fn ensure_available(&mut self, needed: usize) -> bool {
+        while self.pos + needed > self.source.len() {
+            if !self.refill() {
+                return false;
+            }
+        }
+        true
+    }
+
+    // -- Character primitives --
+
+    fn peek(&mut self) -> Option<u8> {
+        if self.pos < self.source.len() {
+            return Some(self.source[self.pos]);
+        }
+        // Try to get more data from reader.
+        if self.refill() && self.pos < self.source.len() {
+            Some(self.source[self.pos])
+        } else {
+            None
+        }
+    }
+
+    fn peek_ahead(&mut self, offset: usize) -> Option<u8> {
+        let target = self.pos + offset;
+        if target < self.source.len() {
+            return Some(self.source[target]);
+        }
+        // Try to get enough data from reader.
+        if self.ensure_available(offset + 1) {
+            Some(self.source[self.pos + offset])
+        } else {
+            None
+        }
     }
 
     fn advance(&mut self) -> Option<u8> {
-        let ch = self.source.get(self.pos).copied()?;
+        // Ensure at least one byte is available.
+        if self.pos >= self.source.len() && !self.refill() {
+            return None;
+        }
+        let ch = self.source[self.pos];
         self.pos += 1;
         if ch == b'\n' || ch == b'\r' {
             // Don't update column here; newlines are handled by inc_line()
         } else {
             self.column += 1;
+        }
+        // Eagerly refill when buffer is exhausted (matches PUC-Rio's next(ls)
+        // which always reads the next char after consuming one).
+        if self.reader.is_some() && self.pos >= self.source.len() {
+            self.refill();
         }
         Some(ch)
     }
@@ -162,11 +290,26 @@ impl Lexer {
     /// Main scan loop: skip whitespace/comments, then dispatch on character.
     fn scan(&mut self) -> LuaResult<(Token, Span)> {
         loop {
+            // Check for stored reader error before attempting to scan.
+            if let Some(err) = self.reader_error.take() {
+                return Err(err);
+            }
+
             self.skip_whitespace();
+
+            // Check again after whitespace skipping (may have triggered refill).
+            if let Some(err) = self.reader_error.take() {
+                return Err(err);
+            }
+
             let span = self.current_span();
             let token_start = self.pos;
 
             let Some(ch) = self.peek() else {
+                // End of input. If a reader error caused this, propagate it.
+                if let Some(err) = self.reader_error.take() {
+                    return Err(err);
+                }
                 return Ok((Token::Eos, span));
             };
 
@@ -530,8 +673,8 @@ impl Lexer {
     /// Returns >= 0 for valid `[=*[` (number of `=` signs),
     /// -1 for `[=*` not followed by `[` (invalid delimiter),
     /// -2 for just `[` (single bracket, not a long string).
-    fn count_sep(&self) -> i32 {
-        debug_assert_eq!(self.peek(), Some(b'['));
+    fn count_sep(&mut self) -> i32 {
+        debug_assert_eq!(self.source.get(self.pos).copied(), Some(b'['));
         let mut i = 1;
         let mut count = 0;
         while self.peek_ahead(i) == Some(b'=') {
@@ -605,7 +748,7 @@ impl Lexer {
     }
 
     /// Checks if the current position has a closing long bracket `]=*]` with `sep` equals signs.
-    fn check_closing_long_bracket(&self, sep: i32) -> bool {
+    fn check_closing_long_bracket(&mut self, sep: i32) -> bool {
         if self.peek() != Some(b']') {
             return false;
         }
@@ -1003,5 +1146,85 @@ mod tests {
     #[test]
     fn invalid_escape() {
         assert!(lex_tokens(r#""\z""#).is_err());
+    }
+
+    // -- Reader-based lexer tests --
+
+    #[test]
+    fn reader_basic() {
+        let chunks = vec![b"x ".to_vec(), b"= ".to_vec(), b"1".to_vec()];
+        let mut idx = 0;
+        let reader = move || -> Result<Option<Vec<u8>>, LuaError> {
+            if idx < chunks.len() {
+                let chunk = chunks[idx].clone();
+                idx += 1;
+                Ok(Some(chunk))
+            } else {
+                Ok(None)
+            }
+        };
+        let mut lexer = Lexer::from_reader(Vec::new(), reader, "test");
+        let (t1, _) = lexer.next().unwrap();
+        assert_eq!(t1, Token::Name("x".into()));
+        let (t2, _) = lexer.next().unwrap();
+        assert_eq!(t2, Token::Char(b'='));
+        let (t3, _) = lexer.next().unwrap();
+        assert_eq!(t3, Token::Number(1.0));
+        let (t4, _) = lexer.next().unwrap();
+        assert_eq!(t4, Token::Eos);
+    }
+
+    #[test]
+    fn reader_one_byte_at_a_time() {
+        let source = b"x = 1";
+        let mut pos = 0;
+        let reader = move || -> Result<Option<Vec<u8>>, LuaError> {
+            if pos < source.len() {
+                let byte = vec![source[pos]];
+                pos += 1;
+                Ok(Some(byte))
+            } else {
+                Ok(None)
+            }
+        };
+        let mut lexer = Lexer::from_reader(Vec::new(), reader, "test");
+        let (t1, _) = lexer.next().unwrap();
+        assert_eq!(t1, Token::Name("x".into()));
+        let (t2, _) = lexer.next().unwrap();
+        assert_eq!(t2, Token::Char(b'='));
+        let (t3, _) = lexer.next().unwrap();
+        assert_eq!(t3, Token::Number(1.0));
+    }
+
+    #[test]
+    fn reader_error_propagates() {
+        let reader = move || -> Result<Option<Vec<u8>>, LuaError> {
+            Err(LuaError::Runtime(crate::error::RuntimeError {
+                message: "reader failed".to_string(),
+                level: 0,
+                traceback: vec![],
+            }))
+        };
+        let mut lexer = Lexer::from_reader(Vec::new(), reader, "test");
+        let result = lexer.next();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reader_empty_chunk_signals_eof() {
+        let mut called = false;
+        let reader = move || -> Result<Option<Vec<u8>>, LuaError> {
+            if !called {
+                called = true;
+                Ok(Some(b"x".to_vec()))
+            } else {
+                Ok(Some(Vec::new())) // empty chunk = eof
+            }
+        };
+        let mut lexer = Lexer::from_reader(Vec::new(), reader, "test");
+        let (t1, _) = lexer.next().unwrap();
+        assert_eq!(t1, Token::Name("x".into()));
+        let (t2, _) = lexer.next().unwrap();
+        assert_eq!(t2, Token::Eos);
     }
 }

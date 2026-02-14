@@ -212,7 +212,17 @@ pub fn str_rep(state: &mut LuaState) -> LuaResult<u32> {
         let r = state.gc.intern_string(b"");
         state.push(Val::Str(r));
     } else {
-        let mut buf = Vec::with_capacity(s.len() * n as usize);
+        let total = s.len().saturating_mul(n as usize);
+        // PUC-Rio 32-bit limit: ~4GB. Use same limit for cross-platform consistency.
+        const MAX_STRING_SIZE: usize = (u32::MAX - 2) as usize;
+        if total > MAX_STRING_SIZE {
+            return Err(LuaError::Runtime(crate::RuntimeError {
+                message: "string length overflow".to_string(),
+                level: 0,
+                traceback: vec![],
+            }));
+        }
+        let mut buf = Vec::with_capacity(total);
         for _ in 0..n {
             buf.extend_from_slice(&s);
         }

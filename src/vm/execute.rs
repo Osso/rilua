@@ -20,7 +20,9 @@ use super::gc::arena::GcRef;
 use super::instructions::{Instruction, LFIELDS_PER_FLUSH, OpCode, index_k, is_k};
 use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
 use super::proto::{Proto, VARARG_ISVARARG, VARARG_NEEDSARG};
-use super::state::{Gc, LUA_MINSTACK, LuaState, MAXCALLS, MAXCCALLS};
+use super::state::{
+    Gc, LUA_MINSTACK, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET, MAXCALLS, MAXCCALLS,
+};
 use super::table::Table;
 use super::value::{Userdata, Val};
 
@@ -359,6 +361,55 @@ impl LuaState {
         result
     }
 
+    /// Invokes the active hook function with (event_name, line_or_nil).
+    ///
+    /// Matches PUC-Rio's `luaD_callhook()` in `ldo.c`:
+    /// - Saves and restores `top` and `ci.top`
+    /// - Sets `allow_hook = false` to prevent recursive hook calls
+    /// - Pushes the hook function, event string, and line number (or nil)
+    /// - Calls the hook with 2 arguments and 0 results
+    pub fn callhook(&mut self, event: &str, line: i32) -> LuaResult<()> {
+        if !self.hook.allow_hook {
+            return Ok(());
+        }
+        let hook_func = self.hook.hook_func;
+        if hook_func.is_nil() {
+            return Ok(());
+        }
+
+        // Save top and ci.top (hook may modify the stack).
+        let saved_top = self.top;
+        let saved_ci_top = self.call_stack[self.ci].top;
+
+        // Ensure minimum stack for the hook call.
+        self.ensure_stack(self.top + LUA_MINSTACK);
+        self.call_stack[self.ci].top = self.top + LUA_MINSTACK;
+
+        // Disable hooks during the callback (PUC-Rio: L->allowhook = 0).
+        self.hook.allow_hook = false;
+
+        let call_base = self.top;
+        let event_ref = self.gc.intern_string(event.as_bytes());
+        self.stack_set(call_base, hook_func);
+        self.stack_set(call_base + 1, Val::Str(event_ref));
+        if line >= 0 {
+            #[allow(clippy::cast_precision_loss)]
+            self.stack_set(call_base + 2, Val::Num(f64::from(line)));
+        } else {
+            self.stack_set(call_base + 2, Val::Nil);
+        }
+        self.top = call_base + 3;
+
+        let result = self.call_function(call_base, 0);
+
+        // Restore state (PUC-Rio: L->allowhook = 1, restore top/ci.top).
+        self.hook.allow_hook = true;
+        self.call_stack[self.ci].top = saved_ci_top;
+        self.top = saved_top;
+
+        result
+    }
+
     /// Sets up a call frame for the function at `func_idx`.
     ///
     /// For Lua functions: pushes a new CallInfo and returns `CallResult::Lua`.
@@ -507,6 +558,15 @@ impl LuaState {
                 self.push_ci(ci);
                 self.base = new_base;
 
+                // Fire call hook (PUC-Rio: luaD_precall lines 299-303).
+                // Hooks expect savedpc to point past the first instruction.
+                if self.hook.hook_mask & MASK_CALL != 0 {
+                    self.call_stack[self.ci].saved_pc += 1;
+                    self.callhook("call", -1)?;
+                    self.call_stack[self.ci].saved_pc =
+                        self.call_stack[self.ci].saved_pc.saturating_sub(1);
+                }
+
                 Ok(CallResult::Lua)
             }
             Closure::Rust(rust_cl) => {
@@ -523,6 +583,11 @@ impl LuaState {
                 // Note: n_ccalls is NOT incremented here. The C-call boundary
                 // counter is managed by call_function() (the luaD_call equivalent).
                 // This matches PUC-Rio where luaD_precall does not touch nCcalls.
+
+                // Fire call hook (PUC-Rio: luaD_precall lines 316-317).
+                if self.hook.hook_mask & MASK_CALL != 0 {
+                    self.callhook("call", -1)?;
+                }
 
                 // Execute the Rust function.
                 let n_results = func(self)?;
@@ -541,7 +606,22 @@ impl LuaState {
     /// `first_result` is the stack index of the first return value.
     /// Returns `true` if the caller is a Lua function (execution should
     /// continue in the caller's frame).
-    pub fn poscall(&mut self, first_result: usize) -> bool {
+    pub fn poscall(&mut self, mut first_result: usize) -> bool {
+        // Fire return hook before unwinding (PUC-Rio: luaD_poscall line 346).
+        // callrethooks fires LUA_HOOKRET, then LUA_HOOKTAILRET for each
+        // elided tail call. The hook may reallocate the stack, so
+        // first_result is saved/restored as an offset.
+        if self.hook.hook_mask & MASK_RET != 0 {
+            let fr_offset = first_result;
+            let _ = self.callhook("return", -1);
+            // Handle tail return hooks (PUC-Rio: callrethooks lines 335-336).
+            let tail_calls = self.call_stack[self.ci].tail_calls;
+            for _ in 0..tail_calls {
+                let _ = self.callhook("tail return", -1);
+            }
+            first_result = fr_offset;
+        }
+
         // Pop the current CallInfo.
         let ci_func = self.call_stack[self.ci].func;
         let wanted = self.call_stack[self.ci].num_results;
@@ -970,8 +1050,21 @@ fn vm_concat(
             while n < total && is_string_or_number(state.stack_get(top - n - 1), &state.gc) {
                 n += 1;
             }
+            // Check total length before allocating (PUC-Rio lvm.c:295).
+            let mut tl: usize = 0;
+            for i in (0..n).rev() {
+                let l = val_string_len(state.stack_get(top - 1 - i), &state.gc);
+                if l >= MAX_STRING_SIZE - tl {
+                    return Err(runtime_error(
+                        proto,
+                        pc,
+                        "string length overflow".to_string(),
+                    ));
+                }
+                tl += l;
+            }
             // Collect all n values into a single buffer.
-            let mut buffer = Vec::new();
+            let mut buffer = Vec::with_capacity(tl);
             for i in (0..n).rev() {
                 let val = state.stack_get(top - 1 - i);
                 val_to_string_bytes(val, &state.gc, &mut buffer);
@@ -985,6 +1078,11 @@ fn vm_concat(
     Ok(())
 }
 
+/// Maximum string size. PUC-Rio uses MAX_SIZET which is ~4GB on 32-bit.
+/// We use u32::MAX - 2 to match PUC-Rio 32-bit behavior on all platforms,
+/// ensuring the PUC-Rio test suite passes regardless of host word size.
+const MAX_STRING_SIZE: usize = (u32::MAX - 2) as usize;
+
 /// Check if a value is a string or number (coercible for concatenation).
 fn is_string_or_number(val: Val, gc: &Gc) -> bool {
     matches!(val, Val::Num(_)) || {
@@ -993,6 +1091,15 @@ fn is_string_or_number(val: Val, gc: &Gc) -> bool {
         } else {
             false
         }
+    }
+}
+
+/// Returns the byte length of a value when coerced to string for concatenation.
+fn val_string_len(val: Val, gc: &Gc) -> usize {
+    match val {
+        Val::Str(r) => gc.string_arena.get(r).map_or(0, |s| s.data().len()),
+        Val::Num(_) => format!("{val}").len(),
+        _ => 0,
     }
 }
 
@@ -1066,8 +1173,56 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 return Err(runtime_error(&proto, pc, "bytecode overrun".to_string()));
             }
 
+            // Read instruction and advance pc BEFORE hook check.
+            // PUC-Rio: `const Instruction i = *pc++;` then traceexec(L, pc).
+            // After this, pc points one past the instruction being executed,
+            // matching PUC-Rio's convention where pcRel(pc, p) = (pc - code) - 1
+            // gives the current instruction's index.
             let instr = Instruction::from_raw(proto.code[pc]);
             pc += 1;
+
+            // Hook check: line and count hooks (PUC-Rio: lvm.c lines 388-396).
+            // The decrement runs every instruction when line or count hooks
+            // are set. traceexec fires when counter reaches zero OR line
+            // hooks are active.
+            if (state.hook.hook_mask & (MASK_LINE | MASK_COUNT)) != 0 {
+                state.hook.hook_count -= 1;
+                if state.hook.hook_count == 0 || (state.hook.hook_mask & MASK_LINE) != 0 {
+                    // npc = index of the current instruction (pc was advanced).
+                    // Equivalent to PUC-Rio's pcRel(pc, p) = (pc - code) - 1.
+                    let npc = pc - 1;
+
+                    // Save pc for the hook callback (getinfo reads saved_pc).
+                    let old_pc = state.call_stack[state.ci].saved_pc;
+                    state.call_stack[state.ci].saved_pc = pc;
+
+                    // Count hook: fire when hookcount reaches zero
+                    // (PUC-Rio: traceexec lines 64-68).
+                    if state.hook.hook_mask > MASK_LINE && state.hook.hook_count == 0 {
+                        state.hook.hook_count = state.hook.base_hook_count;
+                        state.callhook("count", -1)?;
+                    }
+
+                    // Line hook: fire on new function entry, jump back,
+                    // or new source line (PUC-Rio: traceexec lines 70-78).
+                    if (state.hook.hook_mask & MASK_LINE) != 0 {
+                        #[allow(clippy::cast_possible_wrap)]
+                        let newline = proto.line_info.get(npc).copied().unwrap_or(0) as i32;
+                        let should_fire = npc == 0 || pc <= old_pc || {
+                            let old_npc = old_pc.wrapping_sub(1);
+                            #[allow(clippy::cast_possible_wrap)]
+                            let oldline = proto.line_info.get(old_npc).copied().unwrap_or(0) as i32;
+                            newline != oldline
+                        };
+                        if should_fire {
+                            state.callhook("line", newline)?;
+                        }
+                    }
+
+                    // Hook may have changed base via coroutine ops.
+                    base = state.base;
+                }
+            }
 
             let op = instr.opcode();
             let a = instr.a() as usize;

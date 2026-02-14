@@ -1,7 +1,8 @@
 # rilua Compatibility and Performance Evaluation
 
 Initial: February 12, 2026
-Updated: February 13, 2026 (Phase 9d bug fixes, 17/20 PUC-Rio tests)
+Updated: February 14, 2026 (Phase 9d: hooks, streaming reader, LOADNIL
+coalescing, constant folding; 19/23 PUC-Rio tests pass)
 Branch: `rewrite/v2`
 rilua version: 0.1.0 (Phase 9d)
 Reference: PUC-Rio Lua 5.1.1 (official tarball at `./lua-5.1.1/`)
@@ -9,13 +10,12 @@ Platform: AMD Ryzen 7 8840U, Linux 6.18.8, Fedora 43
 
 ## Executive Summary
 
-rilua passes all 1289 internal tests (586 unit + 426 integration + 277
-oracle). Against the PUC-Rio official test suite (23 files in
-`./lua-5.1-tests/`), rilua passes 20 of 23 tests (17 non-trivial + 3
-trivially passing because `T==nil` skips C-API assertions). Of the 3
-failures, calls.lua requires a streaming reader, db.lua requires debug
-hooks, and verybig.lua times out. Two tests (big, main) always fail for
-infrastructure reasons (missing C library, CLI subprocess model).
+Against the PUC-Rio official test suite (23 files in
+`./lua-5.1-tests/`), rilua passes 19 of 23 tests (18 non-trivial + 1
+trivially passing). Of the 4 failures, api.lua requires T.testC
+(~500 lines of C-API simulation), closure.lua requires T.resume/
+T.setyhook, big.lua has yield-from-main-thread and string overflow
+issues, and main.lua requires CLI subprocess infrastructure.
 
 Performance ranges from 0.92x to 2.18x vs PUC-Rio on most benchmarks,
 with one outlier (string operations at 9.33x). Memory usage is 1.15x
@@ -46,15 +46,15 @@ relative `dofile()` calls).
 
 | Test File      | rilua      | PUC-Rio  | Blocker(s)                        |
 |----------------|------------|----------|-----------------------------------|
-| **api**        | **PASS***  | PASS     | Trivial (T==nil skips all tests)  |
+| api            | FAIL:21    | PASS     | T.testC not implemented           |
 | **attrib**     | **PASS**   | PASS     |                                   |
-| big            | FAIL       | FAIL     | Both fail (requires checktable)   |
-| calls          | FAIL:250   | PASS     | Streaming reader (eager load)     |
-| **checktable** | **PASS***  | PASS     | Trivial (T==nil skips all tests)  |
-| **closure**    | **PASS**   | PASS     |                                   |
-| **code**       | **PASS***  | PASS     | Trivial (T==nil skips all tests)  |
+| big            | FAIL:359   | FAIL     | Yield from main thread + overflow |
+| **calls**      | **PASS**   | PASS     |                                   |
+| **checktable** | **PASS***  | PASS     | Trivial (defines utilities only)  |
+| closure        | FAIL:391   | PASS     | T.resume/T.setyhook not impl.     |
+| **code**       | **PASS**   | PASS     |                                   |
 | **constructs** | **PASS**   | PASS     |                                   |
-| db             | FAIL:20    | PASS     | Hook stubs (sethook)              |
+| **db**         | **PASS**   | PASS     |                                   |
 | **errors**     | **PASS**   | PASS     |                                   |
 | **events**     | **PASS**   | PASS     |                                   |
 | **files**      | **PASS**   | PASS     |                                   |
@@ -68,21 +68,20 @@ relative `dofile()` calls).
 | **sort**       | **PASS**   | PASS     |                                   |
 | **strings**    | **PASS**   | PASS     |                                   |
 | **vararg**     | **PASS**   | PASS     |                                   |
-| verybig        | TIMEOUT    | PASS     | Compilation performance           |
+| **verybig**    | **PASS**   | PASS     |                                   |
 
-\* api, checktable, code pass because `T==nil` skips all C-API
-assertions. They do not exercise rilua and require a testC equivalent
-for meaningful coverage.
+\* checktable passes trivially (defines utility functions only, no
+assertions). api.lua and closure.lua fail on T module functions.
 
 ### Summary
 
 | Category               | Count | Tests |
 |------------------------|-------|-------|
-| Pass                   | 17    | attrib, closure, constructs, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg + api*, checktable*, code* |
-| Pass (trivial, T==nil) | 3     | api, checktable, code |
-| Fail (rilua only)      | 3     | calls, db, verybig (timeout) |
-| Fail (both)            | 2     | big, main |
-| **Total**              | **23** | **20 pass / 3 fail / 2 both-fail** |
+| Pass                   | 18    | attrib, calls, code, constructs, db, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg, verybig |
+| Pass (trivial)         | 1     | checktable |
+| Fail (rilua only)      | 2     | api (T.testC), closure (T.resume) |
+| Fail (both)            | 2     | big (yield + overflow), main (CLI subprocess) |
+| **Total**              | **23** | **19 pass / 2 fail / 2 both-fail** |
 
 ### Progress Since Initial Evaluation (Feb 12)
 

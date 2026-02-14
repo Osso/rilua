@@ -4,11 +4,12 @@
 //! `symbexec`, `kname`, `getfuncname`, `luaF_getlocalname`) to provide
 //! descriptive error messages like `"attempt to call local 'x' (a number value)"`.
 
+use super::callinfo::CallInfo;
 use super::closure::Closure;
 use super::gc::arena::Arena;
 use super::instructions::{Instruction, NO_REG, OpCode, index_k, is_k};
 use super::proto::Proto;
-use super::state::LuaState;
+use super::state::{Gc, LuaState};
 use super::string::LuaString;
 use super::value::Val;
 
@@ -273,6 +274,66 @@ pub fn getfuncname(
         }
         OpCode::TForLoop => {
             // The iterator function is at A (relative to caller's base).
+            let a = call_instr.a();
+            getobjname(&caller_proto, call_pc, a, string_arena)
+        }
+        _ => None,
+    }
+}
+
+/// Like `getfuncname` but works with raw fields (for coroutine threads).
+pub fn getfuncname_raw(
+    call_stack: &[CallInfo],
+    stack: &[Val],
+    gc: &Gc,
+    ci_idx: usize,
+    string_arena: &Arena<LuaString>,
+) -> Option<(&'static str, String)> {
+    if ci_idx == 0 {
+        return None;
+    }
+
+    let ci = &call_stack[ci_idx];
+    if ci.tail_calls > 0 {
+        return None;
+    }
+
+    let caller_ci = &call_stack[ci_idx - 1];
+    let caller_func = if caller_ci.func < stack.len() {
+        stack[caller_ci.func]
+    } else {
+        return None;
+    };
+    let caller_proto = match caller_func {
+        Val::Function(r) => {
+            let cl = gc.closures.get(r)?;
+            match cl {
+                Closure::Lua(lcl) => std::rc::Rc::clone(&lcl.proto),
+                Closure::Rust(_) => return None,
+            }
+        }
+        _ => return None,
+    };
+
+    let caller_pc = caller_ci.saved_pc;
+    if caller_pc == 0 {
+        return None;
+    }
+
+    let call_pc = caller_pc - 1;
+    if call_pc >= caller_proto.code.len() {
+        return None;
+    }
+
+    let call_instr = Instruction::from_raw(caller_proto.code[call_pc]);
+    let call_op = call_instr.opcode();
+
+    match call_op {
+        OpCode::Call | OpCode::TailCall => {
+            let a = call_instr.a();
+            getobjname(&caller_proto, call_pc, a, string_arena)
+        }
+        OpCode::TForLoop => {
             let a = call_instr.a();
             getobjname(&caller_proto, call_pc, a, string_arena)
         }

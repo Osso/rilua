@@ -49,6 +49,19 @@ const BASIC_STACK_SIZE: usize = 2 * LUA_MINSTACK;
 pub(crate) const BASIC_CI_SIZE: usize = 8;
 
 // ---------------------------------------------------------------------------
+// Hook mask constants (match PUC-Rio lua.h)
+// ---------------------------------------------------------------------------
+
+/// Hook mask bit: fire on function call.
+pub const MASK_CALL: u8 = 1 << 0; // LUA_MASKCALL
+/// Hook mask bit: fire on function return.
+pub const MASK_RET: u8 = 1 << 1; // LUA_MASKRET
+/// Hook mask bit: fire on new source line.
+pub const MASK_LINE: u8 = 1 << 2; // LUA_MASKLINE
+/// Hook mask bit: fire every N instructions.
+pub const MASK_COUNT: u8 = 1 << 3; // LUA_MASKCOUNT
+
+// ---------------------------------------------------------------------------
 // Gc (garbage collector state -- allocation only, no sweep yet)
 // ---------------------------------------------------------------------------
 
@@ -206,6 +219,62 @@ pub enum ThreadStatus {
 }
 
 // ---------------------------------------------------------------------------
+// HookState -- per-thread debug hook state
+// ---------------------------------------------------------------------------
+
+/// Per-thread hook state, shared between `LuaState` and `LuaThread`.
+///
+/// Matches PUC-Rio's per-thread hook fields in `lua_State`:
+/// `hook`, `hookmask`, `allowhook`, `basehookcount`, `hookcount`.
+#[derive(Clone)]
+pub struct HookState {
+    /// The Lua hook function (stored as a Val, typically a Function).
+    pub hook_func: Val,
+    /// Hook mask bitmask: MASK_CALL | MASK_RET | MASK_LINE | MASK_COUNT.
+    pub hook_mask: u8,
+    /// Whether hooks are allowed to fire. Set to false while inside a hook
+    /// callback to prevent recursive hook calls. Matches PUC-Rio's `allowhook`.
+    pub allow_hook: bool,
+    /// The original count period set by the user. Matches PUC-Rio's `basehookcount`.
+    pub base_hook_count: i32,
+    /// Countdown for count hooks. Decremented each instruction; fires at 0.
+    /// Reset to `base_hook_count` after firing. Matches PUC-Rio's `hookcount`.
+    pub hook_count: i32,
+}
+
+impl HookState {
+    /// Creates a new hook state with no hooks active.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            hook_func: Val::Nil,
+            hook_mask: 0,
+            allow_hook: true,
+            base_hook_count: 0,
+            hook_count: 0,
+        }
+    }
+
+    /// Returns true if any hook is active.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.hook_mask != 0 && !self.hook_func.is_nil()
+    }
+
+    /// Returns true if hooks should fire (active and allowed).
+    #[inline]
+    pub fn should_fire(&self) -> bool {
+        self.is_active() && self.allow_hook
+    }
+}
+
+impl Default for HookState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LuaThread (coroutine)
 // ---------------------------------------------------------------------------
 
@@ -253,6 +322,8 @@ pub struct LuaThread {
     /// Per-thread global table. Each thread can have its own global
     /// environment, set via `setfenv(thread, table)`.
     pub global: GcRef<Table>,
+    /// Per-thread debug hook state.
+    pub hook: HookState,
 }
 
 impl LuaThread {
@@ -283,6 +354,7 @@ impl LuaThread {
             error_object: None,
             status: ThreadStatus::Initial,
             global,
+            hook: HookState::new(),
         }
     }
 }
@@ -362,6 +434,9 @@ pub struct LuaState {
     /// which thread is active. When `Some(ref)`, the `LuaState`'s per-thread
     /// fields (stack, call_stack, etc.) belong to that coroutine.
     pub current_thread: Option<GcRef<LuaThread>>,
+
+    /// Per-thread debug hook state for the currently running thread.
+    pub hook: HookState,
 }
 
 impl LuaState {
@@ -404,6 +479,7 @@ impl LuaState {
             error_object: None,
             rng_state: 1, // C standard: default as if srand(1) was called.
             current_thread: None,
+            hook: HookState::new(),
         }
     }
 
@@ -597,6 +673,7 @@ impl LuaState {
             error_object: self.error_object.take(),
             status: ThreadStatus::Normal,
             global: self.global,
+            hook: self.hook.clone(),
         }
     }
 
@@ -624,6 +701,7 @@ impl LuaState {
             self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
             self.error_object = thread.error_object.take();
             self.global = thread.global;
+            self.hook = std::mem::replace(&mut thread.hook, HookState::new());
 
             // Reopen upvalues that were closed on suspension.
             // Write their captured values back to the stack slots and
@@ -712,6 +790,7 @@ impl LuaState {
             co_thread.suspended_upvals = suspended;
             co_thread.error_object = self.error_object.take();
             co_thread.global = self.global;
+            co_thread.hook = std::mem::replace(&mut self.hook, HookState::new());
             co_thread.status = co_status;
         }
 
@@ -727,6 +806,7 @@ impl LuaState {
         self.open_upvalues = resumer.open_upvalues;
         self.error_object = resumer.error_object;
         self.global = resumer.global;
+        self.hook = resumer.hook;
 
         // Reopen the resumer's suspended upvalues. These were closed before
         // the stack swap to prevent cross-thread reads. Now that the
@@ -820,6 +900,16 @@ mod tests {
     fn new_state_no_open_upvalues() {
         let state = LuaState::new();
         assert!(state.open_upvalues.is_empty());
+    }
+
+    #[test]
+    fn new_state_no_hooks() {
+        let state = LuaState::new();
+        assert_eq!(state.hook.hook_mask, 0);
+        assert!(state.hook.hook_func.is_nil());
+        assert!(state.hook.allow_hook);
+        assert_eq!(state.hook.base_hook_count, 0);
+        assert_eq!(state.hook.hook_count, 0);
     }
 
     // ----- Stack operations -----
@@ -1030,5 +1120,15 @@ mod tests {
         let state = LuaState::default();
         assert_eq!(state.call_stack.len(), 1);
         assert_eq!(state.stack.len(), BASIC_STACK_SIZE);
+    }
+
+    // ----- Hook mask constants -----
+
+    #[test]
+    fn hook_mask_values() {
+        assert_eq!(MASK_CALL, 1);
+        assert_eq!(MASK_RET, 2);
+        assert_eq!(MASK_LINE, 4);
+        assert_eq!(MASK_COUNT, 8);
     }
 }
