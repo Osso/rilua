@@ -53,7 +53,7 @@ pub(crate) fn libc_strtod(s: &[u8]) -> Option<(f64, usize)> {
 
     let mut endptr: *mut u8 = std::ptr::null_mut();
     // SAFETY: buf is a valid NUL-terminated C string, endptr is a valid pointer.
-    let result = unsafe { strtod(buf.as_ptr(), &mut endptr) };
+    let result = unsafe { strtod(buf.as_ptr(), &raw mut endptr) };
     let consumed = endptr as usize - buf.as_ptr() as usize;
     if consumed == 0 {
         return None;
@@ -134,10 +134,10 @@ pub(crate) fn str_to_number(data: &[u8]) -> Option<f64> {
         // Hex: parse with strtoul (PUC-Rio fallback).
         let hex_str = std::str::from_utf8(trimmed).ok()?;
         let hex_trimmed = hex_str.trim();
-        let (sign, hex_part) = if hex_trimmed.starts_with('-') {
-            (-1.0_f64, &hex_trimmed[1..])
-        } else if hex_trimmed.starts_with('+') {
-            (1.0, &hex_trimmed[1..])
+        let (sign, hex_part) = if let Some(rest) = hex_trimmed.strip_prefix('-') {
+            (-1.0_f64, rest)
+        } else if let Some(rest) = hex_trimmed.strip_prefix('+') {
+            (1.0, rest)
         } else {
             (1.0, hex_trimmed)
         };
@@ -149,7 +149,7 @@ pub(crate) fn str_to_number(data: &[u8]) -> Option<f64> {
     }
 
     // Check that remaining characters are only whitespace.
-    if rest.iter().all(|b| b.is_ascii_whitespace()) {
+    if rest.iter().all(u8::is_ascii_whitespace) {
         Some(result)
     } else {
         None
@@ -179,7 +179,7 @@ fn coerce_to_string(val: Val, gc: &mut Gc) -> Option<Val> {
 // ---------------------------------------------------------------------------
 
 /// Creates a runtime error with source location from the current proto.
-fn runtime_error(proto: &Proto, pc: usize, message: String) -> LuaError {
+fn runtime_error(proto: &Proto, pc: usize, message: &str) -> LuaError {
     let line = if pc > 0 && pc <= proto.line_info.len() {
         proto.line_info[pc - 1]
     } else if !proto.line_info.is_empty() {
@@ -227,7 +227,7 @@ fn type_error(
     } else {
         format!("attempt to {opname} a {type_name} value")
     };
-    runtime_error(proto, pc, message)
+    runtime_error(proto, pc, &message)
 }
 
 /// Arithmetic type error with RK-aware operand resolution.
@@ -263,7 +263,7 @@ fn arith_error(
         runtime_error(
             proto,
             pc,
-            format!(
+            &format!(
                 "attempt to perform arithmetic on a {} value",
                 val.type_name()
             ),
@@ -284,7 +284,7 @@ fn compare_error(proto: &Proto, pc: usize, left: Val, right: Val) -> LuaError {
             right.type_name()
         )
     };
-    runtime_error(proto, pc, message)
+    runtime_error(proto, pc, &message)
 }
 
 /// luaO_fb2int: convert a "floating point byte" to an integer.
@@ -317,7 +317,7 @@ impl LuaState {
     /// PUC-Rio `luaD_call` uses two thresholds:
     /// - `LUAI_MAXCCALLS` (200): throw recoverable "stack overflow"
     /// - `LUAI_MAXCCALLS + LUAI_MAXCCALLS/8` (225): unrecoverable error
-    /// Calls between 201-224 are allowed as headroom for error handlers.
+    ///   Calls between 201-224 are allowed as headroom for error handlers.
     fn check_stack_overflow(&self) -> LuaResult<()> {
         if self.call_depth >= MAXCCALLS {
             let hard_limit = MAXCCALLS + (MAXCCALLS >> 3);
@@ -448,49 +448,39 @@ impl LuaState {
         }
 
         let func_val = self.stack_get(func_idx);
-        let closure_ref = match func_val {
-            Val::Function(r) => r,
-            _ => {
-                // Try __call metamethod.
-                let tm = get_tm_for_val(&self.gc, func_val, TMS::Call);
-                match tm {
-                    Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
-                        // Shift stack up to insert __call at func position.
-                        // The original value becomes the first argument.
-                        let top = self.top;
-                        self.ensure_stack(top + 1);
-                        let mut p = top;
-                        while p > func_idx {
-                            let v = self.stack_get(p - 1);
-                            self.stack_set(p, v);
-                            p -= 1;
-                        }
-                        self.top = top + 1;
-                        self.stack_set(func_idx, tm_val);
-                        // Now func_idx points to __call, original value is at func_idx+1.
-                        match tm_val {
-                            Val::Function(r) => r,
-                            _ => unreachable!(),
-                        }
+        let closure_ref = if let Val::Function(r) = func_val {
+            r
+        } else {
+            // Try __call metamethod.
+            let tm = get_tm_for_val(&self.gc, func_val, TMS::Call);
+            match tm {
+                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+                    // Shift stack up to insert __call at func position.
+                    // The original value becomes the first argument.
+                    let top = self.top;
+                    self.ensure_stack(top + 1);
+                    let mut p = top;
+                    while p > func_idx {
+                        let v = self.stack_get(p - 1);
+                        self.stack_set(p, v);
+                        p -= 1;
                     }
-                    _ => {
-                        // Try to resolve the variable name from the caller frame.
-                        let ci = &self.call_stack[self.ci];
-                        let caller_func = self.stack_get(ci.func);
-                        let err = if let Val::Function(r) = caller_func {
-                            if let Some(Closure::Lua(lcl)) = self.gc.closures.get(r) {
-                                let reg = func_idx - ci.base;
-                                type_error(self, &lcl.proto, ci.saved_pc, ci.base, reg, "call")
-                            } else {
-                                LuaError::Runtime(RuntimeError {
-                                    message: format!(
-                                        "attempt to call a {} value",
-                                        func_val.type_name()
-                                    ),
-                                    level: 0,
-                                    traceback: vec![],
-                                })
-                            }
+                    self.top = top + 1;
+                    self.stack_set(func_idx, tm_val);
+                    // Now func_idx points to __call, original value is at func_idx+1.
+                    match tm_val {
+                        Val::Function(r) => r,
+                        _ => unreachable!(),
+                    }
+                }
+                _ => {
+                    // Try to resolve the variable name from the caller frame.
+                    let ci = &self.call_stack[self.ci];
+                    let caller_func = self.stack_get(ci.func);
+                    let err = if let Val::Function(r) = caller_func {
+                        if let Some(Closure::Lua(lcl)) = self.gc.closures.get(r) {
+                            let reg = func_idx - ci.base;
+                            type_error(self, &lcl.proto, ci.saved_pc, ci.base, reg, "call")
                         } else {
                             LuaError::Runtime(RuntimeError {
                                 message: format!(
@@ -500,9 +490,15 @@ impl LuaState {
                                 level: 0,
                                 traceback: vec![],
                             })
-                        };
-                        return Err(err);
-                    }
+                        }
+                    } else {
+                        LuaError::Runtime(RuntimeError {
+                            message: format!("attempt to call a {} value", func_val.type_name()),
+                            level: 0,
+                            traceback: vec![],
+                        })
+                    };
+                    return Err(err);
                 }
             }
         };
@@ -520,7 +516,6 @@ impl LuaState {
         match closure {
             Closure::Lua(lua_cl) => {
                 let proto = Rc::clone(&lua_cl.proto);
-                let _env = lua_cl.env;
                 let num_params = proto.num_params as usize;
                 let max_stack = proto.max_stack_size as usize;
                 let is_vararg = proto.is_vararg & VARARG_ISVARARG != 0;
@@ -531,7 +526,9 @@ impl LuaState {
                 let nargs = self.get_nargs(func_idx);
 
                 let new_base;
-                if !is_vararg {
+                if is_vararg {
+                    new_base = self.adjust_varargs(&proto, nargs, func_idx);
+                } else {
                     new_base = func_idx + 1;
                     // Trim excess args or pad with nil.
                     if nargs > num_params {
@@ -542,8 +539,6 @@ impl LuaState {
                             self.push(Val::Nil);
                         }
                     }
-                } else {
-                    new_base = self.adjust_varargs(&proto, nargs, func_idx);
                 }
 
                 // Initialize remaining locals to nil.
@@ -640,7 +635,6 @@ impl LuaState {
                 res += 1;
                 src += 1;
             }
-            self.top = res;
         } else {
             let mut moved = 0i32;
             let mut src = first_result;
@@ -656,8 +650,8 @@ impl LuaState {
                 res += 1;
                 moved += 1;
             }
-            self.top = res;
         }
+        self.top = res;
 
         // Return true if the caller requested fixed results (not MULTRET).
         // Matches PUC-Rio: `return (L->nresults - LUA_MULTRET)` which is
@@ -674,6 +668,7 @@ impl LuaState {
     /// 1. Pads actual args with nil if fewer than num_params
     /// 2. Copies fixed params from their original positions to above the vararg area
     /// 3. Nils out the original fixed param positions
+    ///
     /// Returns the new base (pointing to the first fixed param copy).
     fn adjust_varargs(&mut self, proto: &Proto, nargs: usize, func_idx: usize) -> usize {
         let num_params = proto.num_params as usize;
@@ -746,14 +741,14 @@ impl LuaState {
     pub fn find_upvalue(&mut self, stack_index: usize) -> super::gc::arena::GcRef<Upvalue> {
         // Search for existing open upvalue at this stack index.
         for &uv_ref in &self.open_upvalues {
-            if let Some(uv) = self.gc.upvalues.get(uv_ref) {
-                if let Some(idx) = uv.stack_index() {
-                    if idx == stack_index {
-                        return uv_ref;
-                    }
-                    if idx < stack_index {
-                        break; // List is sorted descending; won't find it.
-                    }
+            if let Some(uv) = self.gc.upvalues.get(uv_ref)
+                && let Some(idx) = uv.stack_index()
+            {
+                if idx == stack_index {
+                    return uv_ref;
+                }
+                if idx < stack_index {
+                    break; // List is sorted descending; won't find it.
                 }
             }
         }
@@ -770,8 +765,8 @@ impl LuaState {
                 self.gc
                     .upvalues
                     .get(r)
-                    .and_then(|uv| uv.stack_index())
-                    .map_or(true, |idx| idx < stack_index)
+                    .and_then(super::closure::Upvalue::stack_index)
+                    .is_none_or(|idx| idx < stack_index)
             })
             .unwrap_or(self.open_upvalues.len());
 
@@ -789,8 +784,8 @@ impl LuaState {
                 .gc
                 .upvalues
                 .get(uv_ref)
-                .and_then(|uv| uv.stack_index())
-                .map_or(false, |idx| idx >= level);
+                .and_then(super::closure::Upvalue::stack_index)
+                .is_some_and(|idx| idx >= level);
 
             if !should_close {
                 break;
@@ -847,20 +842,20 @@ pub(crate) fn get_where(state: &LuaState, level: u32) -> String {
     let ci = &state.call_stack[target_ci];
     let func_val = state.stack_get(ci.func);
 
-    if let Val::Function(r) = func_val {
-        if let Some(Closure::Lua(lcl)) = state.gc.closures.get(r) {
-            let proto = &lcl.proto;
-            let pc = ci.saved_pc;
-            let line = if pc > 0 && pc <= proto.line_info.len() {
-                proto.line_info[pc - 1]
-            } else if !proto.line_info.is_empty() {
-                proto.line_info[0]
-            } else {
-                return String::new();
-            };
-            let short_src = chunkid(&proto.source);
-            return format!("{short_src}:{line}: ");
-        }
+    if let Val::Function(r) = func_val
+        && let Some(Closure::Lua(lcl)) = state.gc.closures.get(r)
+    {
+        let proto = &lcl.proto;
+        let pc = ci.saved_pc;
+        let line = if pc > 0 && pc <= proto.line_info.len() {
+            proto.line_info[pc - 1]
+        } else if !proto.line_info.is_empty() {
+            proto.line_info[0]
+        } else {
+            return String::new();
+        };
+        let short_src = chunkid(&proto.source);
+        return format!("{short_src}:{line}: ");
     }
 
     String::new()
@@ -1035,10 +1030,10 @@ fn vm_concat(
             } else {
                 // No metamethod -- find which operand is the problem.
                 // lhs is at top-2 (register last-1), rhs at top-1 (register last).
-                let reg = if !is_string_or_number(lhs, &state.gc) {
-                    last - 1
-                } else {
+                let reg = if is_string_or_number(lhs, &state.gc) {
                     last
+                } else {
+                    last - 1
                 };
                 return Err(type_error(state, proto, pc, base, reg, "concatenate"));
             }
@@ -1055,11 +1050,7 @@ fn vm_concat(
             for i in (0..n).rev() {
                 let l = val_string_len(state.stack_get(top - 1 - i), &state.gc);
                 if l >= MAX_STRING_SIZE - tl {
-                    return Err(runtime_error(
-                        proto,
-                        pc,
-                        "string length overflow".to_string(),
-                    ));
+                    return Err(runtime_error(proto, pc, "string length overflow"));
                 }
                 tl += l;
             }
@@ -1145,10 +1136,8 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
         let mut base = state.base;
 
         // Get the current closure and proto.
-        let func_val = state.stack_get(ci_func);
-        let closure_ref = match func_val {
-            Val::Function(r) => r,
-            _ => return Err(runtime_error_simple("not a function")),
+        let Val::Function(closure_ref) = state.stack_get(ci_func) else {
+            return Err(runtime_error_simple("not a function"));
         };
 
         let (proto, env) = {
@@ -1170,7 +1159,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
         // Inner dispatch loop for this frame.
         loop {
             if pc >= proto.code.len() {
-                return Err(runtime_error(&proto, pc, "bytecode overrun".to_string()));
+                return Err(runtime_error(&proto, pc, "bytecode overrun"));
             }
 
             // Read instruction and advance pc BEFORE hook check.
@@ -1323,185 +1312,176 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Add => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    match (
+                    if let (Some(nb), Some(nc)) = (
                         coerce_to_number(b_val, &state.gc),
                         coerce_to_number(c_val, &state.gc),
                     ) {
-                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb + nc)),
-                        _ => {
-                            state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(
-                                state,
-                                b_val,
-                                c_val,
-                                ra,
-                                TMS::Add,
-                                &proto,
-                                pc,
-                                base,
-                                instr.b(),
-                                instr.c(),
-                            )?;
-                        }
+                        state.stack_set(ra, Val::Num(nb + nc));
+                    } else {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        call_bin_tm(
+                            state,
+                            b_val,
+                            c_val,
+                            ra,
+                            TMS::Add,
+                            &proto,
+                            pc,
+                            base,
+                            instr.b(),
+                            instr.c(),
+                        )?;
                     }
                 }
 
                 OpCode::Sub => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    match (
+                    if let (Some(nb), Some(nc)) = (
                         coerce_to_number(b_val, &state.gc),
                         coerce_to_number(c_val, &state.gc),
                     ) {
-                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb - nc)),
-                        _ => {
-                            state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(
-                                state,
-                                b_val,
-                                c_val,
-                                ra,
-                                TMS::Sub,
-                                &proto,
-                                pc,
-                                base,
-                                instr.b(),
-                                instr.c(),
-                            )?;
-                        }
+                        state.stack_set(ra, Val::Num(nb - nc));
+                    } else {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        call_bin_tm(
+                            state,
+                            b_val,
+                            c_val,
+                            ra,
+                            TMS::Sub,
+                            &proto,
+                            pc,
+                            base,
+                            instr.b(),
+                            instr.c(),
+                        )?;
                     }
                 }
 
                 OpCode::Mul => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    match (
+                    if let (Some(nb), Some(nc)) = (
                         coerce_to_number(b_val, &state.gc),
                         coerce_to_number(c_val, &state.gc),
                     ) {
-                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb * nc)),
-                        _ => {
-                            state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(
-                                state,
-                                b_val,
-                                c_val,
-                                ra,
-                                TMS::Mul,
-                                &proto,
-                                pc,
-                                base,
-                                instr.b(),
-                                instr.c(),
-                            )?;
-                        }
+                        state.stack_set(ra, Val::Num(nb * nc));
+                    } else {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        call_bin_tm(
+                            state,
+                            b_val,
+                            c_val,
+                            ra,
+                            TMS::Mul,
+                            &proto,
+                            pc,
+                            base,
+                            instr.b(),
+                            instr.c(),
+                        )?;
                     }
                 }
 
                 OpCode::Div => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    match (
+                    if let (Some(nb), Some(nc)) = (
                         coerce_to_number(b_val, &state.gc),
                         coerce_to_number(c_val, &state.gc),
                     ) {
-                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb / nc)),
-                        _ => {
-                            state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(
-                                state,
-                                b_val,
-                                c_val,
-                                ra,
-                                TMS::Div,
-                                &proto,
-                                pc,
-                                base,
-                                instr.b(),
-                                instr.c(),
-                            )?;
-                        }
+                        state.stack_set(ra, Val::Num(nb / nc));
+                    } else {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        call_bin_tm(
+                            state,
+                            b_val,
+                            c_val,
+                            ra,
+                            TMS::Div,
+                            &proto,
+                            pc,
+                            base,
+                            instr.b(),
+                            instr.c(),
+                        )?;
                     }
                 }
 
                 OpCode::Mod => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    match (
+                    if let (Some(nb), Some(nc)) = (
                         coerce_to_number(b_val, &state.gc),
                         coerce_to_number(c_val, &state.gc),
                     ) {
-                        (Some(nb), Some(nc)) => {
-                            // Lua mod: a - floor(a/b)*b
-                            state.stack_set(ra, Val::Num(nb - (nb / nc).floor() * nc));
-                        }
-                        _ => {
-                            state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(
-                                state,
-                                b_val,
-                                c_val,
-                                ra,
-                                TMS::Mod,
-                                &proto,
-                                pc,
-                                base,
-                                instr.b(),
-                                instr.c(),
-                            )?;
-                        }
+                        // Lua mod: a - floor(a/b)*b
+                        state.stack_set(ra, Val::Num((nb / nc).floor().mul_add(-nc, nb)));
+                    } else {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        call_bin_tm(
+                            state,
+                            b_val,
+                            c_val,
+                            ra,
+                            TMS::Mod,
+                            &proto,
+                            pc,
+                            base,
+                            instr.b(),
+                            instr.c(),
+                        )?;
                     }
                 }
 
                 OpCode::Pow => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    match (
+                    if let (Some(nb), Some(nc)) = (
                         coerce_to_number(b_val, &state.gc),
                         coerce_to_number(c_val, &state.gc),
                     ) {
-                        (Some(nb), Some(nc)) => state.stack_set(ra, Val::Num(nb.powf(nc))),
-                        _ => {
-                            state.call_stack[state.ci].saved_pc = pc;
-                            call_bin_tm(
-                                state,
-                                b_val,
-                                c_val,
-                                ra,
-                                TMS::Pow,
-                                &proto,
-                                pc,
-                                base,
-                                instr.b(),
-                                instr.c(),
-                            )?;
-                        }
+                        state.stack_set(ra, Val::Num(nb.powf(nc)));
+                    } else {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        call_bin_tm(
+                            state,
+                            b_val,
+                            c_val,
+                            ra,
+                            TMS::Pow,
+                            &proto,
+                            pc,
+                            base,
+                            instr.b(),
+                            instr.c(),
+                        )?;
                     }
                 }
 
                 OpCode::Unm => {
                     let b = instr.b() as usize;
                     let b_val = state.stack_get(base + b);
-                    match coerce_to_number(b_val, &state.gc) {
-                        Some(nb) => state.stack_set(ra, Val::Num(-nb)),
-                        None => {
-                            // __unm: try on the single operand only
-                            let tm = get_tm_for_val(&state.gc, b_val, TMS::Unm);
-                            match tm {
-                                Some(tm_val) => {
-                                    state.call_stack[state.ci].saved_pc = pc;
-                                    call_tm_res(state, tm_val, b_val, b_val, ra)?;
-                                }
-                                None => {
-                                    return Err(type_error(
-                                        state,
-                                        &proto,
-                                        pc,
-                                        base,
-                                        b,
-                                        "perform arithmetic on",
-                                    ));
-                                }
+                    if let Some(nb) = coerce_to_number(b_val, &state.gc) {
+                        state.stack_set(ra, Val::Num(-nb));
+                    } else {
+                        // __unm: try on the single operand only
+                        let tm = get_tm_for_val(&state.gc, b_val, TMS::Unm);
+                        match tm {
+                            Some(tm_val) => {
+                                state.call_stack[state.ci].saved_pc = pc;
+                                call_tm_res(state, tm_val, b_val, b_val, ra)?;
+                            }
+                            None => {
+                                return Err(type_error(
+                                    state,
+                                    &proto,
+                                    pc,
+                                    base,
+                                    b,
+                                    "perform arithmetic on",
+                                ));
                             }
                         }
                     }
@@ -1626,7 +1606,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let expected = a != 0;
                     if equal == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                        pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;
                     } else {
                         pc += 1;
                     }
@@ -1640,7 +1620,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let expected = a != 0;
                     if result == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                        pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;
                     } else {
                         pc += 1;
                     }
@@ -1654,7 +1634,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let expected = a != 0;
                     if result == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                        pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;
                     } else {
                         pc += 1;
                     }
@@ -1664,9 +1644,9 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Test => {
                     let val = state.stack_get(ra);
                     let c = instr.c() != 0;
-                    if !val.is_truthy() != c {
+                    if val.is_truthy() == c {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                        pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;
                     } else {
                         pc += 1;
                     }
@@ -1676,10 +1656,10 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let b = instr.b() as usize;
                     let rb = state.stack_get(base + b);
                     let c = instr.c() != 0;
-                    if !rb.is_truthy() != c {
+                    if rb.is_truthy() == c {
                         state.stack_set(ra, rb);
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64) + 1) as usize;
+                        pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;
                     } else {
                         pc += 1;
                     }
@@ -1688,7 +1668,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 // ----- Control flow -----
                 OpCode::Jmp => {
                     let sbx = instr.sbx();
-                    pc = ((pc as i64) + (sbx as i64)) as usize;
+                    pc = ((pc as i64) + i64::from(sbx)) as usize;
                 }
 
                 OpCode::ForPrep => {
@@ -1697,18 +1677,12 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let step = state.stack_get(ra + 2);
 
                     let n_init = coerce_to_number(init, &state.gc).ok_or_else(|| {
-                        runtime_error(
-                            &proto,
-                            pc,
-                            "'for' initial value must be a number".to_string(),
-                        )
+                        runtime_error(&proto, pc, "'for' initial value must be a number")
                     })?;
-                    let n_limit = coerce_to_number(limit, &state.gc).ok_or_else(|| {
-                        runtime_error(&proto, pc, "'for' limit must be a number".to_string())
-                    })?;
-                    let n_step = coerce_to_number(step, &state.gc).ok_or_else(|| {
-                        runtime_error(&proto, pc, "'for' step must be a number".to_string())
-                    })?;
+                    let n_limit = coerce_to_number(limit, &state.gc)
+                        .ok_or_else(|| runtime_error(&proto, pc, "'for' limit must be a number"))?;
+                    let n_step = coerce_to_number(step, &state.gc)
+                        .ok_or_else(|| runtime_error(&proto, pc, "'for' step must be a number"))?;
 
                     // R(A) -= step (so the first FORLOOP adds it back).
                     state.stack_set(ra, Val::Num(n_init - n_step));
@@ -1716,39 +1690,19 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     state.stack_set(ra + 2, Val::Num(n_step));
 
                     let sbx = instr.sbx();
-                    pc = ((pc as i64) + (sbx as i64)) as usize;
+                    pc = ((pc as i64) + i64::from(sbx)) as usize;
                 }
 
                 OpCode::ForLoop => {
-                    let step = match state.stack_get(ra + 2) {
-                        Val::Num(n) => n,
-                        _ => {
-                            return Err(runtime_error(
-                                &proto,
-                                pc,
-                                "'for' step is not a number".to_string(),
-                            ));
-                        }
+                    let Val::Num(step) = state.stack_get(ra + 2) else {
+                        return Err(runtime_error(&proto, pc, "'for' step is not a number"));
                     };
-                    let idx = match state.stack_get(ra) {
-                        Val::Num(n) => n + step,
-                        _ => {
-                            return Err(runtime_error(
-                                &proto,
-                                pc,
-                                "'for' index is not a number".to_string(),
-                            ));
-                        }
+                    let Val::Num(idx) = state.stack_get(ra) else {
+                        return Err(runtime_error(&proto, pc, "'for' index is not a number"));
                     };
-                    let limit = match state.stack_get(ra + 1) {
-                        Val::Num(n) => n,
-                        _ => {
-                            return Err(runtime_error(
-                                &proto,
-                                pc,
-                                "'for' limit is not a number".to_string(),
-                            ));
-                        }
+                    let idx = idx + step;
+                    let Val::Num(limit) = state.stack_get(ra + 1) else {
+                        return Err(runtime_error(&proto, pc, "'for' limit is not a number"));
                     };
 
                     let continue_loop = if step > 0.0 {
@@ -1759,7 +1713,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
 
                     if continue_loop {
                         let sbx = instr.sbx();
-                        pc = ((pc as i64) + (sbx as i64)) as usize;
+                        pc = ((pc as i64) + i64::from(sbx)) as usize;
                         state.stack_set(ra, Val::Num(idx)); // internal index
                         state.stack_set(ra + 3, Val::Num(idx)); // external index
                     }
@@ -1800,7 +1754,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         state.stack_set(ra + 2, control);
                         // Jump back.
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
-                        pc = ((pc as i64) + (jump_instr.sbx() as i64)) as usize;
+                        pc = ((pc as i64) + i64::from(jump_instr.sbx())) as usize;
                     }
                     pc += 1;
                 }
@@ -1967,17 +1921,17 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         .closures
                         .get(closure_ref)
                         .ok_or_else(|| runtime_error_simple("invalid closure"))?;
-                    if let Closure::Lua(lcl) = cl {
-                        if b < lcl.upvalues.len() {
-                            let uv_ref = lcl.upvalues[b];
-                            let uv_color = state.gc.upvalues.color(uv_ref);
-                            if let Some(uv) = state.gc.upvalues.get_mut(uv_ref) {
-                                uv.set(&mut state.stack, val);
-                            }
-                            // Forward barrier: mark child if upvalue is black.
-                            if let Some(color) = uv_color {
-                                state.gc.barrier_forward_val(color, val);
-                            }
+                    if let Closure::Lua(lcl) = cl
+                        && b < lcl.upvalues.len()
+                    {
+                        let uv_ref = lcl.upvalues[b];
+                        let uv_color = state.gc.upvalues.color(uv_ref);
+                        if let Some(uv) = state.gc.upvalues.get_mut(uv_ref) {
+                            uv.set(&mut state.stack, val);
+                        }
+                        // Forward barrier: mark child if upvalue is black.
+                        if let Some(color) = uv_color {
+                            state.gc.barrier_forward_val(color, val);
                         }
                     }
                 }
@@ -2012,17 +1966,17 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                                     .closures
                                     .get(closure_ref)
                                     .ok_or_else(|| runtime_error_simple("invalid closure"))?;
-                                if let Closure::Lua(lcl) = cl {
-                                    if parent_uv_idx < lcl.upvalues.len() {
-                                        new_cl.upvalues.push(lcl.upvalues[parent_uv_idx]);
-                                    }
+                                if let Closure::Lua(lcl) = cl
+                                    && parent_uv_idx < lcl.upvalues.len()
+                                {
+                                    new_cl.upvalues.push(lcl.upvalues[parent_uv_idx]);
                                 }
                             }
                             _ => {
                                 return Err(runtime_error(
                                     &proto,
                                     pc,
-                                    "invalid pseudo-instruction after CLOSURE".to_string(),
+                                    "invalid pseudo-instruction after CLOSURE",
                                 ));
                             }
                         }
@@ -2042,11 +1996,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let ci_func = state.call_stack[state.ci].func;
                     // Varargs are stored between ci.func+1 and base.
                     let vararg_start = ci_func + 1 + proto.num_params as usize;
-                    let num_varargs = if base > vararg_start {
-                        base - vararg_start
-                    } else {
-                        0
-                    };
+                    let num_varargs = base.saturating_sub(vararg_start);
 
                     let wanted = if b == 0 {
                         // B==0: copy all varargs, adjust top.
@@ -2087,10 +2037,8 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         pc += 1;
                     }
 
-                    let table_val = state.stack_get(ra);
-                    let table_ref = match table_val {
-                        Val::Table(r) => r,
-                        _ => return Err(type_error(state, &proto, pc, base, a, "index")),
+                    let Val::Table(table_ref) = state.stack_get(ra) else {
+                        return Err(type_error(state, &proto, pc, base, a, "index"));
                     };
 
                     let offset = (c - 1) * LFIELDS_PER_FLUSH as usize;
@@ -2218,7 +2166,7 @@ fn vm_gettable(
                     return Err(runtime_error(
                         proto,
                         pc,
-                        format!("attempt to index a {} value", current.type_name()),
+                        &format!("attempt to index a {} value", current.type_name()),
                     ));
                 }
                 Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
@@ -2325,7 +2273,7 @@ fn vm_settable(
                     return Err(runtime_error(
                         proto,
                         pc,
-                        format!("attempt to index a {} value", current.type_name()),
+                        &format!("attempt to index a {} value", current.type_name()),
                     ));
                 }
                 Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
@@ -2508,6 +2456,13 @@ fn val_less_equal(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp,
+    clippy::approx_constant
+)]
 mod tests {
     use super::*;
     use crate::vm::instructions::{Instruction, OpCode, rk_as_k};

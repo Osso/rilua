@@ -331,8 +331,10 @@ impl OpCode {
     pub fn b_mode(self) -> OpArgMask {
         match self {
             // OpArgK: constant or register/constant
-            Self::LoadK | Self::GetGlobal | Self::SetGlobal => OpArgMask::K,
-            Self::SetTable
+            Self::LoadK
+            | Self::GetGlobal
+            | Self::SetGlobal
+            | Self::SetTable
             | Self::Add
             | Self::Sub
             | Self::Mul
@@ -353,8 +355,9 @@ impl OpCode {
             | Self::Test
             | Self::TestSet
             | Self::ForLoop
-            | Self::ForPrep => OpArgMask::R,
-            Self::GetTable | Self::OpSelf => OpArgMask::R,
+            | Self::ForPrep
+            | Self::GetTable
+            | Self::OpSelf => OpArgMask::R,
             // OpArgU: used (arbitrary)
             Self::LoadBool
             | Self::GetUpval
@@ -378,8 +381,9 @@ impl OpCode {
     pub fn c_mode(self) -> OpArgMask {
         match self {
             // OpArgK: constant or register/constant
-            Self::GetTable | Self::OpSelf => OpArgMask::K,
-            Self::SetTable
+            Self::GetTable
+            | Self::OpSelf
+            | Self::SetTable
             | Self::Add
             | Self::Sub
             | Self::Mul

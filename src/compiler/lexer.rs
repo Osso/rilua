@@ -534,10 +534,10 @@ impl<'a> Lexer<'a> {
         }
 
         // Decimal: use strtod (locale-aware).
-        if let Some((val, consumed)) = libc_strtod(num_bytes) {
-            if consumed == num_bytes.len() {
-                return Ok(val);
-            }
+        if let Some((val, consumed)) = libc_strtod(num_bytes)
+            && consumed == num_bytes.len()
+        {
+            return Ok(val);
         }
 
         // trydecpoint: replace '.' with the locale's decimal point and retry.
@@ -549,10 +549,10 @@ impl<'a> Lexer<'a> {
                     *b = decpoint;
                 }
             }
-            if let Some((val, consumed)) = libc_strtod(&buf) {
-                if consumed == buf.len() {
-                    return Ok(val);
-                }
+            if let Some((val, consumed)) = libc_strtod(&buf)
+                && consumed == buf.len()
+            {
+                return Ok(val);
             }
         }
 
@@ -764,6 +764,16 @@ impl<'a> Lexer<'a> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp,
+    clippy::approx_constant,
+    clippy::items_after_statements,
+    clippy::useless_vec,
+    clippy::if_not_else
+)]
 mod tests {
     use super::*;
 

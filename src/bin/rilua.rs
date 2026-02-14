@@ -538,10 +538,8 @@ fn main() {
     }
 
     // Execute script if present.
-    if flags.script > 0 {
-        if handle_script(&mut lua, &argv, flags.script, progname) {
-            process::exit(1);
-        }
+    if flags.script > 0 && handle_script(&mut lua, &argv, flags.script, progname) {
+        process::exit(1);
     }
 
     // Interactive mode or stdin.

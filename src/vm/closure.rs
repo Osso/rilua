@@ -215,7 +215,7 @@ impl std::fmt::Debug for RustClosure {
         f.debug_struct("RustClosure")
             .field("name", &self.name)
             .field("upvalues", &self.upvalues.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

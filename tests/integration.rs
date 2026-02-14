@@ -3849,12 +3849,12 @@ fn riluac_nonexistent_file() {
 #[test]
 fn string_dump_roundtrip() {
     let (stdout, stderr, code) = run_rilua(
-        r#"
+        r"
         local f = function() return 42 end
         local s = string.dump(f)
         local g = loadstring(s)
         print(g())
-        "#,
+        ",
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "42\n");
@@ -3864,7 +3864,7 @@ fn string_dump_roundtrip() {
 fn string_dump_upvalues() {
     // Upvalues are reset in the loaded copy (PUC-Rio behavior).
     let (stdout, stderr, code) = run_rilua(
-        r#"
+        r"
         local x = 10
         local f = function() return x end
         local s = string.dump(f)
@@ -3873,7 +3873,7 @@ fn string_dump_upvalues() {
         -- The loaded function has no upvalue binding, so x is nil
         -- Actually in Lua 5.1, the upvalue gets reset to nil
         print(type(g()))
-        "#,
+        ",
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     // The upvalue x is lost in the dump; accessing it returns nil.
@@ -3914,11 +3914,11 @@ fn string_dump_vararg() {
 #[test]
 fn string_dump_error_nonfunc() {
     let (stdout, stderr, code) = run_rilua(
-        r#"
+        r"
         local ok, err = pcall(string.dump, 42)
         print(ok)
         print(err)
-        "#,
+        ",
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("false"), "should fail: {stdout}");
@@ -3927,11 +3927,11 @@ fn string_dump_error_nonfunc() {
 #[test]
 fn string_dump_error_rust_closure() {
     let (stdout, stderr, code) = run_rilua(
-        r#"
+        r"
         local ok, err = pcall(string.dump, print)
         print(ok)
         print(err)
-        "#,
+        ",
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("false"), "should fail: {stdout}");
@@ -3966,11 +3966,11 @@ fn string_dump_with_constants() {
 fn string_dump_signature_check() {
     // Verify dump output starts with \27Lua signature.
     let (stdout, stderr, code) = run_rilua(
-        r#"
+        r"
         local f = function() end
         local s = string.dump(f)
         print(string.byte(s, 1), string.byte(s, 2), string.byte(s, 3), string.byte(s, 4))
-        "#,
+        ",
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     // \27 = 27, L = 76, u = 117, a = 97
@@ -4445,7 +4445,7 @@ fn repeat_until_upvalue_scoping() {
     // locals when the until condition is checked. Requires CLOSE codegen
     // when the scope block has captured upvalues.
     let (_, stderr, code) = run_rilua(
-        r#"
+        r"
 local results = {}
 local i = 0
 repeat
@@ -4456,7 +4456,7 @@ until i >= 3
 assert(results[1]() == 1)
 assert(results[2]() == 2)
 assert(results[3]() == 3)
-"#,
+",
     );
     assert_eq!(code, 0, "stderr: {stderr}");
 }

@@ -273,98 +273,94 @@ impl Gc {
 
     /// Marks a string (directly to black -- strings have no children).
     fn mark_string(&mut self, r: GcRef<LuaString>) {
-        if let Some(color) = self.string_arena.color(r) {
-            if color.is_white() {
-                self.string_arena.set_color(r, Color::Black);
-            }
+        if let Some(color) = self.string_arena.color(r)
+            && color.is_white()
+        {
+            self.string_arena.set_color(r, Color::Black);
         }
     }
 
     /// Marks a table: white -> gray, added to gray list for traversal.
     fn mark_table(&mut self, r: GcRef<Table>) {
-        if let Some(color) = self.tables.color(r) {
-            if color.is_white() {
-                self.tables.set_color(r, Color::Gray);
-                self.gc_state.gray.push(GrayItem::Table(r));
-            }
+        if let Some(color) = self.tables.color(r)
+            && color.is_white()
+        {
+            self.tables.set_color(r, Color::Gray);
+            self.gc_state.gray.push(GrayItem::Table(r));
         }
     }
 
     /// Marks a closure: white -> gray, added to gray list.
     fn mark_closure(&mut self, r: GcRef<Closure>) {
-        if let Some(color) = self.closures.color(r) {
-            if color.is_white() {
-                self.closures.set_color(r, Color::Gray);
-                self.gc_state.gray.push(GrayItem::Closure(r));
-            }
+        if let Some(color) = self.closures.color(r)
+            && color.is_white()
+        {
+            self.closures.set_color(r, Color::Gray);
+            self.gc_state.gray.push(GrayItem::Closure(r));
         }
     }
 
     /// Marks a thread: white -> gray, added to gray list.
     fn mark_thread(&mut self, r: GcRef<LuaThread>) {
-        if let Some(color) = self.threads.color(r) {
-            if color.is_white() {
-                self.threads.set_color(r, Color::Gray);
-                self.gc_state.gray.push(GrayItem::Thread(r));
-            }
+        if let Some(color) = self.threads.color(r)
+            && color.is_white()
+        {
+            self.threads.set_color(r, Color::Gray);
+            self.gc_state.gray.push(GrayItem::Thread(r));
         }
     }
 
     /// Marks a userdata: marks metatable and env, then goes black.
     fn mark_userdata(&mut self, r: GcRef<Userdata>) {
-        if let Some(color) = self.userdata.color(r) {
-            if color.is_white() {
-                let (mt, env) = {
-                    if let Some(ud) = self.userdata.get(r) {
-                        (ud.metatable(), ud.env())
-                    } else {
-                        return;
-                    }
-                };
-                self.userdata.set_color(r, Color::Black);
-                if let Some(mt) = mt {
-                    self.mark_table(mt);
+        if let Some(color) = self.userdata.color(r)
+            && color.is_white()
+        {
+            let (mt, env) = {
+                if let Some(ud) = self.userdata.get(r) {
+                    (ud.metatable(), ud.env())
+                } else {
+                    return;
                 }
-                if let Some(env) = env {
-                    self.mark_table(env);
-                }
+            };
+            self.userdata.set_color(r, Color::Black);
+            if let Some(mt) = mt {
+                self.mark_table(mt);
+            }
+            if let Some(env) = env {
+                self.mark_table(env);
             }
         }
     }
 
     /// Marks an upvalue: if closed, marks the stored value.
     fn mark_upvalue(&mut self, r: GcRef<Upvalue>) {
-        if let Some(color) = self.upvalues.color(r) {
-            if color.is_white() {
-                let closed_val = {
-                    if let Some(uv) = self.upvalues.get(r) {
-                        match &uv.state {
-                            UpvalueState::Closed { value } => Some(*value),
-                            UpvalueState::Open { .. } => None,
-                        }
-                    } else {
-                        return;
+        if let Some(color) = self.upvalues.color(r)
+            && color.is_white()
+        {
+            let closed_val = {
+                if let Some(uv) = self.upvalues.get(r) {
+                    match &uv.state {
+                        UpvalueState::Closed { value } => Some(*value),
+                        UpvalueState::Open { .. } => None,
                     }
-                };
-                self.upvalues.set_color(r, Color::Black);
-                if let Some(val) = closed_val {
-                    self.mark_value(val);
+                } else {
+                    return;
                 }
+            };
+            self.upvalues.set_color(r, Color::Black);
+            if let Some(val) = closed_val {
+                self.mark_value(val);
             }
         }
     }
 
     /// Marks GC-internal roots: type metatables, tm_names.
     fn mark_gc_roots(&mut self) {
-        for mt in self.type_metatables {
-            if let Some(r) = mt {
-                self.mark_table(r);
-            }
+        for r in self.type_metatables.into_iter().flatten() {
+            self.mark_table(r);
         }
-        for name in self.tm_names {
-            if let Some(r) = name {
-                self.mark_string(r);
-            }
+        for r in self.tm_names.into_iter().flatten() {
+            self.mark_string(r);
         }
     }
 
@@ -432,11 +428,11 @@ impl Gc {
         // Look up "__mode" in the metatable.
         if let Some(mode_str_ref) = self.find_interned_string(b"__mode") {
             let mode_val = mt.get(Val::Str(mode_str_ref), &self.string_arena);
-            if let Val::Str(s) = mode_val {
-                if let Some(ls) = self.string_arena.get(s) {
-                    let data = ls.data();
-                    return (data.contains(&b'k'), data.contains(&b'v'));
-                }
+            if let Val::Str(s) = mode_val
+                && let Some(ls) = self.string_arena.get(s)
+            {
+                let data = ls.data();
+                return (data.contains(&b'k'), data.contains(&b'v'));
             }
         }
         (false, false)
@@ -447,16 +443,15 @@ impl Gc {
     fn find_interned_string(&self, name: &[u8]) -> Option<GcRef<LuaString>> {
         // Check tm_names first (common metamethod names).
         for tm_name in &self.tm_names {
-            if let Some(r) = tm_name {
-                if let Some(ls) = self.string_arena.get(*r) {
-                    if ls.data() == name {
-                        return Some(*r);
-                    }
-                }
+            if let Some(r) = tm_name
+                && let Some(ls) = self.string_arena.get(*r)
+                && ls.data() == name
+            {
+                return Some(*r);
             }
         }
         // Scan the string arena for a match.
-        for (r, ls, _) in self.string_arena.iter() {
+        for (r, ls, _) in &self.string_arena {
             if ls.data() == name {
                 return Some(r);
             }
@@ -557,9 +552,8 @@ impl Gc {
     /// The returned cost approximates the memory traversed, matching PUC-Rio's
     /// `propagatemark()` which returns `sizeof(T) + child_sizes`.
     pub fn propagate_one(&mut self) -> PropagateResult {
-        let item = match self.gc_state.gray.pop() {
-            Some(item) => item,
-            None => return PropagateResult::Empty,
+        let Some(item) = self.gc_state.gray.pop() else {
+            return PropagateResult::Empty;
         };
         match item {
             GrayItem::Table(r) => {
@@ -725,7 +719,7 @@ impl Gc {
 
         // First pass: collect refs of dead userdata with __gc.
         let mut to_finalize = Vec::new();
-        for (r, ud, color) in self.userdata.iter() {
+        for (r, ud, color) in &self.userdata {
             if color != dead_white {
                 continue; // alive (marked Black/Gray) or already finalized
             }
@@ -733,11 +727,11 @@ impl Gc {
                 continue; // already finalized
             }
             // Check for __gc metamethod.
-            if let Some(mt_ref) = ud.metatable() {
-                if self.has_gc_metamethod(mt_ref) {
-                    to_finalize.push(r);
-                    dead_size += EST_USERDATA_SIZE;
-                }
+            if let Some(mt_ref) = ud.metatable()
+                && self.has_gc_metamethod(mt_ref)
+            {
+                to_finalize.push(r);
+                dead_size += EST_USERDATA_SIZE;
             }
         }
 
@@ -756,11 +750,11 @@ impl Gc {
 
     /// Checks if a table has a `__gc` field (for userdata finalization).
     fn has_gc_metamethod(&self, mt_ref: GcRef<Table>) -> bool {
-        if let Some(gc_name) = self.find_interned_string(b"__gc") {
-            if let Some(mt) = self.tables.get(mt_ref) {
-                let val = mt.get(Val::Str(gc_name), &self.string_arena);
-                return !val.is_nil();
-            }
+        if let Some(gc_name) = self.find_interned_string(b"__gc")
+            && let Some(mt) = self.tables.get(mt_ref)
+        {
+            let val = mt.get(Val::Str(gc_name), &self.string_arena);
+            return !val.is_nil();
         }
         false
     }
@@ -891,13 +885,18 @@ impl Gc {
     /// considered dead. This matches PUC-Rio's `iscleared()` which returns
     /// true for `isfinalized(u)` when checking values but not keys.
     fn is_dead_collectable(&self, val: Val, other_white: Color, is_key: bool) -> bool {
+        #[allow(clippy::match_same_arms)]
         match val {
             Val::Str(_) => false,
             Val::Table(r) => self.tables.color(r) == Some(other_white),
             Val::Function(r) => self.closures.color(r) == Some(other_white),
             Val::Userdata(r) => {
                 self.userdata.color(r) == Some(other_white)
-                    || (!is_key && self.userdata.get(r).is_some_and(|ud| ud.finalized()))
+                    || (!is_key
+                        && self
+                            .userdata
+                            .get(r)
+                            .is_some_and(super::super::value::Userdata::finalized))
             }
             Val::Thread(r) => self.threads.color(r) == Some(other_white),
             _ => false,
@@ -914,11 +913,11 @@ impl Gc {
         };
         if let Some(mode_str_ref) = self.find_interned_string(b"__mode") {
             let mode_val = mt.get(Val::Str(mode_str_ref), &self.string_arena);
-            if let Val::Str(s) = mode_val {
-                if let Some(ls) = self.string_arena.get(s) {
-                    let data = ls.data();
-                    return (data.contains(&b'k'), data.contains(&b'v'));
-                }
+            if let Val::Str(s) = mode_val
+                && let Some(ls) = self.string_arena.get(s)
+            {
+                let data = ls.data();
+                return (data.contains(&b'k'), data.contains(&b'v'));
             }
         }
         (false, false)
@@ -1046,11 +1045,11 @@ impl Gc {
         if self.gc_state.phase != GcPhase::Propagate {
             return;
         }
-        if let Some(color) = self.tables.color(parent) {
-            if color.is_black() {
-                self.tables.set_color(parent, Color::Gray);
-                self.gc_state.grayagain.push(GrayItem::Table(parent));
-            }
+        if let Some(color) = self.tables.color(parent)
+            && color.is_black()
+        {
+            self.tables.set_color(parent, Color::Gray);
+            self.gc_state.grayagain.push(GrayItem::Table(parent));
         }
     }
 
@@ -1312,7 +1311,11 @@ impl LuaState {
 
         // Find the __gc metamethod.
         let gc_fn = {
-            let mt_ref = self.gc.userdata.get(ud_ref).and_then(|ud| ud.metatable());
+            let mt_ref = self
+                .gc
+                .userdata
+                .get(ud_ref)
+                .and_then(super::super::value::Userdata::metatable);
             if let Some(mt_ref) = mt_ref {
                 if let Some(gc_name) = self.gc.find_interned_string(b"__gc") {
                     if let Some(mt) = self.gc.tables.get(mt_ref) {
@@ -1371,7 +1374,7 @@ impl LuaState {
     /// Budget = `(GCSTEPSIZE / 100) * gc_stepmul`.
     /// If stepmul is 0, runs with no limit (effectively a full cycle).
     pub fn gc_step_auto(&mut self) -> LuaResult<()> {
-        let stepmul = self.gc.gc_state.gc_stepmul as i64;
+        let stepmul = i64::from(self.gc.gc_state.gc_stepmul);
         let budget = if stepmul == 0 {
             i64::MAX / 2 // no limit
         } else {

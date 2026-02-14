@@ -166,10 +166,10 @@ pub fn co_resume(state: &mut LuaState) -> LuaResult<u32> {
 fn close_thread_upvalues(state: &mut LuaState) -> Vec<(GcRef<Upvalue>, usize)> {
     let mut suspended = Vec::new();
     for &uv_ref in &state.open_upvalues {
-        if let Some(uv) = state.gc.upvalues.get(uv_ref) {
-            if let Some(idx) = uv.stack_index() {
-                suspended.push((uv_ref, idx));
-            }
+        if let Some(uv) = state.gc.upvalues.get(uv_ref)
+            && let Some(idx) = uv.stack_index()
+        {
+            suspended.push((uv_ref, idx));
         }
     }
     for &(uv_ref, _) in &suspended {
@@ -319,11 +319,7 @@ fn auxresume(
             // Coroutine yielded. Collect yielded values.
             // The values are the top n_results on the stack.
             let mut results = Vec::new();
-            let start = if state.top >= n_results as usize {
-                state.top - n_results as usize
-            } else {
-                0
-            };
+            let start = state.top.saturating_sub(n_results as usize);
             for i in start..state.top {
                 results.push(state.stack_get(i));
             }
@@ -429,9 +425,8 @@ fn wrap_aux(state: &mut LuaState) -> LuaResult<u32> {
     // Get the thread from upvalue[0].
     let ci_func = state.call_stack[state.ci].func;
     let func_val = state.stack_get(ci_func);
-    let closure_ref = match func_val {
-        Val::Function(r) => r,
-        _ => return Err(simple_error("invalid wrap closure".into())),
+    let Val::Function(closure_ref) = func_val else {
+        return Err(simple_error("invalid wrap closure".into()));
     };
 
     let co_ref = {
@@ -536,9 +531,8 @@ pub fn co_status(state: &mut LuaState) -> LuaResult<u32> {
     }
 
     let status_str = match state.gc.threads.get(co_ref).map(|t| t.status) {
-        Some(ThreadStatus::Initial) => "suspended",
         Some(ThreadStatus::Running) => "running",
-        Some(ThreadStatus::Suspended) => "suspended",
+        Some(ThreadStatus::Initial) | Some(ThreadStatus::Suspended) => "suspended",
         Some(ThreadStatus::Normal) => "normal",
         Some(ThreadStatus::Dead) | None => "dead",
     };

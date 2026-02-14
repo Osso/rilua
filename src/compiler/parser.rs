@@ -319,7 +319,9 @@ impl<'a> Parser<'a> {
         // raw byte. We build the full "source:line: msg near 'BYTE'" as raw
         // bytes so that loadstring can push it onto the Lua stack verbatim.
         let raw_message = if let Token::Char(b) = self.current {
-            if !b.is_ascii() {
+            if b.is_ascii() {
+                None
+            } else {
                 let source = chunkid(self.lexer.source_name());
                 let mut raw = Vec::new();
                 raw.extend_from_slice(source.as_bytes());
@@ -331,8 +333,6 @@ impl<'a> Parser<'a> {
                 raw.push(b);
                 raw.push(b'\'');
                 Some(raw)
-            } else {
-                None
             }
         } else {
             None
@@ -396,11 +396,11 @@ impl<'a> Parser<'a> {
         }
 
         // Restore local variable state (PUC-Rio: leaveblock -> removevars).
-        if let Some((count, names_len)) = saved_locals {
-            if let Some(scope) = self.func_scopes.last_mut() {
-                scope.local_count = count;
-                scope.local_names.truncate(names_len);
-            }
+        if let Some((count, names_len)) = saved_locals
+            && let Some(scope) = self.func_scopes.last_mut()
+        {
+            scope.local_count = count;
+            scope.local_names.truncate(names_len);
         }
 
         self.leave_level();
@@ -524,7 +524,7 @@ impl<'a> Parser<'a> {
         // Track the user-visible name for upvalue resolution; the 3 implicit
         // locals have internal names that user code can't reference.
         self.register_locals(3)?;
-        self.register_locals_named(&[name.clone()])?;
+        self.register_locals_named(std::slice::from_ref(&name))?;
         self.expect_char(b'=')?;
         let start = self.parse_expr()?;
         self.expect_char(b',')?;
@@ -650,7 +650,7 @@ impl<'a> Parser<'a> {
         if self.test_next(&Token::Function)? {
             let (name, _) = self.expect_name()?;
             // The function name is a local variable.
-            self.register_locals_named(&[name.clone()])?;
+            self.register_locals_named(std::slice::from_ref(&name))?;
             let body = self.parse_func_body(span)?;
             return Ok(Stat::LocalFunc { name, body, span });
         }
@@ -1148,6 +1148,13 @@ pub fn parse_with_lexer(lexer: Lexer<'_>) -> LuaResult<Block> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::items_after_statements,
+    clippy::float_cmp
+)]
 mod tests {
     use super::*;
 

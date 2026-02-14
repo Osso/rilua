@@ -202,6 +202,9 @@ pub fn str_sub(state: &mut LuaState) -> LuaResult<u32> {
 // string.rep
 // ---------------------------------------------------------------------------
 
+/// PUC-Rio 32-bit limit: ~4GB. Use same limit for cross-platform consistency.
+const MAX_STRING_SIZE: usize = (u32::MAX - 2) as usize;
+
 /// `string.rep(s, n)` -- Returns a string repeated n times.
 pub fn str_rep(state: &mut LuaState) -> LuaResult<u32> {
     check_args("string.rep", state, 2)?;
@@ -213,8 +216,6 @@ pub fn str_rep(state: &mut LuaState) -> LuaResult<u32> {
         state.push(Val::Str(r));
     } else {
         let total = s.len().saturating_mul(n as usize);
-        // PUC-Rio 32-bit limit: ~4GB. Use same limit for cross-platform consistency.
-        const MAX_STRING_SIZE: usize = (u32::MAX - 2) as usize;
         if total > MAX_STRING_SIZE {
             return Err(LuaError::Runtime(crate::RuntimeError {
                 message: "string length overflow".to_string(),
@@ -361,7 +362,7 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
                 let n = coerce_to_number_err(state, val, "string.format", arg_idx)?;
                 #[allow(clippy::cast_possible_truncation)]
                 let int_val = n as i64;
-                let formatted = format_with_spec(spec, FormatArg::Int(int_val));
+                let formatted = format_with_spec(spec, &FormatArg::Int(int_val));
                 result.extend_from_slice(formatted.as_bytes());
             }
             b'u' => {
@@ -370,7 +371,7 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
                 let n = coerce_to_number_err(state, val, "string.format", arg_idx)?;
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let uint_val = n as u64;
-                let formatted = format_with_spec(spec, FormatArg::Uint(uint_val));
+                let formatted = format_with_spec(spec, &FormatArg::Uint(uint_val));
                 result.extend_from_slice(formatted.as_bytes());
             }
             b'o' => {
@@ -379,7 +380,7 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
                 let n = coerce_to_number_err(state, val, "string.format", arg_idx)?;
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let uint_val = n as u64;
-                let formatted = format_with_spec(spec, FormatArg::Oct(uint_val));
+                let formatted = format_with_spec(spec, &FormatArg::Oct(uint_val));
                 result.extend_from_slice(formatted.as_bytes());
             }
             b'x' | b'X' => {
@@ -389,9 +390,9 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let uint_val = n as u64;
                 let formatted = if spec_char == b'x' {
-                    format_with_spec(spec, FormatArg::Hex(uint_val))
+                    format_with_spec(spec, &FormatArg::Hex(uint_val))
                 } else {
-                    format_with_spec(spec, FormatArg::HexUpper(uint_val))
+                    format_with_spec(spec, &FormatArg::HexUpper(uint_val))
                 };
                 result.extend_from_slice(formatted.as_bytes());
             }
@@ -399,7 +400,7 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
                 let val = arg(state, arg_idx);
                 arg_idx += 1;
                 let n = coerce_to_number_err(state, val, "string.format", arg_idx)?;
-                let formatted = format_with_spec(spec, FormatArg::Float(n));
+                let formatted = format_with_spec(spec, &FormatArg::Float(n));
                 result.extend_from_slice(formatted.as_bytes());
             }
             b'c' => {
@@ -431,7 +432,6 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
                             b"false".to_vec()
                         }
                     }
-                    Val::Num(_) => format!("{val}").into_bytes(),
                     _ => format!("{val}").into_bytes(),
                 };
                 let formatted = format_string_with_spec_bytes(spec, &s_bytes);
@@ -516,7 +516,7 @@ enum FormatArg {
 ///
 /// We parse the spec manually to extract flags, width, precision, then
 /// use Rust's formatting to approximate C printf behavior.
-fn format_with_spec(spec: &[u8], arg: FormatArg) -> String {
+fn format_with_spec(spec: &[u8], arg: &FormatArg) -> String {
     let spec_str = String::from_utf8_lossy(spec);
 
     // Parse flags, width, precision from spec like "%-10.3f"
@@ -571,7 +571,7 @@ fn format_with_spec(spec: &[u8], arg: FormatArg) -> String {
     let alt = flags.contains('#');
     let w = width.unwrap_or(0);
 
-    match arg {
+    match *arg {
         FormatArg::Int(n) => {
             let sign = if n < 0 {
                 "-"
@@ -655,6 +655,11 @@ fn normalize_exponent_sign(s: &str) -> String {
 }
 
 /// Formats a float value with the given spec.
+///
+/// The parameter count mirrors PUC-Rio's format spec fields: value, spec chars,
+/// width, precision, and four boolean flags. Grouping into a struct would add
+/// indirection without reducing complexity since this is the only call site.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn format_float(
     n: f64,
     chars: &[char],
@@ -789,10 +794,10 @@ fn format_g(n: f64, prec: usize, upper: bool) -> String {
     }
 
     // Use scientific notation to determine which format to use.
-    let exp = if n != 0.0 {
-        n.abs().log10().floor() as i32
-    } else {
+    let exp = if n == 0.0 {
         0
+    } else {
+        n.abs().log10().floor() as i32
     };
 
     if exp < -4 || exp >= prec as i32 {
@@ -830,7 +835,7 @@ fn strip_trailing_zeros_fixed(s: &str) -> String {
 /// Also normalizes the exponent to always include a sign (C printf compat).
 fn strip_trailing_zeros_scientific(s: &str) -> String {
     // Split at 'e' or 'E'.
-    if let Some(e_pos) = s.find(|c| c == 'e' || c == 'E') {
+    if let Some(e_pos) = s.find(['e', 'E']) {
         let (mantissa, exp_part) = s.split_at(e_pos);
         let trimmed = strip_trailing_zeros_fixed(mantissa);
         // Recombine with normalized exponent sign.
@@ -865,21 +870,22 @@ fn format_string_with_spec_bytes(spec: &[u8], s: &[u8]) -> Vec<u8> {
             .and_then(|s| s.parse().ok());
     }
 
-    let mut precision: Option<usize> = None;
-    if idx < spec.len() && spec[idx] == b'.' {
+    let precision = if idx < spec.len() && spec[idx] == b'.' {
         idx += 1;
         let prec_start = idx;
         while idx < spec.len() && spec[idx].is_ascii_digit() {
             idx += 1;
         }
-        precision = if idx > prec_start {
+        if idx > prec_start {
             std::str::from_utf8(&spec[prec_start..idx])
                 .ok()
                 .and_then(|s| s.parse().ok())
         } else {
             Some(0)
-        };
-    }
+        }
+    } else {
+        None
+    };
 
     // Apply precision (truncate string at byte level).
     let truncated = if let Some(prec) = precision {
@@ -943,6 +949,61 @@ enum CaptureLen {
 
 /// Maximum recursion depth for pattern matching.
 const MAXCCALLS: u32 = 200;
+
+enum Quantifier {
+    Greedy,   // *
+    Plus,     // +
+    Lazy,     // -
+    Optional, // ?
+    None,
+}
+
+// Locale-aware character classification and case conversion via libc.
+// PUC-Rio uses isalpha(), isupper(), tolower(), toupper(), etc. which
+// respect the current C locale (set via os.setlocale).
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn isalpha(c: i32) -> i32;
+    fn iscntrl(c: i32) -> i32;
+    fn isdigit(c: i32) -> i32;
+    fn islower(c: i32) -> i32;
+    fn ispunct(c: i32) -> i32;
+    fn isspace(c: i32) -> i32;
+    fn isupper(c: i32) -> i32;
+    fn isalnum(c: i32) -> i32;
+    fn isxdigit(c: i32) -> i32;
+    fn tolower(c: i32) -> i32;
+    fn toupper(c: i32) -> i32;
+}
+
+/// Match a character against a character class letter.
+/// Uses libc functions for locale-aware classification (matching PUC-Rio).
+#[allow(unsafe_code)]
+fn matchclass(ch: u8, class: u8) -> bool {
+    let c = i32::from(ch);
+    let lower_class = class.to_ascii_lowercase();
+    // SAFETY: isalpha et al. are standard C functions that accept any int
+    // value; unsigned char values (0-255) are always valid arguments.
+    let result = match lower_class {
+        b'a' => unsafe { isalpha(c) != 0 },
+        b'c' => unsafe { iscntrl(c) != 0 },
+        b'd' => unsafe { isdigit(c) != 0 },
+        b'l' => unsafe { islower(c) != 0 },
+        b'p' => unsafe { ispunct(c) != 0 },
+        b's' => unsafe { isspace(c) != 0 },
+        b'u' => unsafe { isupper(c) != 0 },
+        b'w' => unsafe { isalnum(c) != 0 },
+        b'x' => unsafe { isxdigit(c) != 0 },
+        b'z' => ch == 0,         // PUC-Rio: case 'z': res = (c == 0)
+        _ => return ch == class, // Literal match for non-class escapes.
+    };
+    // Uppercase class means complement.
+    if class.is_ascii_uppercase() {
+        !result
+    } else {
+        result
+    }
+}
 
 impl<'a> MatchState<'a> {
     fn new(src: &'a [u8], pat: &'a [u8]) -> Self {
@@ -1023,30 +1084,31 @@ impl<'a> MatchState<'a> {
                 }
                 Quantifier::Optional => {
                     // '?' - match 0 or 1.
-                    if src_pos < self.src.len() && self.singlematch(src_pos, pat_pos) {
-                        if let Some(end) = self.match_(src_pos + 1, class_end + 1)? {
-                            return Ok(Some(end));
-                        }
+                    if src_pos < self.src.len()
+                        && self.singlematch(src_pos, pat_pos)
+                        && let Some(end) = self.match_(src_pos + 1, class_end + 1)?
+                    {
+                        return Ok(Some(end));
                     }
                     pat_pos = class_end + 1;
-                    continue;
                 }
                 Quantifier::None => {
                     // No quantifier. Single match.
-                    if pat_pos < self.pat.len() && self.pat[pat_pos] == b'%' {
-                        if pat_pos + 1 < self.pat.len() {
-                            match self.pat[pat_pos + 1] {
-                                b'b' => {
-                                    return self.match_balance(src_pos, pat_pos);
-                                }
-                                b'f' => {
-                                    return self.match_frontier(src_pos, pat_pos);
-                                }
-                                c if c.is_ascii_digit() => {
-                                    return self.match_backref(src_pos, pat_pos);
-                                }
-                                _ => {}
+                    if pat_pos < self.pat.len()
+                        && self.pat[pat_pos] == b'%'
+                        && pat_pos + 1 < self.pat.len()
+                    {
+                        match self.pat[pat_pos + 1] {
+                            b'b' => {
+                                return self.match_balance(src_pos, pat_pos);
                             }
+                            b'f' => {
+                                return self.match_frontier(src_pos, pat_pos);
+                            }
+                            c if c.is_ascii_digit() => {
+                                return self.match_backref(src_pos, pat_pos);
+                            }
+                            _ => {}
                         }
                     }
 
@@ -1133,8 +1195,8 @@ impl<'a> MatchState<'a> {
         }
     }
 
-    /// Match a character against a bracket class [set].
-    /// PUC-Rio: matchbracketclass(c, p, ec) where p points to '[' and ec to ']'.
+    /// Match a character against a bracket class `[set]`.
+    /// PUC-Rio: `matchbracketclass(c, p, ec)` where p points to `[` and ec to `]`.
     fn matchbracketclass(&self, ch: u8, pat_pos: usize) -> (bool, usize) {
         // Find the closing ']' first (class_end handles ] after [^ correctly).
         let class_end_pos = self.class_end(pat_pos);
@@ -1410,61 +1472,6 @@ impl<'a> MatchState<'a> {
     }
 }
 
-enum Quantifier {
-    Greedy,   // *
-    Plus,     // +
-    Lazy,     // -
-    Optional, // ?
-    None,
-}
-
-// Locale-aware character classification and case conversion via libc.
-// PUC-Rio uses isalpha(), isupper(), tolower(), toupper(), etc. which
-// respect the current C locale (set via os.setlocale).
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn isalpha(c: i32) -> i32;
-    fn iscntrl(c: i32) -> i32;
-    fn isdigit(c: i32) -> i32;
-    fn islower(c: i32) -> i32;
-    fn ispunct(c: i32) -> i32;
-    fn isspace(c: i32) -> i32;
-    fn isupper(c: i32) -> i32;
-    fn isalnum(c: i32) -> i32;
-    fn isxdigit(c: i32) -> i32;
-    fn tolower(c: i32) -> i32;
-    fn toupper(c: i32) -> i32;
-}
-
-/// Match a character against a character class letter.
-/// Uses libc functions for locale-aware classification (matching PUC-Rio).
-#[allow(unsafe_code)]
-fn matchclass(ch: u8, class: u8) -> bool {
-    let c = i32::from(ch);
-    let lower_class = class.to_ascii_lowercase();
-    // SAFETY: isalpha et al. are standard C functions that accept any int
-    // value; unsigned char values (0-255) are always valid arguments.
-    let result = match lower_class {
-        b'a' => unsafe { isalpha(c) != 0 },
-        b'c' => unsafe { iscntrl(c) != 0 },
-        b'd' => unsafe { isdigit(c) != 0 },
-        b'l' => unsafe { islower(c) != 0 },
-        b'p' => unsafe { ispunct(c) != 0 },
-        b's' => unsafe { isspace(c) != 0 },
-        b'u' => unsafe { isupper(c) != 0 },
-        b'w' => unsafe { isalnum(c) != 0 },
-        b'x' => unsafe { isxdigit(c) != 0 },
-        b'z' => ch == 0,         // PUC-Rio: case 'z': res = (c == 0)
-        _ => return ch == class, // Literal match for non-class escapes.
-    };
-    // Uppercase class means complement.
-    if class.is_ascii_uppercase() {
-        !result
-    } else {
-        result
-    }
-}
-
 // ---------------------------------------------------------------------------
 // string.find
 // ---------------------------------------------------------------------------
@@ -1501,7 +1508,7 @@ pub fn str_find(state: &mut LuaState) -> LuaResult<u32> {
     } else {
         // Pattern search.
         let anchor = !pat.is_empty() && pat[0] == b'^';
-        let pat_start = if anchor { 1 } else { 0 };
+        let pat_start = usize::from(anchor);
         let pattern = &pat[pat_start..];
 
         let mut pos = init;
@@ -1580,7 +1587,7 @@ pub fn str_match(state: &mut LuaState) -> LuaResult<u32> {
     let init = (init.max(1) as usize).saturating_sub(1);
 
     let anchor = !pat.is_empty() && pat[0] == b'^';
-    let pat_start = if anchor { 1 } else { 0 };
+    let pat_start = usize::from(anchor);
     let pattern = &pat[pat_start..];
 
     let mut pos = init;
@@ -1681,7 +1688,7 @@ fn gmatch_aux(state: &mut LuaState) -> LuaResult<u32> {
     let mut pos = pos_f as usize;
 
     let anchor = !pat.is_empty() && pat[0] == b'^';
-    let pat_start = if anchor { 1 } else { 0 };
+    let pat_start = usize::from(anchor);
     let pattern = &pat[pat_start..];
 
     while pos <= s.len() {
@@ -1692,12 +1699,12 @@ fn gmatch_aux(state: &mut LuaState) -> LuaResult<u32> {
             let new_pos = if end_pos == pos { end_pos + 1 } else { end_pos };
 
             // Update the upvalue in the closure.
-            if let Some(cl) = state.gc.closures.get_mut(closure_ref) {
-                if let crate::vm::closure::Closure::Rust(rc) = cl {
-                    #[allow(clippy::cast_precision_loss)]
-                    {
-                        rc.upvalues[2] = Val::Num(new_pos as f64);
-                    }
+            if let Some(cl) = state.gc.closures.get_mut(closure_ref)
+                && let crate::vm::closure::Closure::Rust(rc) = cl
+            {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    rc.upvalues[2] = Val::Num(new_pos as f64);
                 }
             }
 
@@ -1732,7 +1739,7 @@ pub fn str_gsub(state: &mut LuaState) -> LuaResult<u32> {
     let max_replacements = opt_int(state, "string.gsub", 3, i64::MAX)?.max(0) as usize;
 
     let anchor = !pat.is_empty() && pat[0] == b'^';
-    let pat_start = if anchor { 1 } else { 0 };
+    let pat_start = usize::from(anchor);
     let pattern = &pat[pat_start..];
 
     let mut result = Vec::new();
@@ -1870,7 +1877,7 @@ fn get_gsub_replacement(
                 get_capture_val(state, &ms.captures[0], src)?
             };
             let val = state.gettable(repl, key)?;
-            val_to_replacement(state, val, src, match_start, match_end)
+            Ok(val_to_replacement(state, val, src, match_start, match_end))
         }
         Val::Function(_) => {
             // Function replacement: call with captures (or whole match).
@@ -1892,13 +1899,18 @@ fn get_gsub_replacement(
                 state.top = call_base + 1 + n;
             }
 
-            let _n_args = state.top - call_base - 1;
             state.call_function(call_base, 1)?;
 
             let result_val = state.stack_get(call_base);
             state.top = call_base;
 
-            val_to_replacement(state, result_val, src, match_start, match_end)
+            Ok(val_to_replacement(
+                state,
+                result_val,
+                src,
+                match_start,
+                match_end,
+            ))
         }
         _ => {
             // Non-string, non-table, non-function: use as-is.
@@ -1929,24 +1941,23 @@ fn get_capture_val(state: &mut LuaState, cap: &Capture, src: &[u8]) -> LuaResult
 
 /// Convert a replacement value to bytes. If nil/false, use the original match.
 fn val_to_replacement(
-    state: &mut LuaState,
+    state: &LuaState,
     val: Val,
     src: &[u8],
     match_start: usize,
     match_end: usize,
-) -> LuaResult<Vec<u8>> {
+) -> Vec<u8> {
     if val.is_nil() || val == Val::Bool(false) {
-        return Ok(src[match_start..match_end].to_vec());
+        return src[match_start..match_end].to_vec();
     }
     match val {
-        Val::Str(r) => Ok(state
+        Val::Str(r) => state
             .gc
             .string_arena
             .get(r)
             .map(|s| s.data().to_vec())
-            .unwrap_or_default()),
-        Val::Num(_) => Ok(format!("{val}").into_bytes()),
-        _ => Ok(format!("{val}").into_bytes()),
+            .unwrap_or_default(),
+        _ => format!("{val}").into_bytes(),
     }
 }
 
@@ -1961,9 +1972,8 @@ pub fn str_dump(state: &mut LuaState) -> LuaResult<u32> {
     check_args("string.dump", state, 1)?;
 
     let func_val = arg(state, 0);
-    let closure_ref = match func_val {
-        Val::Function(r) => r,
-        _ => return Err(bad_argument("string.dump", 1, "function expected")),
+    let Val::Function(closure_ref) = func_val else {
+        return Err(bad_argument("string.dump", 1, "function expected"));
     };
 
     // Get the Proto from the closure (must be a Lua closure).

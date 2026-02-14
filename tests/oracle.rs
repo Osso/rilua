@@ -1,6 +1,13 @@
 //! Oracle comparison tests: verify PUC-Rio Lua 5.1.1 reference binary
 //! integration and establish baseline for future rilua comparisons.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::items_after_statements
+)]
+
 #[allow(dead_code, unreachable_pub)]
 mod helpers;
 
@@ -1696,6 +1703,9 @@ fn oracle_cli_stdin_dash() {
         return;
     }
 
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
     let rilua = oracle::run_rilua_stdin(&["-"], "print(99)\n");
 
     // PUC-Rio equivalent.
@@ -1703,21 +1713,17 @@ fn oracle_cli_stdin_dash() {
     if !bin.exists() {
         return;
     }
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     let mut child = Command::new(&bin)
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|_| panic!("failed to spawn reference"));
+        .expect("failed to spawn reference");
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(b"print(99)\n").ok();
     }
-    let output = child
-        .wait_with_output()
-        .unwrap_or_else(|_| panic!("wait failed"));
+    let output = child.wait_with_output().expect("wait failed");
     let ref_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
 
     assert_eq!(rilua.stdout, ref_stdout, "stdin dash output mismatch");
@@ -1806,7 +1812,7 @@ fn oracle_dump_load_exec() {
 #[test]
 fn oracle_dump_vararg() {
     oracle::assert_matches_reference(
-        r#"local f = function(...) return select('#', ...) end; print(loadstring(string.dump(f))(1,2,3))"#,
+        r"local f = function(...) return select('#', ...) end; print(loadstring(string.dump(f))(1,2,3))",
     );
 }
 

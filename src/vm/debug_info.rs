@@ -329,11 +329,7 @@ pub fn getfuncname_raw(
     let call_op = call_instr.opcode();
 
     match call_op {
-        OpCode::Call | OpCode::TailCall => {
-            let a = call_instr.a();
-            getobjname(&caller_proto, call_pc, a, string_arena)
-        }
-        OpCode::TForLoop => {
+        OpCode::Call | OpCode::TailCall | OpCode::TForLoop => {
             let a = call_instr.a();
             getobjname(&caller_proto, call_pc, a, string_arena)
         }

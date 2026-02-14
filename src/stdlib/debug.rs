@@ -132,16 +132,14 @@ fn resolve_stack_level_raw(
     while remaining > 0 && ci_idx > 0 {
         remaining -= 1;
         let func_slot = call_stack[ci_idx].func;
-        if func_slot < stack.len() {
-            if let Val::Function(r) = stack[func_slot] {
-                if gc
-                    .closures
-                    .get(r)
-                    .is_some_and(|c| matches!(c, Closure::Lua(_)))
-                {
-                    remaining -= i64::from(call_stack[ci_idx].tail_calls);
-                }
-            }
+        if func_slot < stack.len()
+            && let Val::Function(r) = stack[func_slot]
+            && gc
+                .closures
+                .get(r)
+                .is_some_and(|c| matches!(c, Closure::Lua(_)))
+        {
+            remaining -= i64::from(call_stack[ci_idx].tail_calls);
         }
         ci_idx -= 1;
     }
@@ -1107,17 +1105,17 @@ pub fn db_setlocal(state: &mut LuaState) -> LuaResult<u32> {
         if let Some((name, stack_idx, limit)) = info {
             let name_ref = if let Some(name) = name {
                 // Mutable phase: set the value.
-                if let Some(thread) = state.gc.threads.get_mut(cr) {
-                    if stack_idx < thread.stack.len() {
-                        thread.stack[stack_idx] = new_val;
-                    }
+                if let Some(thread) = state.gc.threads.get_mut(cr)
+                    && stack_idx < thread.stack.len()
+                {
+                    thread.stack[stack_idx] = new_val;
                 }
                 state.gc.intern_string(name.as_bytes())
             } else if local_idx > 0 && stack_idx < limit {
-                if let Some(thread) = state.gc.threads.get_mut(cr) {
-                    if stack_idx < thread.stack.len() {
-                        thread.stack[stack_idx] = new_val;
-                    }
+                if let Some(thread) = state.gc.threads.get_mut(cr)
+                    && stack_idx < thread.stack.len()
+                {
+                    thread.stack[stack_idx] = new_val;
                 }
                 state.gc.intern_string(b"(*temporary)")
             } else {
@@ -1214,7 +1212,7 @@ pub fn db_setupvalue(state: &mut LuaState) -> LuaResult<u32> {
     let n = check_number(state, "setupvalue", 1)? as usize;
     let new_val = arg(state, 2);
 
-    let is_lua = state.gc.closures.get(cl_ref).map_or(false, Closure::is_lua);
+    let is_lua = state.gc.closures.get(cl_ref).is_some_and(Closure::is_lua);
 
     if !is_lua {
         return Ok(0);
@@ -1311,7 +1309,7 @@ pub fn db_gethook(state: &mut LuaState) -> LuaResult<u32> {
 
     // Push the count.
     #[allow(clippy::cast_precision_loss)]
-    state.push(Val::Num(base_hook_count as f64));
+    state.push(Val::Num(f64::from(base_hook_count)));
 
     Ok(3)
 }
@@ -1440,10 +1438,8 @@ pub fn db_traceback(state: &mut LuaState) -> LuaResult<u32> {
             Val::Num(n) => n as usize,
             _ => 1,
         }
-    } else if arg_offset == 0 {
-        1
     } else {
-        0
+        usize::from(arg_offset == 0)
     };
 
     // Message argument (arg_offset + 0).

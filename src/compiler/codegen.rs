@@ -465,6 +465,7 @@ impl Compiler {
     /// If the control instruction at `node` is TESTSET, patches it:
     /// - If `reg != NO_REG` and `reg != B`, sets A = reg (value destination)
     /// - Otherwise, converts TESTSET to TEST (discards the value)
+    ///
     /// Returns true if the instruction was TESTSET.
     /// Maps to PUC-Rio's `patchtestreg`.
     fn patch_test_reg(&mut self, node: usize, reg: u32) -> bool {
@@ -1376,11 +1377,10 @@ impl Compiler {
                 if v2 == 0.0 {
                     return false;
                 }
-                v1 - (v1 / v2).floor() * v2
+                (v1 / v2).floor().mul_add(-v2, v1)
             }
             OpCode::Pow => v1.powf(v2),
             OpCode::Unm => -v1,
-            OpCode::Len => return false,
             _ => return false,
         };
         if r.is_nan() {
@@ -1692,6 +1692,7 @@ impl Compiler {
 
 /// Checks if two Val constants are equal for deduplication.
 fn constants_equal(a: &Val, b: &Val) -> bool {
+    #[allow(clippy::match_same_arms)]
     match (a, b) {
         // Val::Nil is used as a placeholder for unresolved string constants
         // (see `string_constant`). Never dedup nil entries: a real nil
@@ -1898,18 +1899,18 @@ fn compile_assign(
             let local_reg = target_exprs[i].info;
             let extra = i32::from(compiler.fs().free_reg);
             let mut conflict = false;
-            for j in 0..i {
-                if target_exprs[j].kind == ExprKind::Indexed {
+            for target_expr in &mut target_exprs[..i] {
+                if target_expr.kind == ExprKind::Indexed {
                     // Check if table register matches the local.
-                    if target_exprs[j].info == local_reg {
+                    if target_expr.info == local_reg {
                         conflict = true;
-                        target_exprs[j].info = extra;
+                        target_expr.info = extra;
                     }
                     // Check if key is a register (not constant) that matches.
-                    let aux = target_exprs[j].aux;
+                    let aux = target_expr.aux;
                     if aux & 256 == 0 && aux == local_reg {
                         conflict = true;
-                        target_exprs[j].aux = extra;
+                        target_expr.aux = extra;
                     }
                 }
             }
@@ -1928,20 +1929,7 @@ fn compile_assign(
     // When nexps == nvars: store last value directly to last target,
     // then assign remaining targets from free_reg-1 (reverse order).
     // When nexps != nvars: adjust first, then assign all from free_reg-1.
-    if nexps != nvars {
-        adjust_assign(compiler, nvars, nexps, &mut last_e, line)?;
-        #[allow(clippy::cast_possible_truncation)]
-        if nexps > nvars {
-            compiler.fs_mut().free_reg -= (nexps - nvars) as u8;
-        }
-        // All targets assigned from free_reg-1 in reverse.
-        for target in target_exprs.iter().rev() {
-            let reg = u32::from(compiler.fs().free_reg) - 1;
-            let mut val_e = ExprContext::new(ExprKind::NonReloc, reg as i32);
-            let t = *target;
-            compiler.storevar(&t, &mut val_e, line)?;
-        }
-    } else {
+    if nexps == nvars {
         // nexps == nvars: last target gets the last expression directly.
         compiler.set_one_ret(&mut last_e);
         let last_target = target_exprs[nvars - 1];
@@ -1953,6 +1941,19 @@ fn compile_assign(
             let reg = u32::from(compiler.fs().free_reg) - 1;
             let mut val_e = ExprContext::new(ExprKind::NonReloc, reg as i32);
             let t = target_exprs[i];
+            compiler.storevar(&t, &mut val_e, line)?;
+        }
+    } else {
+        adjust_assign(compiler, nvars, nexps, &mut last_e, line)?;
+        #[allow(clippy::cast_possible_truncation)]
+        if nexps > nvars {
+            compiler.fs_mut().free_reg -= (nexps - nvars) as u8;
+        }
+        // All targets assigned from free_reg-1 in reverse.
+        for target in target_exprs.iter().rev() {
+            let reg = u32::from(compiler.fs().free_reg) - 1;
+            let mut val_e = ExprContext::new(ExprKind::NonReloc, reg as i32);
+            let t = *target;
             compiler.storevar(&t, &mut val_e, line)?;
         }
     }
@@ -2034,11 +2035,7 @@ fn compile_repeat(
     // PUC-Rio's repeatstat (lparser.c:1020) checks bl2.upval.
     let scope_has_upval = compiler.fs().blocks.last().is_some_and(|b| b.has_upval);
 
-    if !scope_has_upval {
-        // Simple case: no upvalues, just leave scope and loop back.
-        compiler.leave_block(); // scope
-        compiler.patch_list(condexit, repeat_init);
-    } else {
+    if scope_has_upval {
         // Upvalue case: condition TRUE means exit loop, FALSE means
         // close scope and repeat.
         //
@@ -2072,6 +2069,10 @@ fn compile_repeat(
         // Jump back to repeat_init.
         let loop_back = compiler.emit_jump(line);
         compiler.patch_list(loop_back as i32, repeat_init);
+    } else {
+        // Simple case: no upvalues, just leave scope and loop back.
+        compiler.leave_block(); // scope
+        compiler.patch_list(condexit, repeat_init);
     }
 
     compiler.leave_block(); // loop (patches break list)
@@ -2132,6 +2133,7 @@ fn compile_if(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_numeric_for(
     compiler: &mut Compiler,
     name: &str,
@@ -2706,16 +2708,15 @@ fn compile_table_ctor(
                 tostore += 1;
 
                 let is_last = last_value_idx == Some(i);
+                let mut val_e = compile_expr(compiler, value)?;
                 if is_last && is_multret_expr(value) {
                     // Last value field with multi-return: expand all results.
                     // Matches PUC-Rio's lastlistfield() in lparser.c.
-                    let mut val_e = compile_expr(compiler, value)?;
                     compiler.set_multret(&mut val_e);
                     compiler.code_setlist(table_reg, na, 0, line); // B=0 = MULTRET
                     na -= 1; // don't count last (unknown count)
                     tostore = 0;
                 } else {
-                    let mut val_e = compile_expr(compiler, value)?;
                     compiler.exp2nextreg(&mut val_e, line)?;
                     if tostore >= LFIELDS_PER_FLUSH {
                         compiler.code_setlist(table_reg, na, tostore, line);
@@ -2792,6 +2793,19 @@ pub(crate) fn int2fb(mut x: u32) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp,
+    clippy::approx_constant,
+    clippy::items_after_statements,
+    clippy::needless_collect,
+    clippy::bool_comparison,
+    clippy::useless_vec,
+    clippy::needless_bool_assign,
+    clippy::unnecessary_operation
+)]
 mod tests {
     use super::*;
 

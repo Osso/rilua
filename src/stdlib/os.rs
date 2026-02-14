@@ -20,7 +20,11 @@ type TimeT = i64;
 type ClockT = i64;
 
 /// C `struct tm` for broken-down time.
+///
+/// Field names mirror the C `struct tm` convention (`tm_sec`, `tm_min`, etc.)
+/// to maintain clarity about the FFI mapping.
 #[repr(C)]
+#[allow(clippy::struct_field_names)]
 struct Tm {
     tm_sec: i32,
     tm_min: i32,
@@ -162,17 +166,17 @@ fn push_true(state: &mut LuaState) -> LuaResult<u32> {
 
 /// Pushes nil, error message, errno -- the PUC-Rio `os_pushresult` failure
 /// pattern used by `os.remove` and `os.rename`.
-fn push_error(state: &mut LuaState, filename: &str, err: std::io::Error) -> LuaResult<u32> {
+fn push_error(state: &mut LuaState, filename: &str, err: &std::io::Error) -> u32 {
     let msg = format!("{filename}: {err}");
     let msg_val = Val::Str(state.gc.intern_string(msg.as_bytes()));
     // Map std::io::Error to a numeric code. raw_os_error() gives the errno
     // on Unix; fall back to 0 for synthetic errors.
     #[allow(clippy::cast_precision_loss)]
-    let code = err.raw_os_error().unwrap_or(0) as f64;
+    let code = f64::from(err.raw_os_error().unwrap_or(0));
     state.push(Val::Nil);
     state.push(msg_val);
     state.push(Val::Num(code));
-    Ok(3)
+    3
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +241,6 @@ fn get_date_bool_field(state: &mut LuaState, table_ref: GcRef<Table>, key: &str)
         .ok_or_else(|| runtime_error("table not found".into()))?;
     let val = table.get(key_val, &state.gc.string_arena);
     match val {
-        Val::Nil => Ok(-1),
         Val::Bool(b) => Ok(i32::from(b)),
         _ => Ok(-1),
     }
@@ -265,9 +268,8 @@ pub fn os_time(state: &mut LuaState) -> LuaResult<u32> {
     }
 
     // Table argument: extract fields.
-    let table_ref = match arg(state, 0) {
-        Val::Table(r) => r,
-        _ => return Err(bad_argument("time", 1, "table expected")),
+    let Val::Table(table_ref) = arg(state, 0) else {
+        return Err(bad_argument("time", 1, "table expected"));
     };
 
     let sec = get_date_field(state, table_ref, "sec", Some(0))?;
@@ -289,7 +291,7 @@ pub fn os_time(state: &mut LuaState) -> LuaResult<u32> {
         ..Tm::default()
     };
 
-    let t = unsafe { mktime(&mut tm) };
+    let t = unsafe { mktime(&raw mut tm) };
     if t == -1 {
         state.push(Val::Nil);
     } else {
@@ -339,9 +341,9 @@ pub fn os_date(state: &mut LuaState) -> LuaResult<u32> {
     let mut tm = Tm::default();
     let result = unsafe {
         if use_utc {
-            gmtime_r(&t, &mut tm)
+            gmtime_r(&raw const t, &raw mut tm)
         } else {
-            localtime_r(&t, &mut tm)
+            localtime_r(&raw const t, &raw mut tm)
         }
     };
 
@@ -363,7 +365,7 @@ pub fn os_date(state: &mut LuaState) -> LuaResult<u32> {
     fmt_c.extend_from_slice(fmt);
     fmt_c.push(0);
 
-    let n = unsafe { strftime(buf.as_mut_ptr(), buf.len(), fmt_c.as_ptr(), &tm) };
+    let n = unsafe { strftime(buf.as_mut_ptr(), buf.len(), fmt_c.as_ptr(), &raw const tm) };
 
     if n == 0 && !fmt.is_empty() {
         return Err(runtime_error("'date' format too long".into()));
@@ -466,7 +468,7 @@ pub fn os_execute(state: &mut LuaState) -> LuaResult<u32> {
             // On POSIX, system() returns the wait status.
             // exit.code() gives the exit code, or None if killed by signal.
             #[allow(clippy::cast_precision_loss)]
-            let code = exit.code().unwrap_or(-1) as f64;
+            let code = f64::from(exit.code().unwrap_or(-1));
             state.push(Val::Num(code));
         }
         Err(_) => {
@@ -529,7 +531,7 @@ pub fn os_remove(state: &mut LuaState) -> LuaResult<u32> {
 
     match std::fs::remove_file(&name_str) {
         Ok(()) => push_true(state),
-        Err(e) => push_error(state, &name_str, e),
+        Err(e) => Ok(push_error(state, &name_str, &e)),
     }
 }
 
@@ -549,7 +551,7 @@ pub fn os_rename(state: &mut LuaState) -> LuaResult<u32> {
 
     match std::fs::rename(&old_str, &new_str) {
         Ok(()) => push_true(state),
-        Err(e) => push_error(state, &old_str, e),
+        Err(e) => Ok(push_error(state, &old_str, &e)),
     }
 }
 
@@ -646,6 +648,7 @@ pub fn os_setlocale(state: &mut LuaState) -> LuaResult<u32> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -694,11 +697,11 @@ mod tests {
     fn libc_localtime_roundtrip() {
         let t: TimeT = 1_000_000_000; // 2001-09-09 01:46:40 UTC
         let mut tm = Tm::default();
-        let result = unsafe { localtime_r(&t, &mut tm) };
+        let result = unsafe { localtime_r(&raw const t, &raw mut tm) };
         assert!(!result.is_null());
         // mktime should give us back the same timestamp (or close,
         // depending on DST).
-        let t2 = unsafe { mktime(&mut tm) };
+        let t2 = unsafe { mktime(&raw mut tm) };
         assert_eq!(t, t2);
     }
 
@@ -707,7 +710,7 @@ mod tests {
     fn libc_gmtime_epoch() {
         let t: TimeT = 0; // 1970-01-01 00:00:00 UTC
         let mut tm = Tm::default();
-        let result = unsafe { gmtime_r(&t, &mut tm) };
+        let result = unsafe { gmtime_r(&raw const t, &raw mut tm) };
         assert!(!result.is_null());
         assert_eq!(tm.tm_year, 70); // 1970 - 1900
         assert_eq!(tm.tm_mon, 0); // January
@@ -722,10 +725,10 @@ mod tests {
     fn libc_strftime_basic() {
         let t: TimeT = 0;
         let mut tm = Tm::default();
-        unsafe { gmtime_r(&t, &mut tm) };
+        unsafe { gmtime_r(&raw const t, &raw mut tm) };
         let mut buf = [0u8; 64];
         let fmt = b"%Y-%m-%d\0";
-        let n = unsafe { strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &tm) };
+        let n = unsafe { strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &raw const tm) };
         assert!(n > 0);
         let result = std::str::from_utf8(&buf[..n]).expect("valid utf8");
         assert_eq!(result, "1970-01-01");

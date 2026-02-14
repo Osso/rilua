@@ -329,7 +329,7 @@ pub struct LuaThread {
 impl LuaThread {
     /// Creates a new thread with an initial stack and the given function.
     ///
-    /// The function is placed at stack[0], with base=1 and top=1.
+    /// The function is placed at `stack[0]`, with `base=1` and `top=1`.
     /// Status is `Initial` (ready to be resumed for the first time).
     /// The thread inherits the given global table from its creator.
     pub fn new(func_val: Val, global: GcRef<Table>) -> Self {
@@ -701,7 +701,7 @@ impl LuaState {
             self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
             self.error_object = thread.error_object.take();
             self.global = thread.global;
-            self.hook = std::mem::replace(&mut thread.hook, HookState::new());
+            self.hook = std::mem::take(&mut thread.hook);
 
             // Reopen upvalues that were closed on suspension.
             // Write their captured values back to the stack slots and
@@ -709,12 +709,11 @@ impl LuaState {
             // closures share the same variable through the stack.
             let suspended = std::mem::take(&mut thread.suspended_upvals);
             for (uv_ref, idx) in &suspended {
-                if let Some(uv) = self.gc.upvalues.get(*uv_ref) {
-                    if let crate::vm::closure::UpvalueState::Closed { value } = uv.state {
-                        if *idx < self.stack.len() {
-                            self.stack[*idx] = value;
-                        }
-                    }
+                if let Some(uv) = self.gc.upvalues.get(*uv_ref)
+                    && let crate::vm::closure::UpvalueState::Closed { value } = uv.state
+                    && *idx < self.stack.len()
+                {
+                    self.stack[*idx] = value;
                 }
                 if let Some(uv) = self.gc.upvalues.get_mut(*uv_ref) {
                     uv.state = crate::vm::closure::UpvalueState::Open { stack_index: *idx };
@@ -730,13 +729,13 @@ impl LuaState {
                     .gc
                     .upvalues
                     .get(*a)
-                    .and_then(|uv| uv.stack_index())
+                    .and_then(super::closure::Upvalue::stack_index)
                     .unwrap_or(0);
                 let b_idx = self
                     .gc
                     .upvalues
                     .get(*b)
-                    .and_then(|uv| uv.stack_index())
+                    .and_then(super::closure::Upvalue::stack_index)
                     .unwrap_or(0);
                 b_idx.cmp(&a_idx)
             });
@@ -764,10 +763,10 @@ impl LuaState {
         // original stack indices so they can be reopened on resume.
         let mut suspended = Vec::new();
         for &uv_ref in &self.open_upvalues {
-            if let Some(uv) = self.gc.upvalues.get(uv_ref) {
-                if let Some(idx) = uv.stack_index() {
-                    suspended.push((uv_ref, idx));
-                }
+            if let Some(uv) = self.gc.upvalues.get(uv_ref)
+                && let Some(idx) = uv.stack_index()
+            {
+                suspended.push((uv_ref, idx));
             }
         }
         for &(uv_ref, _) in &suspended {
@@ -790,7 +789,7 @@ impl LuaState {
             co_thread.suspended_upvals = suspended;
             co_thread.error_object = self.error_object.take();
             co_thread.global = self.global;
-            co_thread.hook = std::mem::replace(&mut self.hook, HookState::new());
+            co_thread.hook = std::mem::take(&mut self.hook);
             co_thread.status = co_status;
         }
 
@@ -813,12 +812,11 @@ impl LuaState {
         // resumer's stack is active again, write the captured values back
         // to the stack slots and mark the upvalues as Open.
         for (uv_ref, idx) in resumer.suspended_upvals {
-            if let Some(uv) = self.gc.upvalues.get(uv_ref) {
-                if let crate::vm::closure::UpvalueState::Closed { value } = uv.state {
-                    if idx < self.stack.len() {
-                        self.stack[idx] = value;
-                    }
-                }
+            if let Some(uv) = self.gc.upvalues.get(uv_ref)
+                && let crate::vm::closure::UpvalueState::Closed { value } = uv.state
+                && idx < self.stack.len()
+            {
+                self.stack[idx] = value;
             }
             if let Some(uv) = self.gc.upvalues.get_mut(uv_ref) {
                 uv.state = crate::vm::closure::UpvalueState::Open { stack_index: idx };

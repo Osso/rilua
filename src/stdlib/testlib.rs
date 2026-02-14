@@ -27,7 +27,7 @@ use super::{arg_error, type_error};
 /// Inspects a table's internal structure.
 ///
 /// With one argument: returns (array_size, hash_size, last_free_index).
-/// With two arguments where i < array_size: returns (i, array[i], nil).
+/// With two arguments where i < array_size: returns (i, array\[i\], nil).
 /// With two arguments where i >= array_size: returns (key, value, next)
 /// for hash node at index (i - array_size).
 ///
@@ -89,11 +89,11 @@ pub fn t_querytab(state: &mut LuaState) -> LuaResult<u32> {
     if i == -1 {
         // Return (array_size, hash_size, last_free).
         state.stack_set(state.base, Val::Num(asize as f64));
-        state.stack_set(state.base + 1, Val::Num(hsize as f64));
-        state.stack_set(state.base + 2, Val::Num(last_free as f64));
+        state.stack_set(state.base + 1, Val::Num(f64::from(hsize)));
+        state.stack_set(state.base + 2, Val::Num(f64::from(last_free)));
     } else if let Some(val) = array_val {
         // Array part query: return (i, array[i], nil).
-        state.stack_set(state.base, Val::Num(i as f64));
+        state.stack_set(state.base, Val::Num(f64::from(i)));
         state.stack_set(state.base + 1, val);
         state.stack_set(state.base + 2, Val::Nil);
     } else if let Some((key, value, next)) = node_info {
@@ -111,7 +111,7 @@ pub fn t_querytab(state: &mut LuaState) -> LuaResult<u32> {
         state.stack_set(state.base, display_key);
         state.stack_set(state.base + 1, value);
         match next {
-            Some(idx) => state.stack_set(state.base + 2, Val::Num(idx as f64)),
+            Some(idx) => state.stack_set(state.base + 2, Val::Num(f64::from(idx))),
             None => state.stack_set(state.base + 2, Val::Nil),
         }
     } else {
@@ -141,14 +141,7 @@ pub fn t_hash(state: &mut LuaState) -> LuaResult<u32> {
 
     let has_arg2 = state.base + 1 < state.top;
 
-    let result = if !has_arg2 {
-        // 1 argument: return the string's hash value.
-        let Val::Str(str_ref) = arg0 else {
-            return Err(arg_error(state, 1, "string expected"));
-        };
-        let hash = state.gc.string_arena.get(str_ref).map_or(0, |s| s.hash());
-        hash as f64
-    } else {
+    let result = if has_arg2 {
         // 2 arguments: return main_position(key, table).
         let arg1 = state.stack_get(state.base + 1);
         let Val::Table(table_ref) = arg1 else {
@@ -164,7 +157,18 @@ pub fn t_hash(state: &mut LuaState) -> LuaResult<u32> {
         } else {
             table.main_position(&arg0, &state.gc.string_arena)
         };
-        mp as f64
+        f64::from(mp)
+    } else {
+        // 1 argument: return the string's hash value.
+        let Val::Str(str_ref) = arg0 else {
+            return Err(arg_error(state, 1, "string expected"));
+        };
+        let hash = state
+            .gc
+            .string_arena
+            .get(str_ref)
+            .map_or(0, super::super::vm::string::LuaString::hash);
+        f64::from(hash)
     };
 
     state.stack_set(state.base, Val::Num(result));
@@ -196,8 +200,8 @@ pub fn t_int2fb(state: &mut LuaState) -> LuaResult<u32> {
     let decoded = fb2int(encoded);
 
     state.ensure_stack(2);
-    state.stack_set(state.base, Val::Num(encoded as f64));
-    state.stack_set(state.base + 1, Val::Num(decoded as f64));
+    state.stack_set(state.base, Val::Num(f64::from(encoded)));
+    state.stack_set(state.base + 1, Val::Num(f64::from(decoded)));
     state.top = state.base + 2;
     Ok(2)
 }
@@ -221,7 +225,7 @@ pub fn t_log2(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     let result = lua_o_log2(n as u32);
-    state.stack_set(state.base, Val::Num(result as f64));
+    state.stack_set(state.base, Val::Num(f64::from(result)));
     state.top = state.base + 1;
     Ok(1)
 }

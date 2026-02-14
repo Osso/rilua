@@ -1433,7 +1433,7 @@ fn collectgarbage_dispatch(state: &mut LuaState, opt: &str) -> LuaResult<u32> {
             // Run luaC_step-equivalent while threshold is exceeded.
             while state.gc.gc_state.gc_threshold <= state.gc.gc_state.total_bytes {
                 // Compute budget: (GCSTEPSIZE/100) * stepmul.
-                let stepmul = state.gc.gc_state.gc_stepmul as i64;
+                let stepmul = i64::from(state.gc.gc_state.gc_stepmul);
                 let budget = if stepmul == 0 {
                     i64::MAX / 2
                 } else {
