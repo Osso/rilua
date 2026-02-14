@@ -428,13 +428,13 @@ rilua column:
 | Feature | 5.1 | 5.2 | 5.3 | 5.4 | 5.5 | rilua | Notes |
 |---------|:---:|:---:|:---:|:---:|:---:|:-----:|-------|
 | `debug.debug` | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | Stub |
-| `debug.gethook` | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | Returns nil (hooks not implemented) |
+| `debug.gethook` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Returns hook function, mask string, count |
 | `debug.getinfo` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | 5.2+ adds `nparams`, `isvararg`, `istailcall` |
 | `debug.getlocal` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | 5.2+ accesses vararg info |
 | `debug.getmetatable` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `debug.getregistry` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `debug.getupvalue` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
-| `debug.sethook` | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | Stub (hooks not executed) |
+| `debug.sethook` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Line, call, return, and count hooks |
 | `debug.setlocal` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `debug.setmetatable` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `debug.setupvalue` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |

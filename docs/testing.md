@@ -7,9 +7,9 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Current: 1293 tests (590 unit, 426 integration, 277 oracle).
+Current: 1304 tests (596 unit, 431 integration, 277 oracle).
 All oracle test cases pass against PUC-Rio 5.1.1. All 5 layers
-are active. PUC-Rio official test suite: 16 of 23 files pass.
+are active. PUC-Rio official test suite: 19 of 23 files pass.
 
 ## Test Layers
 
@@ -324,28 +324,26 @@ end`) are skipped. `code.lua` passes fully with `RILUA_TEST_LIB=1`.
 
 #### Current Status
 
-16 of 23 files pass (run with `RILUA_TEST_LIB=1`):
+19 of 23 files pass (run with `RILUA_TEST_LIB=1`):
 
-**Passing** (15 non-trivial + 1 trivial):
-attrib, checktable, code, constructs, errors, events, files, gc,
-literals, locals, math, nextvar, pm, sort, strings, vararg, verybig.
+**Passing** (18 non-trivial + 1 trivial):
+attrib, calls, checktable, code, constructs, db, errors, events,
+files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg,
+verybig.
 
-**Failing** (5):
+**Failing** (2 rilua-specific):
 
 | Test | Reason |
 |------|--------|
 | `api.lua` | Requires T.testC mini-interpreter (~500 lines) |
-| `calls.lua` | `load(reader)` eagerly collects reader output instead of streaming |
 | `closure.lua` | T.resume/T.setyhook not implemented (yield hooks) |
-| `db.lua` | `debug.sethook` hooks not implemented |
-| `big.lua` | String overflow section passes; rest needs `coroutine.wrap` context from `all.lua` |
 
 **Always-fail** (2):
 
 | Test | Reason |
 |------|--------|
+| `big.lua` | Yield from main thread gives wrong error + string overflow |
 | `main.lua` | Tests CLI subprocess behavior (requires `os.execute("lua ...")`) |
-| `big.lua` | Standalone execution cannot match `all.lua`'s coroutine wrapper |
 
 **Compatibility flags**: The PUC-Rio test suite was written with
 default compat options enabled (e.g., `LUA_COMPAT_VARARG` enables
