@@ -119,7 +119,7 @@ impl fmt::Display for LuaError {
             Self::Memory => write!(f, "not enough memory"),
             Self::ErrorHandler => write!(f, "error in error handling"),
             Self::Io(e) => write!(f, "{e}"),
-            Self::Yield(_) => write!(f, "cannot resume dead coroutine"),
+            Self::Yield(_) => write!(f, "cannot yield"),
         }
     }
 }
