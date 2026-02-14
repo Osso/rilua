@@ -68,7 +68,7 @@ fn report(progname: Option<&str>, err: &LuaError) -> bool {
 /// of the error string.
 fn is_incomplete(err: &LuaError) -> bool {
     if let LuaError::Syntax(e) = err {
-        e.message.ends_with("<eof>")
+        e.message.ends_with("'<eof>'")
     } else {
         false
     }
