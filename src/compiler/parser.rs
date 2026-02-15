@@ -197,13 +197,16 @@ impl<'a> Parser<'a> {
 
     /// Advances to the next token, returning the previous one.
     fn advance(&mut self) -> LuaResult<(Token, Span)> {
-        let prev = (self.current.clone(), self.span);
+        // Move the current token out instead of cloning. Token::Eos is a
+        // zero-cost sentinel that is immediately overwritten below.
+        let prev_token = std::mem::replace(&mut self.current, Token::Eos);
+        let prev_span = self.span;
         // PUC-Rio: ls->lastline = ls->linenumber (before reading next token)
-        self.lastline = self.span.line;
+        self.lastline = prev_span.line;
         let (tok, span) = self.lexer.next()?;
         self.current = tok;
         self.span = span;
-        Ok(prev)
+        Ok((prev_token, prev_span))
     }
 
     /// Returns true if the current token matches the expected token.

@@ -15,7 +15,7 @@
 use crate::error::{LuaError, LuaResult, SyntaxError};
 use crate::vm::execute::{libc_strtod, locale_decimal_point};
 
-use super::token::{RESERVED_WORDS, Span, Token};
+use super::token::{Span, Token, lookup_keyword};
 
 /// Reader function type for streaming input.
 ///
@@ -180,6 +180,7 @@ impl<'a> Lexer<'a> {
 
     // -- Character primitives --
 
+    #[inline]
     fn peek(&mut self) -> Option<u8> {
         if self.pos < self.source.len() {
             return Some(self.source[self.pos]);
@@ -205,6 +206,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    #[inline]
     fn advance(&mut self) -> Option<u8> {
         // Ensure at least one byte is available.
         if self.pos >= self.source.len() && !self.refill() {
@@ -423,13 +425,15 @@ impl<'a> Lexer<'a> {
                 }
 
                 _ if ch.is_ascii_alphabetic() || ch == b'_' => {
-                    let name = self.read_name();
-                    // Check if it's a reserved word (binary search since sorted)
-                    if let Ok(idx) =
-                        RESERVED_WORDS.binary_search_by_key(&name.as_str(), |&(k, _)| k)
-                    {
-                        return Ok((RESERVED_WORDS[idx].1.clone(), span));
+                    let (start, end) = self.scan_name_extent();
+                    let name_bytes = &self.source[start..end];
+                    // O(1) keyword check on raw bytes -- no allocation needed for keywords.
+                    if let Some(kw) = lookup_keyword(name_bytes) {
+                        return Ok((kw, span));
                     }
+                    // Identifiers are ASCII, so from_utf8 cannot fail.
+                    let name = String::from_utf8(name_bytes.to_vec())
+                        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
                     return Ok((Token::Name(name), span));
                 }
 
@@ -441,7 +445,26 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    #[inline]
     fn skip_whitespace(&mut self) {
+        // Fast path: scan directly in the byte slice without per-character peek/advance.
+        if self.reader.is_none() {
+            let src = &self.source;
+            let mut p = self.pos;
+            while p < src.len() {
+                let c = src[p];
+                if c == b' ' || c == b'\t' || c == 0x0C || c == 0x0B {
+                    p += 1;
+                } else {
+                    break;
+                }
+            }
+            let skipped = p - self.pos;
+            self.column += skipped as u32;
+            self.pos = p;
+            return;
+        }
+        // Slow path: reader mode, per-character.
         while let Some(c) = self.peek() {
             if c == b' ' || c == b'\t' || c == 0x0C /* form feed */ || c == 0x0B
             /* vertical tab */
@@ -455,8 +478,30 @@ impl<'a> Lexer<'a> {
 
     // -- Names and keywords --
 
-    fn read_name(&mut self) -> String {
+    /// Scans the extent of an identifier (alphanumeric + underscore) and
+    /// returns `(start, end)` byte positions. Advances the lexer position.
+    /// Does NOT allocate a String.
+    #[inline]
+    fn scan_name_extent(&mut self) -> (usize, usize) {
         let start = self.pos;
+        // Fast path: scan directly in the byte slice.
+        if self.reader.is_none() {
+            let src = &self.source;
+            let mut p = self.pos;
+            while p < src.len() {
+                let c = src[p];
+                if c.is_ascii_alphanumeric() || c == b'_' {
+                    p += 1;
+                } else {
+                    break;
+                }
+            }
+            let len = p - self.pos;
+            self.column += len as u32;
+            self.pos = p;
+            return (start, p);
+        }
+        // Slow path: reader mode.
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == b'_' {
                 self.advance();
@@ -464,8 +509,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        // Source is valid UTF-8 for identifiers (ASCII subset)
-        String::from_utf8_lossy(&self.source[start..self.pos]).into_owned()
+        (start, self.pos)
     }
 
     // -- Numbers --

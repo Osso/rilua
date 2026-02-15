@@ -389,17 +389,19 @@ impl Gc {
     // -----------------------------------------------------------------------
 
     /// Traverses a gray table: marks metatable, array values, hash entries.
+    ///
+    /// Uses indexed access to avoid allocating Vecs for array/hash contents.
+    /// Each Val is Copy, so we extract one at a time and release the table
+    /// borrow before calling mark_value.
     fn traverse_table(&mut self, r: GcRef<Table>) {
-        let (metatable, array_vals, hash_entries, weak_keys, weak_values) = {
-            if let Some(table) = self.tables.get(r) {
-                let mt = table.metatable();
-                let arr: Vec<Val> = table.array_slice().to_vec();
-                let hash = table.hash_entries();
-                let (wk, wv) = self.check_weak_mode(mt);
-                (mt, arr, hash, wk, wv)
-            } else {
+        // Extract metadata in a single borrow.
+        let (metatable, array_len, hash_count, weak_keys, weak_values) = {
+            let Some(table) = self.tables.get(r) else {
                 return;
-            }
+            };
+            let mt = table.metatable();
+            let (wk, wv) = self.check_weak_mode(mt);
+            (mt, table.array_len(), table.hash_node_count(), wk, wv)
         };
 
         self.tables.set_color(r, Color::Black);
@@ -410,36 +412,36 @@ impl Gc {
 
         let is_weak = weak_keys || weak_values;
         if is_weak {
-            // Register for clearing in atomic phase.
             self.gc_state.weak_tables.push(r);
         }
 
         if weak_keys && weak_values {
-            // Both keys and values are weak: mark nothing (PUC-Rio line 177).
             return;
         }
 
-        // Mark the non-weak parts. PUC-Rio's traversetable:
-        // - If NOT weak_values: mark array values and hash values
-        // - If NOT weak_keys: mark hash keys
+        // Mark array values by index (no Vec allocation).
         if !weak_values {
-            for val in &array_vals {
-                self.mark_value(*val);
+            for i in 0..array_len {
+                // Brief borrow per element: extract the Copy Val, then mark.
+                let val = self.tables.get(r).and_then(|t| t.array_get(i));
+                if let Some(val) = val {
+                    self.mark_value(val);
+                }
             }
         }
-        for (key, val) in &hash_entries {
-            // PUC-Rio's traversetable skips entries with nil values
-            // (removeentry), preventing dead keys from keeping objects
-            // alive. Without this, a userdata used as a table key remains
-            // reachable even after `t[ud] = nil`.
+
+        // Mark hash entries by index (no Vec allocation).
+        for i in 0..hash_count {
+            let kv = self.tables.get(r).and_then(|t| t.hash_node_kv(i));
+            let Some((key, val)) = kv else { continue };
             if val.is_nil() {
                 continue;
             }
             if !weak_keys {
-                self.mark_value(*key);
+                self.mark_value(key);
             }
             if !weak_values {
-                self.mark_value(*val);
+                self.mark_value(val);
             }
         }
     }
@@ -486,51 +488,90 @@ impl Gc {
         None
     }
 
-    /// Traverses a gray closure: marks env and upvalues.
+    /// Traverses a gray closure: marks env, upvalues, and proto constants.
+    ///
+    /// Avoids Vec allocations by:
+    /// - Cloning the Rc<Proto> (cheap refcount bump) and walking it directly
+    /// - Accessing upvalue refs and inline upvals by index
     fn traverse_closure(&mut self, r: GcRef<Closure>) {
-        let (env, upvalue_refs, inline_upvals, proto_constants) = {
-            if let Some(cl) = self.closures.get(r) {
-                match cl {
-                    Closure::Lua(lc) => {
-                        let env = lc.env;
-                        let upvals: Vec<GcRef<Upvalue>> = lc.upvalues.clone();
-                        // Collect all constants from the Proto tree (proto + nested protos).
-                        let constants = Self::collect_proto_constants(&lc.proto);
-                        (Some(env), upvals, Vec::new(), constants)
-                    }
-                    Closure::Rust(rc) => {
-                        let inlines: Vec<Val> = rc.upvalues.clone();
-                        (rc.env, Vec::new(), inlines, Vec::new())
-                    }
-                }
-            } else {
+        // Extract what we need with minimal cloning.
+        enum ClosureData {
+            Lua {
+                env: GcRef<Table>,
+                upvalue_count: usize,
+                proto: std::rc::Rc<Proto>,
+            },
+            Rust {
+                env: Option<GcRef<Table>>,
+                upvalue_count: usize,
+            },
+        }
+
+        let data = {
+            let Some(cl) = self.closures.get(r) else {
                 return;
+            };
+            match cl {
+                Closure::Lua(lc) => ClosureData::Lua {
+                    env: lc.env,
+                    upvalue_count: lc.upvalues.len(),
+                    proto: std::rc::Rc::clone(&lc.proto),
+                },
+                Closure::Rust(rc) => ClosureData::Rust {
+                    env: rc.env,
+                    upvalue_count: rc.upvalues.len(),
+                },
             }
         };
 
         self.closures.set_color(r, Color::Black);
 
-        if let Some(env) = env {
-            self.mark_table(env);
-        }
-        for uv_ref in &upvalue_refs {
-            self.mark_upvalue(*uv_ref);
-        }
-        for val in &inline_upvals {
-            self.mark_value(*val);
-        }
-        for val in &proto_constants {
-            self.mark_value(*val);
+        match data {
+            ClosureData::Lua {
+                env,
+                upvalue_count,
+                proto,
+            } => {
+                self.mark_table(env);
+                // Mark upvalue refs by index.
+                for i in 0..upvalue_count {
+                    let uv_ref = self.closures.get(r).and_then(|cl| match cl {
+                        Closure::Lua(lc) => lc.upvalues.get(i).copied(),
+                        Closure::Rust(_) => None,
+                    });
+                    if let Some(uv_ref) = uv_ref {
+                        self.mark_upvalue(uv_ref);
+                    }
+                }
+                // Walk the Proto tree directly -- no Vec allocation.
+                self.mark_proto_constants(&proto);
+            }
+            ClosureData::Rust { env, upvalue_count } => {
+                if let Some(env) = env {
+                    self.mark_table(env);
+                }
+                // Mark inline upvals by index.
+                for i in 0..upvalue_count {
+                    let val = self.closures.get(r).and_then(|cl| match cl {
+                        Closure::Rust(rc) => rc.upvalues.get(i).copied(),
+                        Closure::Lua(_) => None,
+                    });
+                    if let Some(val) = val {
+                        self.mark_value(val);
+                    }
+                }
+            }
         }
     }
 
-    /// Recursively collects all Val constants from a Proto and its nested protos.
-    fn collect_proto_constants(proto: &Proto) -> Vec<Val> {
-        let mut constants = proto.constants.clone();
-        for nested in &proto.protos {
-            constants.extend(Self::collect_proto_constants(nested));
+    /// Recursively marks all Val constants in a Proto tree without allocation.
+    fn mark_proto_constants(&mut self, proto: &Proto) {
+        for val in &proto.constants {
+            self.mark_value(*val);
         }
-        constants
+        for nested in &proto.protos {
+            self.mark_proto_constants(nested);
+        }
     }
 
     /// Traverses a gray thread: marks stack values and open upvalues.
@@ -846,15 +887,20 @@ impl Gc {
         // PUC-Rio's iscleared() calls stringmark() on any string it finds,
         // preventing them from being swept regardless of weak mode.
         for &table_ref in &weak_refs {
-            if let Some(table) = self.tables.get(table_ref) {
-                // Mark strings in array part.
-                for val in table.array_slice() {
-                    if let Val::Str(s) = val {
-                        self.string_arena.set_color(*s, current_white);
-                    }
+            let Some(table) = self.tables.get(table_ref) else {
+                continue;
+            };
+            let array_len = table.array_len();
+            let hash_count = table.hash_node_count();
+            // Mark strings in array part.
+            for i in 0..array_len {
+                if let Some(Val::Str(s)) = table.array_get(i) {
+                    self.string_arena.set_color(s, current_white);
                 }
-                // Mark strings in hash part (both keys and values).
-                for (key, val) in table.hash_entries() {
+            }
+            // Mark strings in hash part (both keys and values).
+            for i in 0..hash_count {
+                if let Some((key, val)) = table.hash_node_kv(i) {
                     if let Val::Str(s) = key {
                         self.string_arena.set_color(s, current_white);
                     }

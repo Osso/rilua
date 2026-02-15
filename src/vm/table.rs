@@ -299,6 +299,29 @@ impl Table {
         }
     }
 
+    /// Returns the number of hash nodes (including free slots).
+    ///
+    /// Used by GC traversal to iterate hash entries by index without
+    /// allocating a Vec.
+    #[inline]
+    pub fn hash_node_count(&self) -> u32 {
+        self.nodes.len() as u32
+    }
+
+    /// Returns the key-value pair at hash node index `idx`, if the node
+    /// is occupied (key is not nil).
+    ///
+    /// Used by GC traversal for zero-allocation iteration.
+    #[inline]
+    pub fn hash_node_kv(&self, idx: u32) -> Option<(Val, Val)> {
+        let node = self.nodes.get(idx as usize)?;
+        if node.key.is_nil() {
+            None
+        } else {
+            Some((node.key, node.value))
+        }
+    }
+
     /// Returns indices of hash nodes that contain dead references in weak tables.
     ///
     /// For `weak_keys`: a node is dead if its key is dead.
