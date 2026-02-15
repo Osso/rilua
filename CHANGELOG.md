@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/wowemulation-dev/rilua/compare/v0.1.0...v0.1.1) - 2026-02-15
+
+### Changed
+
+- centralize platform FFI and migrate safe operations to Rust std
+
 ### Added
 
 - Cross-platform compilation support for Linux, macOS, and Windows
