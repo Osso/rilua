@@ -8,6 +8,8 @@ rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/wowemulation-dev/rilua"
+categories = ["compilers", "game-development", "command-line-utilities"]
+keywords = ["lua", "interpreter", "scripting", "wow", "vm"]
 
 [[bin]]
 name = "rilua"

@@ -8,6 +8,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-02-15
+
 ### Added
 
 - Full Lua 5.1.1 compilation pipeline: lexer, parser, AST, code generator
