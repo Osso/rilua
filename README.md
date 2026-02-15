@@ -231,7 +231,7 @@ tests (same Lua code run in both rilua and PUC-Rio, comparing output),
 the PUC-Rio official test suite as a compatibility target, and
 behavioral equivalence tests for edge cases.
 
-PUC-Rio tests are run individually (not through `all.lua`).
+PUC-Rio tests pass both individually and through the `all.lua` runner.
 See `docs/testing.md` for the testing strategy and
 [lua.org/tests/](https://lua.org/tests/) for the official test
 documentation.
