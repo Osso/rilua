@@ -109,7 +109,9 @@ pub enum Token {
 }
 
 /// All 21 reserved words in PUC-Rio order (alphabetical).
-pub(crate) const RESERVED_WORDS: &[(&str, Token)] = &[
+/// Used by tests to validate `lookup_keyword` correctness.
+#[cfg(test)]
+const RESERVED_WORDS: &[(&str, Token)] = &[
     ("and", Token::And),
     ("break", Token::Break),
     ("do", Token::Do),
@@ -132,6 +134,67 @@ pub(crate) const RESERVED_WORDS: &[(&str, Token)] = &[
     ("until", Token::Until),
     ("while", Token::While),
 ];
+
+/// O(1) keyword lookup dispatching on (length, first byte).
+///
+/// Compiles to a jump table. At most one `memcmp` per call.
+/// Returns `None` for non-keyword identifiers.
+#[inline]
+pub(crate) fn lookup_keyword(bytes: &[u8]) -> Option<Token> {
+    let &first = bytes.first()?;
+    match (bytes.len(), first) {
+        (2, b'd') if bytes == b"do" => Some(Token::Do),
+        (2, b'i') => {
+            if bytes[1] == b'f' {
+                Some(Token::If)
+            } else if bytes[1] == b'n' {
+                Some(Token::In)
+            } else {
+                None
+            }
+        }
+        (2, b'o') if bytes[1] == b'r' => Some(Token::Or),
+        (3, b'a') if bytes == b"and" => Some(Token::And),
+        (3, b'e') if bytes == b"end" => Some(Token::End),
+        (3, b'f') if bytes == b"for" => Some(Token::For),
+        (3, b'n') => {
+            if bytes == b"nil" {
+                Some(Token::Nil)
+            } else if bytes == b"not" {
+                Some(Token::Not)
+            } else {
+                None
+            }
+        }
+        (4, b'e') if bytes == b"else" => Some(Token::Else),
+        (4, b't') => {
+            if bytes == b"then" {
+                Some(Token::Then)
+            } else if bytes == b"true" {
+                Some(Token::True)
+            } else {
+                None
+            }
+        }
+        (5, b'b') if bytes == b"break" => Some(Token::Break),
+        (5, b'f') if bytes == b"false" => Some(Token::False),
+        (5, b'l') if bytes == b"local" => Some(Token::Local),
+        (5, b'u') if bytes == b"until" => Some(Token::Until),
+        (5, b'w') if bytes == b"while" => Some(Token::While),
+        (6, b'e') if bytes == b"elseif" => Some(Token::ElseIf),
+        (6, b'r') => {
+            if bytes == b"repeat" {
+                Some(Token::Repeat)
+            } else if bytes == b"return" {
+                Some(Token::Return)
+            } else {
+                None
+            }
+        }
+        (8, b'f') if bytes == b"function" => Some(Token::Function),
+        _ => None,
+    }
+}
 
 impl Token {
     /// Returns the unquoted token name for error messages.
@@ -351,6 +414,23 @@ mod tests {
     #[test]
     fn reserved_words_count() {
         assert_eq!(RESERVED_WORDS.len(), 21);
+    }
+
+    #[test]
+    fn lookup_keyword_matches_reserved_words() {
+        for &(word, ref expected) in RESERVED_WORDS {
+            let result = lookup_keyword(word.as_bytes());
+            assert_eq!(
+                result.as_ref(),
+                Some(expected),
+                "lookup_keyword({word:?}) failed"
+            );
+        }
+        // Non-keywords return None.
+        assert_eq!(lookup_keyword(b"foo"), None);
+        assert_eq!(lookup_keyword(b"And"), None);
+        assert_eq!(lookup_keyword(b"IF"), None);
+        assert_eq!(lookup_keyword(b""), None);
     }
 
     #[test]
