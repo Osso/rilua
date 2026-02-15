@@ -4,10 +4,18 @@ version = "0.1.0"
 authors = ["Daniel S. Reichenbach <daniel@kogito.network>"]
 description = "Lua 5.1.1 implemented in Rust, targeting the World of Warcraft addon variant."
 edition = "2024"
-rust-version = "1.92.0"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/wowemulation-dev/rilua"
+
+[[bin]]
+name = "rilua"
+path = "src/bin/rilua.rs"
+
+[[bin]]
+name = "riluac"
+path = "src/bin/riluac.rs"
 
 [profile.release]
 lto = true
@@ -64,3 +72,6 @@ self_named_module_files = { level = "allow", priority = 1 }
 unnested_or_patterns = { level = "allow", priority = 1 }
 cargo_common_metadata = { level = "allow", priority = 1 }
 redundant_else = { level = "allow", priority = 1 }
+
+[dev-dependencies]
+flamegraph = "0.6"

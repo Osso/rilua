@@ -1,866 +1,1240 @@
-//! This module contains functions which can tokenize a string input.
+//! Lexer: tokenizes Lua source code.
+//!
+//! Converts a source string into a sequence of tokens. Handles all Lua 5.1.1
+//! lexical elements: reserved words, operators, identifiers, numbers (decimal,
+//! hex, scientific), strings (short with escapes, long), and comments.
+//!
+//! Line tracking handles all four newline variants: `\n`, `\r`, `\r\n`, `\n\r`.
+//!
+//! Supports two input modes:
+//! - **Byte slice**: the entire source is available upfront (`Lexer::new`)
+//! - **Reader function**: data is pulled on demand (`Lexer::from_reader`),
+//!   matching PUC-Rio's ZIO model where `luaZ_fill` calls the reader when
+//!   the buffer is exhausted.
 
-use super::Result;
-use super::error::Error;
-use super::error::SyntaxError;
-use super::token::Token;
-use super::token::TokenType::{self, *};
+use crate::error::{LuaError, LuaResult, SyntaxError};
+use crate::vm::execute::{libc_strtod, locale_decimal_point};
 
-use std::iter::Peekable;
-use std::slice::SliceIndex;
-use std::str::CharIndices;
+use super::token::{RESERVED_WORDS, Span, Token};
 
-/// A `TokenStream` is a wrapper around a `Lexer`. It provides a lookahead buffer and several
-/// helper methods.
-#[derive(Debug)]
-pub(super) struct TokenStream<'a> {
-    lexer: Lexer<'a>,
-    lookahead: Option<Token>,
-    /// Second lookahead token, used only for table constructor disambiguation
-    /// (PUC-Rio's `luaX_lookahead`). Filled by `peek_next_type`.
-    lookahead2: Option<Token>,
-}
+/// Reader function type for streaming input.
+///
+/// Called when the lexer's buffer is exhausted and more data is needed.
+/// Returns `Ok(Some(data))` for new data, `Ok(None)` for end-of-input,
+/// or `Err(e)` for reader errors.
+type ReaderFn<'a> = Box<dyn FnMut() -> Result<Option<Vec<u8>>, LuaError> + 'a>;
 
-/// A `Lexer` handles the raw conversion of characters to tokens.
-#[derive(Debug)]
-pub(super) struct Lexer<'a> {
-    /// The starting position of the next character.
+/// Lexer state for tokenizing Lua source code.
+pub struct Lexer<'a> {
+    /// Source bytes (grows when using a reader function).
+    source: Vec<u8>,
+    /// Current read position.
     pos: usize,
-    /// `linebreaks[i]` is the byte offset of the start of line `i`.
-    linebreaks: Vec<usize>,
-    iter: Peekable<CharIndices<'a>>,
-    source: &'a str,
-}
-
-impl<'a> TokenStream<'a> {
-    /// Constructs a new `TokenStream`.
-    #[must_use]
-    pub(super) fn new(source: &'a str) -> Self {
-        Self {
-            lexer: Lexer::new(source),
-            lookahead: None,
-            lookahead2: None,
-        }
-    }
-
-    /// Returns the next `Token`.
-    pub(super) fn next(&mut self) -> Result<Token> {
-        match self.lookahead.take() {
-            Some(token) => {
-                // Promote lookahead2 to lookahead if present.
-                self.lookahead = self.lookahead2.take();
-                Ok(token)
-            }
-            None => self.lexer.next_token(),
-        }
-    }
-
-    /// Returns the next `Token`, without popping it from the stream.
-    pub(super) fn peek(&mut self) -> Result<&Token> {
-        if self.lookahead.is_none() {
-            self.lookahead = Some(self.lexer.next_token()?);
-        }
-        Ok(self.lookahead.as_ref().unwrap())
-    }
-
-    /// Returns the type of the next token.
-    pub(super) fn peek_type(&mut self) -> Result<TokenType> {
-        Ok(self.peek()?.typ)
-    }
-
-    /// Returns the type of the token *after* the next token (two-token lookahead).
-    /// Used only for table constructor disambiguation: `Name '='` vs expression.
-    /// Mirrors PUC-Rio's `luaX_lookahead`.
-    pub(super) fn peek_next_type(&mut self) -> Result<TokenType> {
-        // Ensure the first lookahead is filled.
-        if self.lookahead.is_none() {
-            self.lookahead = Some(self.lexer.next_token()?);
-        }
-        // Fill the second lookahead if needed.
-        if self.lookahead2.is_none() {
-            self.lookahead2 = Some(self.lexer.next_token()?);
-        }
-        Ok(self.lookahead2.as_ref().unwrap().typ)
-    }
-
-    /// Returns whether the next token is of the given type.
-    pub(super) fn check_type(&mut self, expected_type: TokenType) -> Result<bool> {
-        Ok(self.peek_type()? == expected_type)
-    }
-
-    /// Checks the next token's type. If it matches `expected_type`, it is popped off and
-    /// returned as `Some`. Otherwise, returns `None`.
-    pub(super) fn try_pop(&mut self, expected_type: TokenType) -> Result<Option<Token>> {
-        if self.check_type(expected_type)? {
-            Ok(Some(self.next().unwrap()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Returns the current position of the `TokenStream`.
-    #[must_use]
-    pub(super) fn line_and_column(&self, pos: usize) -> (usize, usize) {
-        self.lexer.line_and_col(pos)
-    }
-
-    /// Returns how many bytes have been read.
-    #[must_use]
-    pub(super) fn pos(&self) -> usize {
-        match &self.lookahead {
-            Some(token) => token.start,
-            None => self.lexer.pos,
-        }
-    }
-
-    /// Returns a substring from the source code.
-    #[must_use]
-    pub(super) fn substring(&self, index: impl SliceIndex<str, Output = str>) -> &'a str {
-        &self.lexer.source[index]
-    }
+    /// Current line number (1-based).
+    line: u32,
+    /// Current column number (1-based).
+    column: u32,
+    /// Source name for error messages.
+    source_name: String,
+    /// Lookahead token (if peeked).
+    lookahead: Option<(Token, Span)>,
+    /// Raw source text of the last-scanned token (PUC-Rio: `luaZ_buffer(ls->buff)`).
+    /// Populated for Number tokens where the lexeme differs from Display.
+    last_token_text: String,
+    /// Reader function for streaming input (None for byte slice mode).
+    reader: Option<ReaderFn<'a>>,
+    /// Error stored from a failed reader call.
+    /// Checked at the Eos point in `scan()` to propagate reader errors.
+    reader_error: Option<LuaError>,
+    /// Whether the reader has signaled end-of-input.
+    reader_exhausted: bool,
 }
 
 impl<'a> Lexer<'a> {
-    /// Constructs a new `Lexer`.
-    #[must_use]
-    pub(super) fn new(source: &'a str) -> Self {
-        let linebreaks = vec![0];
-        Self {
-            iter: source.char_indices().peekable(),
-            linebreaks,
-            pos: 0,
-            source,
-        }
-    }
-
-    /// Returns the next `Token`.
-    pub(super) fn next_token(&mut self) -> Result<Token> {
-        let starts_line = self.consume_whitespace();
-        let tok_start = self.pos;
-        if let Some(first_char) = self.next_char() {
-            let tok_type = match first_char {
-                '+' => Plus,
-                '*' => Star,
-                '/' => Slash,
-                '%' => Mod,
-                '^' => Caret,
-                '#' => Hash,
-                ';' => Semi,
-                ':' => Colon,
-                ',' => Comma,
-                '(' if starts_line => LParenLineStart,
-                '(' => LParen,
-                ')' => RParen,
-                '{' => LCurly,
-                '}' => RCurly,
-                ']' => RSquare,
-
-                '.' => self.peek_dot(tok_start)?,
-
-                '=' | '<' | '>' | '~' => self.peek_equals(tok_start, first_char)?,
-
-                '-' => {
-                    if self.try_next('-') {
-                        return self.comment();
-                    } else {
-                        Minus
-                    }
-                }
-
-                '\'' | '\"' => self.lex_string(first_char, tok_start)?,
-                '[' => match self.peek_char() {
-                    Some('[') | Some('=') => match self.check_long_bracket_open() {
-                        Some(level) => {
-                            self.read_long_bracket_body(level, true)?;
-                            LiteralString
-                        }
-                        None => return Err(self.error(SyntaxError::UnexpectedTok)),
-                    },
-                    _ => LSquare,
-                },
-
-                '0'..='9' => self.lex_full_number(tok_start, first_char)?,
-
-                'a'..='z' | 'A'..='Z' | '_' => self.lex_word(first_char),
-
-                _ => return Err(self.error(SyntaxError::InvalidCharacter(first_char))),
-            };
-            let len = (self.pos - tok_start) as u32;
-            let token = Token {
-                typ: tok_type,
-                start: tok_start,
-                len,
-            };
-            Ok(token)
-        } else {
-            Ok(self.end_of_file())
-        }
-    }
-
-    /// Skips over the characters in a comment.
-    fn comment(&mut self) -> Result<Token> {
-        if self.peek_char() == Some('[') {
-            self.next_char();
-            if let Some(level) = self.check_long_bracket_open() {
-                self.read_long_bracket_body(level, false)?;
-                return self.next_token();
-            }
-            // Not a long bracket (e.g. `--[not a long comment`).
-            // The `[` and any `=` signs were consumed, but that's fine —
-            // we just fall through to consume the rest of the line.
-        }
-        // Short comment: scan until newline or EOF. The newline is consumed
-        // by next_char() which handles line tracking (including \r\n pairs).
-        while let Some(c) = self.peek_char() {
-            if c == '\n' || c == '\r' {
-                self.next_char(); // consume the newline (handles \r\n pairs)
-                return self.next_token();
-            }
-            self.next_char();
-        }
-        Ok(self.end_of_file())
-    }
-
-    /// Called after the first `[` of a potential long bracket is consumed.
-    /// Counts `=` signs and checks for the second `[`.
+    /// Creates a new lexer for the given source bytes.
     ///
-    /// Returns `Some(level)` if the full `[=*[` pattern is found, consuming
-    /// all matched characters. Returns `None` otherwise (any consumed `=`
-    /// signs are lost, which is acceptable in the comment and error paths).
-    fn check_long_bracket_open(&mut self) -> Option<usize> {
-        let mut level = 0;
-        while self.peek_char() == Some('=') {
-            self.next_char();
-            level += 1;
+    /// Source is accepted as `&[u8]` because Lua files may contain arbitrary
+    /// byte sequences (e.g. `\0`, `\255` in string literals).
+    pub fn new(source: &[u8], name: &str) -> Self {
+        // Skip shebang line (PUC-Rio's luaL_loadfile skips leading `#` line).
+        let (start, start_line) = if source.starts_with(b"#") {
+            let end = source
+                .iter()
+                .position(|&b| b == b'\n' || b == b'\r')
+                .map_or(source.len(), |p| p + 1);
+            (end, 2)
+        } else {
+            (0, 1)
+        };
+        Self {
+            source: source.to_vec(),
+            pos: start,
+            line: start_line,
+            column: 1,
+            source_name: name.to_string(),
+            lookahead: None,
+            last_token_text: String::new(),
+            reader: None,
+            reader_error: None,
+            reader_exhausted: false,
         }
-        if self.peek_char() == Some('[') {
-            self.next_char();
-            Some(level)
+    }
+
+    /// Creates a new lexer that pulls data on demand from a reader function.
+    ///
+    /// The reader is called whenever the internal buffer is exhausted,
+    /// matching PUC-Rio's ZIO model. The initial buffer contains `first_chunk`
+    /// (which may be empty).
+    ///
+    /// No shebang handling is performed for reader-based lexers, matching
+    /// PUC-Rio where shebang skipping is done by `luaL_loadfile`, not
+    /// `lua_load`.
+    pub fn from_reader(
+        first_chunk: Vec<u8>,
+        reader: impl FnMut() -> Result<Option<Vec<u8>>, LuaError> + 'a,
+        name: &str,
+    ) -> Self {
+        Self {
+            source: first_chunk,
+            pos: 0,
+            line: 1,
+            column: 1,
+            source_name: name.to_string(),
+            lookahead: None,
+            last_token_text: String::new(),
+            reader: Some(Box::new(reader)),
+            reader_error: None,
+            reader_exhausted: false,
+        }
+    }
+
+    /// Returns the current line number.
+    #[must_use]
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// Returns the source name.
+    #[must_use]
+    pub fn source_name(&self) -> &str {
+        &self.source_name
+    }
+
+    /// Returns the raw source text of the last scanned token.
+    /// Used by the parser for error messages (PUC-Rio: `txtToken`).
+    #[must_use]
+    pub fn last_token_text(&self) -> &str {
+        &self.last_token_text
+    }
+
+    // -- Buffer management --
+
+    /// Attempts to refill the buffer from the reader function.
+    ///
+    /// Returns `true` if data was added, `false` if the reader returned
+    /// None (end-of-input) or an error. Errors are stored in `reader_error`
+    /// for later retrieval.
+    fn refill(&mut self) -> bool {
+        if self.reader_exhausted {
+            return false;
+        }
+        let Some(reader) = self.reader.as_mut() else {
+            return false;
+        };
+        match reader() {
+            Ok(Some(data)) => {
+                if data.is_empty() {
+                    // Empty chunk signals end of input (PUC-Rio behavior).
+                    self.reader_exhausted = true;
+                    false
+                } else {
+                    self.source.extend_from_slice(&data);
+                    true
+                }
+            }
+            Ok(None) => {
+                self.reader_exhausted = true;
+                false
+            }
+            Err(e) => {
+                self.reader_error = Some(e);
+                self.reader_exhausted = true;
+                false
+            }
+        }
+    }
+
+    /// Ensures at least `needed` bytes are available from `self.pos`.
+    ///
+    /// Calls `refill()` repeatedly until enough data is buffered or the
+    /// reader is exhausted. Returns `true` if the requested amount is
+    /// available.
+    fn ensure_available(&mut self, needed: usize) -> bool {
+        while self.pos + needed > self.source.len() {
+            if !self.refill() {
+                return false;
+            }
+        }
+        true
+    }
+
+    // -- Character primitives --
+
+    fn peek(&mut self) -> Option<u8> {
+        if self.pos < self.source.len() {
+            return Some(self.source[self.pos]);
+        }
+        // Try to get more data from reader.
+        if self.refill() && self.pos < self.source.len() {
+            Some(self.source[self.pos])
         } else {
             None
         }
     }
 
-    /// Called after a `]` is consumed inside a long bracket body. Counts `=`
-    /// signs and checks for the closing `]` at the matching level.
-    ///
-    /// Returns `true` and consumes the closing `]` if levels match. Returns
-    /// `false` otherwise (consumed `=` signs become part of the content).
-    fn check_long_bracket_close(&mut self, level: usize) -> bool {
-        let mut count = 0;
-        while self.peek_char() == Some('=') {
-            self.next_char();
-            count += 1;
+    fn peek_ahead(&mut self, offset: usize) -> Option<u8> {
+        let target = self.pos + offset;
+        if target < self.source.len() {
+            return Some(self.source[target]);
         }
-        if count == level && self.peek_char() == Some(']') {
-            self.next_char();
-            true
+        // Try to get enough data from reader.
+        if self.ensure_available(offset + 1) {
+            Some(self.source[self.pos + offset])
         } else {
-            false
+            None
         }
     }
 
-    /// Reads the body of a long bracket (string or comment) after the opening
-    /// `[=*[` has been consumed. Scans until the matching `]=*]` is found.
+    fn advance(&mut self) -> Option<u8> {
+        // Ensure at least one byte is available.
+        if self.pos >= self.source.len() && !self.refill() {
+            return None;
+        }
+        let ch = self.source[self.pos];
+        self.pos += 1;
+        if ch == b'\n' || ch == b'\r' {
+            // Don't update column here; newlines are handled by inc_line()
+        } else {
+            self.column += 1;
+        }
+        // Eagerly refill when buffer is exhausted (matches PUC-Rio's next(ls)
+        // which always reads the next char after consuming one).
+        if self.reader.is_some() && self.pos >= self.source.len() {
+            self.refill();
+        }
+        Some(ch)
+    }
+
+    fn inc_line(&mut self) {
+        let old = self.peek();
+        self.pos += 1; // consume the newline char
+        // Handle \r\n and \n\r pairs
+        if let Some(next) = self.peek()
+            && (next == b'\n' || next == b'\r')
+            && next != old.unwrap_or(0)
+        {
+            self.pos += 1;
+        }
+        self.line += 1;
+        self.column = 1;
+    }
+
+    fn current_span(&self) -> Span {
+        Span::new(self.line, self.column)
+    }
+
+    fn syntax_error(&self, msg: &str) -> LuaError {
+        LuaError::Syntax(SyntaxError {
+            message: msg.to_string(),
+            source: self.source_name.clone(),
+            line: self.line,
+            raw_message: None,
+        })
+    }
+
+    fn syntax_error_near(&self, msg: &str, near: &str) -> LuaError {
+        LuaError::Syntax(SyntaxError {
+            message: format!("{msg} near '{near}'"),
+            source: self.source_name.clone(),
+            line: self.line,
+            raw_message: None,
+        })
+    }
+
+    // -- Main scanning --
+
+    /// Returns the next token and its source span.
     ///
-    /// Per the Lua spec, a leading newline immediately after the opening
-    /// bracket is skipped.
-    fn read_long_bracket_body(&mut self, level: usize, is_string: bool) -> Result<()> {
-        // Skip an optional leading newline (\n, \r, \r\n, or \n\r).
-        // next_char handles the \r\n / \n\r pair consumption.
-        if matches!(self.peek_char(), Some('\n') | Some('\r')) {
-            self.next_char();
+    /// If a lookahead token was peeked, returns that instead.
+    #[allow(clippy::should_implement_trait)] // Lexer::next is not an Iterator
+    pub fn next(&mut self) -> LuaResult<(Token, Span)> {
+        if let Some(la) = self.lookahead.take() {
+            return Ok(la);
         }
+        self.scan()
+    }
+
+    /// Peeks at the next token without consuming it.
+    pub fn lookahead(&mut self) -> LuaResult<&Token> {
+        if self.lookahead.is_none() {
+            self.lookahead = Some(self.scan()?);
+        }
+        // The option is always Some after the line above.
+        Ok(&self
+            .lookahead
+            .as_ref()
+            .ok_or_else(|| self.syntax_error("unexpected error"))?
+            .0)
+    }
+
+    /// Main scan loop: skip whitespace/comments, then dispatch on character.
+    fn scan(&mut self) -> LuaResult<(Token, Span)> {
         loop {
-            match self.next_char() {
-                None => {
-                    let kind = if is_string {
-                        SyntaxError::UnfinishedLongString
-                    } else {
-                        SyntaxError::UnfinishedLongComment
-                    };
-                    return Err(self.error(kind));
-                }
-                Some(']') => {
-                    if self.check_long_bracket_close(level) {
-                        return Ok(());
-                    }
-                }
-                Some(_) => {}
+            // Check for stored reader error before attempting to scan.
+            if let Some(err) = self.reader_error.take() {
+                return Err(err);
             }
-        }
-    }
 
-    /// Peeks the next character.
-    #[must_use]
-    fn peek_char(&mut self) -> Option<char> {
-        self.iter.peek().map(|(_, c)| *c)
-    }
+            self.skip_whitespace();
 
-    /// Pops and returns the next character. Handles line ending tracking:
-    /// `\n`, `\r`, `\r\n`, and `\n\r` are all single line endings (matching
-    /// Lua 5.1.1's `inclinenumber` in `llex.c:127-135`).
-    fn next_char(&mut self) -> Option<char> {
-        match self.iter.next() {
-            Some((pos, c)) => {
-                self.pos = pos + c.len_utf8();
-                if c == '\n' || c == '\r' {
-                    // Consume the second character of a \r\n or \n\r pair
-                    if let Some(&(next_pos, next_c)) = self.iter.peek() {
-                        if (c == '\r' && next_c == '\n') || (c == '\n' && next_c == '\r') {
-                            self.iter.next();
-                            self.pos = next_pos + next_c.len_utf8();
+            // Check again after whitespace skipping (may have triggered refill).
+            if let Some(err) = self.reader_error.take() {
+                return Err(err);
+            }
+
+            let span = self.current_span();
+            let token_start = self.pos;
+
+            let Some(ch) = self.peek() else {
+                // End of input. If a reader error caused this, propagate it.
+                if let Some(err) = self.reader_error.take() {
+                    return Err(err);
+                }
+                return Ok((Token::Eos, span));
+            };
+
+            match ch {
+                b'\n' | b'\r' => {
+                    self.inc_line();
+                }
+
+                b'-' => {
+                    self.advance();
+                    if self.peek() != Some(b'-') {
+                        return Ok((Token::Char(b'-'), span));
+                    }
+                    // Comment
+                    self.advance(); // consume second '-'
+                    if self.peek() == Some(b'[') {
+                        let sep = self.count_sep();
+                        if sep >= 0 {
+                            self.read_long_string(sep, true)?;
+                            continue;
                         }
                     }
-                    self.linebreaks.push(self.pos);
+                    // Short comment: skip to end of line
+                    while let Some(c) = self.peek() {
+                        if c == b'\n' || c == b'\r' {
+                            break;
+                        }
+                        self.advance();
+                    }
                 }
-                Some(c)
+
+                b'[' => {
+                    let sep = self.count_sep();
+                    if sep >= 0 {
+                        let s = self.read_long_string(sep, false)?;
+                        self.last_token_text =
+                            String::from_utf8_lossy(&self.source[token_start..self.pos]).into();
+                        return Ok((Token::Str(s), span));
+                    }
+                    if sep == -1 {
+                        return Err(self.syntax_error_near("invalid long string delimiter", "["));
+                    }
+                    // Just a single '[', not a long string delimiter
+                    self.advance();
+                    return Ok((Token::Char(b'['), span));
+                }
+
+                b'=' => {
+                    self.advance();
+                    if self.peek() == Some(b'=') {
+                        self.advance();
+                        return Ok((Token::Eq, span));
+                    }
+                    return Ok((Token::Char(b'='), span));
+                }
+
+                b'<' => {
+                    self.advance();
+                    if self.peek() == Some(b'=') {
+                        self.advance();
+                        return Ok((Token::Le, span));
+                    }
+                    return Ok((Token::Char(b'<'), span));
+                }
+
+                b'>' => {
+                    self.advance();
+                    if self.peek() == Some(b'=') {
+                        self.advance();
+                        return Ok((Token::Ge, span));
+                    }
+                    return Ok((Token::Char(b'>'), span));
+                }
+
+                b'~' => {
+                    self.advance();
+                    if self.peek() == Some(b'=') {
+                        self.advance();
+                        return Ok((Token::Ne, span));
+                    }
+                    return Err(self.syntax_error_near("unexpected symbol", "~"));
+                }
+
+                b'.' => {
+                    self.advance();
+                    if self.peek() == Some(b'.') {
+                        self.advance();
+                        if self.peek() == Some(b'.') {
+                            self.advance();
+                            return Ok((Token::Dots, span));
+                        }
+                        return Ok((Token::Concat, span));
+                    }
+                    if self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                        let num = self.read_number(b'.')?;
+                        return Ok((Token::Number(num), span));
+                    }
+                    return Ok((Token::Char(b'.'), span));
+                }
+
+                b'"' | b'\'' => {
+                    let s = self.read_short_string(ch)?;
+                    self.last_token_text =
+                        String::from_utf8_lossy(&self.source[token_start..self.pos]).into();
+                    return Ok((Token::Str(s), span));
+                }
+
+                _ if ch.is_ascii_digit() => {
+                    let num = self.read_number(ch)?;
+                    return Ok((Token::Number(num), span));
+                }
+
+                _ if ch.is_ascii_alphabetic() || ch == b'_' => {
+                    let name = self.read_name();
+                    // Check if it's a reserved word (binary search since sorted)
+                    if let Ok(idx) =
+                        RESERVED_WORDS.binary_search_by_key(&name.as_str(), |&(k, _)| k)
+                    {
+                        return Ok((RESERVED_WORDS[idx].1.clone(), span));
+                    }
+                    return Ok((Token::Name(name), span));
+                }
+
+                _ => {
+                    self.advance();
+                    return Ok((Token::Char(ch), span));
+                }
             }
-            None => None,
         }
     }
 
-    /// Consumes any whitespace characters. Returns whether or not a newline was consumed.
-    fn consume_whitespace(&mut self) -> bool {
-        let mut ret = false;
-        while let Some(c) = self.peek_char() {
-            if !c.is_ascii_whitespace() {
+    fn skip_whitespace(&mut self) {
+        while let Some(c) = self.peek() {
+            if c == b' ' || c == b'\t' || c == 0x0C /* form feed */ || c == 0x0B
+            /* vertical tab */
+            {
+                self.advance();
+            } else {
                 break;
             }
-            if c == '\n' || c == '\r' {
-                ret = true;
-            }
-            self.next_char();
-        }
-        ret
-    }
-
-    /// Move a character forward, only if the current character matches
-    /// `expected`.
-    fn try_next(&mut self, expected: char) -> bool {
-        match self.peek_char() {
-            Some(c) if c == expected => {
-                self.next_char();
-                true
-            }
-            _ => false,
         }
     }
 
-    /// Constructs an error of the given kind at the current position.
-    #[must_use]
-    fn error(&self, kind: SyntaxError) -> Error {
-        let (line_num, column) = self.line_and_col(self.pos);
-        Error::new(kind, line_num, column)
+    // -- Names and keywords --
+
+    fn read_name(&mut self) -> String {
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphanumeric() || c == b'_' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        // Source is valid UTF-8 for identifiers (ASCII subset)
+        String::from_utf8_lossy(&self.source[start..self.pos]).into_owned()
     }
 
-    /// The lexer just read a `.`.
-    /// Determines whether it is part of a `Dot`, `DotDot`, `DotDotDot` or `Number`.
-    fn peek_dot(&mut self, tok_start: usize) -> Result<TokenType> {
-        let typ = match self.peek_char() {
-            Some('.') => {
-                self.next_char();
-                if self.try_next('.') {
-                    DotDotDot
-                } else {
-                    DotDot
-                }
-            }
-            Some(c) if c.is_ascii_digit() => {
-                self.next_char();
-                self.lex_number_after_decimal(tok_start)?;
-                LiteralNumber
-            }
-            _ => Dot,
-        };
-        Ok(typ)
-    }
+    // -- Numbers --
 
-    /// The lexer just read something which might be part of a two-character
-    /// operator, with `=` as the second character.
+    /// Reads a number token, matching PUC-Rio's `read_numeral`.
     ///
-    /// Returns `Err` if the first character is `~` and it is not paired with a
-    /// `=`.
-    fn peek_equals(&mut self, _tok_start: usize, first_char: char) -> Result<TokenType> {
-        if self.try_next('=') {
-            let typ = match first_char {
-                '=' => Equal,
-                '~' => NotEqual,
-                '<' => LessEqual,
-                '>' => GreaterEqual,
-                _ => panic!("peek_equals was called with first_char = {first_char}"),
-            };
-            Ok(typ)
+    /// Greedily collects digits and dots in a single loop (matching
+    /// PUC-Rio's `do { save_and_next; } while (isdigit || '.')`), then
+    /// exponent, then trailing alphanumeric. Uses libc `strtod` for
+    /// locale-aware parsing with `trydecpoint` fallback.
+    fn read_number(&mut self, first: u8) -> LuaResult<f64> {
+        let start = if first == b'.' {
+            self.pos - 1
         } else {
-            match first_char {
-                '=' => Ok(Assign),
-                '<' => Ok(Less),
-                '>' => Ok(Greater),
-                '~' => Err(self.error(SyntaxError::InvalidCharacter(first_char))),
-                _ => panic!("peek_equals was called with first_char = {first_char}"),
+            self.pos
+        };
+
+        if first != b'.' {
+            self.advance();
+        }
+
+        // PUC-Rio: greedily consume digits and dots in one loop.
+        // This means "4.5." consumes both dots, producing "malformed number".
+        while self.peek().is_some_and(|c| c.is_ascii_digit() || c == b'.') {
+            self.advance();
+        }
+
+        // Check for hex prefix (0x/0X) -- hex digits may include a-f.
+        let is_hex = self.pos - start >= 2
+            && self.source[start] == b'0'
+            && (self.source[start + 1] == b'x' || self.source[start + 1] == b'X');
+        if is_hex {
+            while self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                self.advance();
             }
         }
+
+        // Exponent (e/E for decimal, p/P not in Lua 5.1).
+        if self.peek().is_some_and(|c| c == b'e' || c == b'E') {
+            self.advance();
+            if self.peek().is_some_and(|c| c == b'+' || c == b'-') {
+                self.advance();
+            }
+        }
+
+        // PUC-Rio: consume trailing alphanumeric/underscore (produces
+        // "malformed number" for things like "1abc").
+        while self
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            self.advance();
+        }
+
+        let num_bytes = &self.source[start..self.pos];
+        let num_str = String::from_utf8_lossy(num_bytes);
+        self.last_token_text = num_str.to_string();
+
+        // Hex: parse with Rust (strtod doesn't handle 0x on all platforms).
+        if is_hex {
+            let hex_str = &num_str[2..];
+            return match u64::from_str_radix(hex_str, 16) {
+                Ok(v) => Ok(v as f64),
+                Err(_) => Err(self.syntax_error_near("malformed number", &num_str)),
+            };
+        }
+
+        // Decimal: use strtod (locale-aware).
+        if let Some((val, consumed)) = libc_strtod(num_bytes)
+            && consumed == num_bytes.len()
+        {
+            return Ok(val);
+        }
+
+        // trydecpoint: replace '.' with the locale's decimal point and retry.
+        let decpoint = locale_decimal_point();
+        if decpoint != b'.' {
+            let mut buf: Vec<u8> = num_bytes.to_vec();
+            for b in &mut buf {
+                if *b == b'.' {
+                    *b = decpoint;
+                }
+            }
+            if let Some((val, consumed)) = libc_strtod(&buf)
+                && consumed == buf.len()
+            {
+                return Ok(val);
+            }
+        }
+
+        Err(self.syntax_error_near("malformed number", &num_str))
     }
 
-    /// Tokenizes a 'short' literal string, AKA a string denoted by single or
-    /// double quotes and not by two square brackets.
-    fn lex_string(&mut self, quote: char, _tok_start: usize) -> Result<TokenType> {
+    // -- Strings --
+
+    fn read_short_string(&mut self, delimiter: u8) -> LuaResult<Vec<u8>> {
+        self.advance(); // consume opening delimiter
+        let mut buf = Vec::new();
+
         loop {
-            match self.peek_char() {
-                None => return Err(self.error(SyntaxError::UnclosedString)),
-                Some(c) if c == quote => {
-                    self.next_char();
-                    return Ok(LiteralString);
+            match self.peek() {
+                None => {
+                    return Err(self.syntax_error_near("unfinished string", "<eof>"));
                 }
-                Some('\\') => {
-                    // Consume the backslash
-                    self.next_char();
-                    // Skip the escaped character. For \ddd, we just skip
-                    // one digit here; the parser handles full parsing.
-                    // For backslash-newline, next_char handles \r\n pairs.
-                    self.next_char();
+                Some(b'\n') | Some(b'\r') => {
+                    return Err(self.syntax_error_near("unfinished string", "<string>"));
                 }
-                Some('\n') | Some('\r') => {
-                    return Err(self.error(SyntaxError::UnclosedString));
-                }
-                _ => {
-                    self.next_char();
-                }
-            }
-        }
-    }
-
-    /// Reads in a number which starts with a digit (as opposed to a decimal point).
-    fn lex_full_number(&mut self, tok_start: usize, first_char: char) -> Result<TokenType> {
-        // Check for hex values
-        if first_char == '0' && (self.try_next('x') || self.try_next('X')) {
-            // Has to be at least one digit
-            match self.next_char() {
-                Some(c) if c.is_ascii_hexdigit() => (),
-                _ => return Err(self.error(SyntaxError::BadNumber)),
-            }
-            // Read the rest of the numbers
-            while let Some(c) = self.peek_char() {
-                if c.is_ascii_hexdigit() {
-                    self.next_char();
-                } else {
+                Some(c) if c == delimiter => {
+                    self.advance(); // consume closing delimiter
                     break;
                 }
-            }
-
-            match self.peek_char() {
-                Some(c) if c.is_ascii_hexdigit() => Err(self.error(SyntaxError::BadNumber)),
-                _ => Ok(LiteralHexNumber),
-            }
-        } else {
-            // Read in the rest of the base
-            self.lex_digits();
-
-            // Handle the fraction and exponent components.
-            if self.try_next('.') {
-                match self.peek_char() {
-                    Some(c) if c.is_ascii_digit() => self.lex_number_after_decimal(tok_start)?,
-                    _ => self.lex_exponent(tok_start)?,
+                Some(b'\\') => {
+                    self.advance(); // consume backslash
+                    match self.peek() {
+                        Some(b'a') => {
+                            self.advance();
+                            buf.push(0x07);
+                        }
+                        Some(b'b') => {
+                            self.advance();
+                            buf.push(0x08);
+                        }
+                        Some(b'f') => {
+                            self.advance();
+                            buf.push(0x0C);
+                        }
+                        Some(b'n') => {
+                            self.advance();
+                            buf.push(b'\n');
+                        }
+                        Some(b'r') => {
+                            self.advance();
+                            buf.push(b'\r');
+                        }
+                        Some(b't') => {
+                            self.advance();
+                            buf.push(b'\t');
+                        }
+                        Some(b'v') => {
+                            self.advance();
+                            buf.push(0x0B);
+                        }
+                        Some(b'\\') => {
+                            self.advance();
+                            buf.push(b'\\');
+                        }
+                        Some(b'"') => {
+                            self.advance();
+                            buf.push(b'"');
+                        }
+                        Some(b'\'') => {
+                            self.advance();
+                            buf.push(b'\'');
+                        }
+                        Some(b'\n') | Some(b'\r') => {
+                            self.inc_line();
+                            buf.push(b'\n');
+                        }
+                        Some(c) if c.is_ascii_digit() => {
+                            // \ddd decimal escape (up to 3 digits, max 255)
+                            let mut val: u32 = 0;
+                            for _ in 0..3 {
+                                if let Some(d) = self.peek() {
+                                    if d.is_ascii_digit() {
+                                        val = val * 10 + u32::from(d - b'0');
+                                        self.advance();
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            if val > 255 {
+                                return Err(
+                                    self.syntax_error_near("escape sequence too large", "<string>")
+                                );
+                            }
+                            buf.push(val as u8);
+                        }
+                        Some(c) => {
+                            return Err(self.syntax_error_near(
+                                &format!("invalid escape sequence '\\{}'", char::from(c)),
+                                "<string>",
+                            ));
+                        }
+                        None => {
+                            return Err(self.syntax_error_near("unfinished string", "<eof>"));
+                        }
+                    }
                 }
-            } else {
-                self.lex_exponent(tok_start)?;
-            }
-
-            Ok(LiteralNumber)
-        }
-    }
-
-    /// Reads in a literal number which starts with a decimal point.
-    fn lex_number_after_decimal(&mut self, tok_start: usize) -> Result<()> {
-        self.lex_digits();
-        self.lex_exponent(tok_start)
-    }
-
-    /// Consumes an unbroken sequence of digits.
-    fn lex_digits(&mut self) {
-        while let Some(c) = self.peek_char() {
-            if c.is_ascii_digit() {
-                self.next_char();
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Consumes the optional exponent part of a literal number, then checks
-    /// for any trailing letters.
-    fn lex_exponent(&mut self, _tok_start: usize) -> Result<()> {
-        if self.try_next('E') || self.try_next('e') {
-            // The exponent might have a sign.
-            if let Some(c) = self.peek_char()
-                && (c == '+' || c == '-')
-            {
-                self.next_char();
-            }
-
-            self.lex_digits();
-        }
-        match self.peek_char() {
-            Some(c) if c.is_ascii_hexdigit() => Err(self.error(SyntaxError::BadNumber)),
-            _ => Ok(()),
-        }
-    }
-
-    /// Reads a word and returns it as an identifier or keyword.
-    fn lex_word(&mut self, first_char: char) -> TokenType {
-        let mut word = String::new();
-        word.push(first_char);
-        while let Some(c) = self.peek_char() {
-            if c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '_' {
-                word.push(c);
-                self.next_char();
-            } else {
-                break;
+                Some(c) => {
+                    self.advance();
+                    buf.push(c);
+                }
             }
         }
 
-        keyword_match(&word)
+        Ok(buf)
     }
 
-    /// Returns the current position of the `Lexer`.
-    #[must_use]
-    fn line_and_col(&self, pos: usize) -> (usize, usize) {
-        let iter = self.linebreaks.windows(2).enumerate();
-        for (line_num, linebreak_pair) in iter {
-            if pos < linebreak_pair[1] {
-                let column = pos - linebreak_pair[0];
-                // lines and columns start counting at 1
-                return (line_num + 1, column + 1);
+    // -- Long strings and comments --
+
+    /// Counts the separator level for long strings/comments.
+    /// Returns >= 0 for valid `[=*[` (number of `=` signs),
+    /// -1 for `[=*` not followed by `[` (invalid delimiter),
+    /// -2 for just `[` (single bracket, not a long string).
+    fn count_sep(&mut self) -> i32 {
+        debug_assert_eq!(self.source.get(self.pos).copied(), Some(b'['));
+        let mut i = 1;
+        let mut count = 0;
+        while self.peek_ahead(i) == Some(b'=') {
+            count += 1;
+            i += 1;
+        }
+        if self.peek_ahead(i) == Some(b'[') {
+            count
+        } else if count > 0 {
+            -1 // Had '=' signs but no closing '['
+        } else {
+            -2 // Just a single '['
+        }
+    }
+
+    /// Reads a long string `[=*[...]=*]` or long comment.
+    /// `sep` is the number of `=` signs. If `is_comment`, discards the content.
+    fn read_long_string(&mut self, sep: i32, is_comment: bool) -> LuaResult<Vec<u8>> {
+        // Consume opening delimiter: '[' '='*sep '['
+        let count = 2 + sep as usize;
+        for _ in 0..count {
+            self.pos += 1;
+            self.column += 1;
+        }
+
+        // Skip first newline if present (per Lua spec)
+        if let Some(c) = self.peek()
+            && (c == b'\n' || c == b'\r')
+        {
+            self.inc_line();
+        }
+
+        let mut buf = Vec::new();
+
+        loop {
+            match self.peek() {
+                None => {
+                    let what = if is_comment { "comment" } else { "string" };
+                    return Err(self.syntax_error_near(&format!("unfinished long {what}"), "<eof>"));
+                }
+                Some(b'\n') | Some(b'\r') => {
+                    buf.push(b'\n'); // normalize all newlines to \n
+                    self.inc_line();
+                }
+                Some(b']') => {
+                    if self.check_closing_long_bracket(sep) {
+                        // Consume closing delimiter: ']' '='*sep ']'
+                        let close_count = 2 + sep as usize;
+                        for _ in 0..close_count {
+                            self.pos += 1;
+                            self.column += 1;
+                        }
+                        if is_comment {
+                            return Ok(Vec::new());
+                        }
+                        return Ok(buf);
+                    }
+                    self.advance();
+                    if !is_comment {
+                        buf.push(b']');
+                    }
+                }
+                Some(c) => {
+                    self.advance();
+                    if !is_comment {
+                        buf.push(c);
+                    }
+                }
             }
         }
-        let line_num = self.linebreaks.len() - 1;
-        let column = pos - self.linebreaks.last().unwrap();
-        (line_num + 1, column + 1)
     }
 
-    #[must_use]
-    const fn end_of_file(&self) -> Token {
-        Token {
-            typ: TokenType::EndOfFile,
-            start: self.pos,
-            len: 0,
+    /// Checks if the current position has a closing long bracket `]=*]` with `sep` equals signs.
+    fn check_closing_long_bracket(&mut self, sep: i32) -> bool {
+        if self.peek() != Some(b']') {
+            return false;
         }
-    }
-}
-
-/// Checks if a word is a keyword, then returns the appropriate `TokenType`.
-#[must_use]
-fn keyword_match(s: &str) -> TokenType {
-    match s {
-        "and" => And,
-        "break" => Break,
-        "do" => Do,
-        "else" => Else,
-        "elseif" => ElseIf,
-        "end" => End,
-        "false" => False,
-        "for" => For,
-        "function" => Function,
-        "if" => If,
-        "in" => In,
-        "local" => Local,
-        "nil" => Nil,
-        "not" => Not,
-        "or" => Or,
-        "repeat" => Repeat,
-        "return" => Return,
-        "then" => Then,
-        "true" => True,
-        "until" => Until,
-        "while" => While,
-        _ => Identifier,
+        let mut i = 1;
+        for _ in 0..sep {
+            if self.peek_ahead(i) != Some(b'=') {
+                return false;
+            }
+            i += 1;
+        }
+        self.peek_ahead(i) == Some(b']')
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp,
+    clippy::approx_constant,
+    clippy::items_after_statements,
+    clippy::useless_vec,
+    clippy::if_not_else
+)]
 mod tests {
     use super::*;
 
-    fn check(input: &str, tokens: &[(TokenType, usize, u32)], lines: &[usize]) {
-        let mut lexer = Lexer::new(input);
-        let mut tokens = tokens
-            .iter()
-            .map(|&(typ, start, len)| Token { typ, start, len });
+    fn lex_all(source: &str) -> LuaResult<Vec<(Token, Span)>> {
+        let mut lexer = Lexer::new(source.as_bytes(), "test");
+        let mut tokens = Vec::new();
         loop {
-            let actual = lexer.next_token().unwrap();
-            if actual.typ == TokenType::EndOfFile {
+            let (tok, span) = lexer.next()?;
+            if tok == Token::Eos {
+                tokens.push((tok, span));
                 break;
             }
-            let expected = tokens.next().unwrap();
-            assert_eq!(expected, actual);
+            tokens.push((tok, span));
         }
-        assert!(tokens.next().is_none());
-        assert_eq!(lines, lexer.linebreaks.as_slice());
+        Ok(tokens)
     }
 
-    fn check_line(input: &str, tokens: &[(TokenType, usize, u32)]) {
-        check(input, tokens, &[0]);
+    fn lex_tokens(source: &str) -> LuaResult<Vec<Token>> {
+        Ok(lex_all(source)?.into_iter().map(|(t, _)| t).collect())
     }
 
-    #[test]
-    fn test_lexer01() {
-        let tokens = &[(LiteralNumber, 0, 2)];
-        check_line("50", tokens);
-    }
+    // -- Keyword tests --
 
     #[test]
-    fn test_lexer02() {
-        let input = "hi 4 false";
-        let tokens = &[(Identifier, 0, 2), (LiteralNumber, 3, 1), (False, 5, 5)];
-        check_line(input, tokens);
-    }
-
-    #[test]
-    fn test_lexer03() {
-        let input = "hi5";
-        let tokens = &[(Identifier, 0, 3)];
-        check_line(input, tokens);
-    }
-
-    #[test]
-    fn test_lexer04() {
-        let input = "5 + 5";
-        let tokens = &[(LiteralNumber, 0, 1), (Plus, 2, 1), (LiteralNumber, 4, 1)];
-        check_line(input, tokens);
-    }
-
-    #[test]
-    fn test_lexer05() {
-        let input = "print 5 or 6;";
-        let tokens = &[
-            (Identifier, 0, 5),
-            (LiteralNumber, 6, 1),
-            (Or, 8, 2),
-            (LiteralNumber, 11, 1),
-            (Semi, 12, 1),
+    fn all_keywords() {
+        let tokens = lex_tokens(
+            "and break do else elseif end false for function if in local nil not or repeat return then true until while"
+        ).unwrap();
+        let expected = vec![
+            Token::And,
+            Token::Break,
+            Token::Do,
+            Token::Else,
+            Token::ElseIf,
+            Token::End,
+            Token::False,
+            Token::For,
+            Token::Function,
+            Token::If,
+            Token::In,
+            Token::Local,
+            Token::Nil,
+            Token::Not,
+            Token::Or,
+            Token::Repeat,
+            Token::Return,
+            Token::Then,
+            Token::True,
+            Token::Until,
+            Token::While,
+            Token::Eos,
         ];
-        check_line(input, tokens);
+        assert_eq!(tokens, expected);
     }
 
     #[test]
-    fn test_lexer06() {
-        let input = "t = {x = 3}";
-        let tokens = &[
-            (Identifier, 0, 1),
-            (Assign, 2, 1),
-            (LCurly, 4, 1),
-            (Identifier, 5, 1),
-            (Assign, 7, 1),
-            (LiteralNumber, 9, 1),
-            (RCurly, 10, 1),
-        ];
-        check_line(input, tokens);
+    fn keywords_case_sensitive() {
+        let tokens = lex_tokens("And AND aNd").unwrap();
+        assert_eq!(tokens[0], Token::Name("And".into()));
+        assert_eq!(tokens[1], Token::Name("AND".into()));
+        assert_eq!(tokens[2], Token::Name("aNd".into()));
+    }
+
+    // -- Identifier tests --
+
+    #[test]
+    fn identifiers() {
+        let tokens = lex_tokens("foo _bar baz123 _").unwrap();
+        assert_eq!(tokens[0], Token::Name("foo".into()));
+        assert_eq!(tokens[1], Token::Name("_bar".into()));
+        assert_eq!(tokens[2], Token::Name("baz123".into()));
+        assert_eq!(tokens[3], Token::Name("_".into()));
+    }
+
+    // -- Operator tests --
+
+    #[test]
+    fn multi_char_operators() {
+        let tokens = lex_tokens(".. ... == >= <= ~=").unwrap();
+        assert_eq!(tokens[0], Token::Concat);
+        assert_eq!(tokens[1], Token::Dots);
+        assert_eq!(tokens[2], Token::Eq);
+        assert_eq!(tokens[3], Token::Ge);
+        assert_eq!(tokens[4], Token::Le);
+        assert_eq!(tokens[5], Token::Ne);
     }
 
     #[test]
-    fn test_lexer07() {
-        let input = "0x5rad";
-        let tokens = &[(LiteralHexNumber, 0, 3), (Identifier, 3, 3)];
-        check_line(input, tokens);
+    fn single_char_operators() {
+        let tokens = lex_tokens("+ - * / % ^ # < > = ( ) { } ; : , [ ]").unwrap();
+        let expected_chars: Vec<u8> = b"+-*/%^#<>=(){};:,[]".to_vec();
+        for (i, &ch) in expected_chars.iter().enumerate() {
+            assert_eq!(tokens[i], Token::Char(ch), "mismatch at index {i}");
+        }
     }
 
     #[test]
-    fn test_lexer08() {
-        let input = "print {x = 5,}";
-        let tokens = &[
-            (Identifier, 0, 5),
-            (LCurly, 6, 1),
-            (Identifier, 7, 1),
-            (Assign, 9, 1),
-            (LiteralNumber, 11, 1),
-            (Comma, 12, 1),
-            (RCurly, 13, 1),
-        ];
-        check_line(input, tokens);
+    fn tilde_alone_is_error() {
+        assert!(lex_tokens("~").is_err());
+    }
+
+    // -- Number tests --
+
+    #[test]
+    fn integers() {
+        let tokens = lex_tokens("0 42 1000000").unwrap();
+        assert_eq!(tokens[0], Token::Number(0.0));
+        assert_eq!(tokens[1], Token::Number(42.0));
+        assert_eq!(tokens[2], Token::Number(1_000_000.0));
     }
 
     #[test]
-    fn test_lexer09() {
-        let input = "print()\nsome_other_function(an_argument)\n";
-        let tokens = &[
-            (Identifier, 0, 5),
-            (LParen, 5, 1),
-            (RParen, 6, 1),
-            (Identifier, 8, 19),
-            (LParen, 27, 1),
-            (Identifier, 28, 11),
-            (RParen, 39, 1),
-        ];
-        let linebreaks = &[0, 8, 41];
-        check(input, tokens, linebreaks);
+    fn floats() {
+        let tokens = lex_tokens("3.0 .5 5. 0.001").unwrap();
+        assert_eq!(tokens[0], Token::Number(3.0));
+        assert_eq!(tokens[1], Token::Number(0.5));
+        assert_eq!(tokens[2], Token::Number(5.0));
+        assert_eq!(tokens[3], Token::Number(0.001));
     }
 
     #[test]
-    fn test_lexer10() {
-        let input = "\n\n2\n456\n";
-        let tokens = &[(LiteralNumber, 2, 1), (LiteralNumber, 4, 3)];
-        let linebreaks = &[0, 1, 2, 4, 8];
-        check(input, tokens, linebreaks);
+    fn scientific_notation() {
+        let tokens = lex_tokens("1e10 1.5E-3 2e+4").unwrap();
+        assert_eq!(tokens[0], Token::Number(1e10));
+        assert_eq!(tokens[1], Token::Number(1.5e-3));
+        assert_eq!(tokens[2], Token::Number(2e4));
     }
 
     #[test]
-    fn test_lexer11() {
-        let input = "-- basic test\nprint('hi' --comment\n )\n";
-        let tokens = &[
-            (Identifier, 14, 5),
-            (LParen, 19, 1),
-            (LiteralString, 20, 4),
-            (RParen, 36, 1),
-        ];
-        let linebreaks = &[0, 14, 35, 38];
-        check(input, tokens, linebreaks);
+    fn hex_numbers() {
+        let tokens = lex_tokens("0xFF 0x10 0XAB").unwrap();
+        assert_eq!(tokens[0], Token::Number(255.0));
+        assert_eq!(tokens[1], Token::Number(16.0));
+        assert_eq!(tokens[2], Token::Number(171.0));
+    }
+
+    // -- String tests --
+
+    #[test]
+    fn simple_strings() {
+        let tokens = lex_tokens(r#""hello" 'world'"#).unwrap();
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
+        assert_eq!(tokens[1], Token::Str(b"world".to_vec()));
     }
 
     #[test]
-    fn test_lexer12() {
-        let input = "print()\n(some_other_function)(an_argument)\n";
-        let tokens = &[
-            (Identifier, 0, 5),
-            (LParen, 5, 1),
-            (RParen, 6, 1),
-            (LParenLineStart, 8, 1),
-            (Identifier, 9, 19),
-            (RParen, 28, 1),
-            (LParen, 29, 1),
-            (Identifier, 30, 11),
-            (RParen, 41, 1),
-        ];
-        let linebreaks = &[0, 8, 43];
-        check(input, tokens, linebreaks);
+    fn string_escapes() {
+        let tokens = lex_tokens(r#""\a\b\f\n\r\t\v\\\"\'""#).unwrap();
+        let expected = b"\x07\x08\x0C\n\r\t\x0B\\\"'";
+        assert_eq!(tokens[0], Token::Str(expected.to_vec()));
     }
 
     #[test]
-    fn hex_uppercase_prefix() {
-        let input = "0XFF";
-        let tokens = &[(LiteralHexNumber, 0, 4)];
-        check_line(input, tokens);
+    fn string_decimal_escape() {
+        let tokens = lex_tokens(r#""\65\066\127""#).unwrap();
+        assert_eq!(tokens[0], Token::Str(b"AB\x7F".to_vec()));
     }
 
     #[test]
-    fn hex_mixed_case() {
-        let input = "0XaB";
-        let tokens = &[(LiteralHexNumber, 0, 4)];
-        check_line(input, tokens);
-    }
-
-    // --- Long bracket tests ---
-
-    #[test]
-    fn long_comment_basic() {
-        // `--[[ comment ]]` should be skipped entirely
-        let input = "--[[ comment ]] x = 1";
-        let tokens = &[(Identifier, 16, 1), (Assign, 18, 1), (LiteralNumber, 20, 1)];
-        check_line(input, tokens);
+    fn string_decimal_escape_max() {
+        let tokens = lex_tokens(r#""\255""#).unwrap();
+        // \255 is a valid byte
+        assert!(tokens[0] != Token::Eos);
     }
 
     #[test]
-    fn long_comment_with_level() {
-        let input = "--[=[ comment ]=] x = 1";
-        let tokens = &[(Identifier, 18, 1), (Assign, 20, 1), (LiteralNumber, 22, 1)];
-        check_line(input, tokens);
+    fn string_decimal_escape_too_large() {
+        assert!(lex_tokens(r#""\256""#).is_err());
+    }
+
+    #[test]
+    fn string_newline_escape() {
+        let source = "\"line1\\\nline2\"";
+        let tokens = lex_tokens(source).unwrap();
+        assert_eq!(tokens[0], Token::Str(b"line1\nline2".to_vec()));
+    }
+
+    #[test]
+    fn unfinished_string() {
+        assert!(lex_tokens("\"hello").is_err());
+    }
+
+    #[test]
+    fn bare_newline_in_string() {
+        assert!(lex_tokens("\"hello\nworld\"").is_err());
+    }
+
+    // -- Long string tests --
+
+    #[test]
+    fn long_string_level_0() {
+        let tokens = lex_tokens("[[hello]]").unwrap();
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn long_string_level_1() {
+        let tokens = lex_tokens("[=[hello]=]").unwrap();
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn long_string_level_2() {
+        let tokens = lex_tokens("[==[hello]==]").unwrap();
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn long_string_skips_first_newline() {
+        let tokens = lex_tokens("[[\nhello]]").unwrap();
+        assert_eq!(tokens[0], Token::Str(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn long_string_normalizes_newlines() {
+        let tokens = lex_tokens("[[\r\nhello\r\nworld]]").unwrap();
+        assert_eq!(tokens[0], Token::Str(b"hello\nworld".to_vec()));
+    }
+
+    #[test]
+    fn long_string_no_escapes() {
+        let tokens = lex_tokens(r"[[hello\n]]").unwrap();
+        assert_eq!(tokens[0], Token::Str(b"hello\\n".to_vec()));
+    }
+
+    #[test]
+    fn long_string_nested_brackets() {
+        let tokens = lex_tokens("[=[hello]world]=]").unwrap();
+        assert_eq!(tokens[0], Token::Str(b"hello]world".to_vec()));
+    }
+
+    #[test]
+    fn unfinished_long_string() {
+        assert!(lex_tokens("[[hello").is_err());
+    }
+
+    #[test]
+    fn invalid_long_string_delimiter() {
+        assert!(lex_tokens("[=hello").is_err());
+    }
+
+    // -- Comment tests --
+
+    #[test]
+    fn short_comment() {
+        let tokens = lex_tokens("x -- comment\ny").unwrap();
+        assert_eq!(tokens[0], Token::Name("x".into()));
+        assert_eq!(tokens[1], Token::Name("y".into()));
+    }
+
+    #[test]
+    fn long_comment() {
+        let tokens = lex_tokens("x --[[comment]] y").unwrap();
+        assert_eq!(tokens[0], Token::Name("x".into()));
+        assert_eq!(tokens[1], Token::Name("y".into()));
     }
 
     #[test]
     fn long_comment_multiline() {
-        let input = "--[[\nline1\nline2\n]] x = 1";
-        let tokens = &[(Identifier, 20, 1), (Assign, 22, 1), (LiteralNumber, 24, 1)];
-        let linebreaks = &[0, 5, 11, 17];
-        check(input, tokens, linebreaks);
+        let tokens = lex_tokens("x --[[\ncomment\n]] y").unwrap();
+        assert_eq!(tokens[0], Token::Name("x".into()));
+        assert_eq!(tokens[1], Token::Name("y".into()));
     }
 
     #[test]
-    fn long_comment_unfinished() {
-        let input = "--[[ no end";
-        let mut lexer = Lexer::new(input);
-        let err = lexer.next_token().unwrap_err();
-        assert!(matches!(
-            err.kind,
-            super::super::error::ErrorKind::SyntaxError(SyntaxError::UnfinishedLongComment)
-        ));
+    fn long_comment_with_level() {
+        let tokens = lex_tokens("x --[==[comment]==] y").unwrap();
+        assert_eq!(tokens[0], Token::Name("x".into()));
+        assert_eq!(tokens[1], Token::Name("y".into()));
+    }
+
+    // -- Line tracking tests --
+
+    #[test]
+    fn line_tracking() {
+        let tokens = lex_all("x\ny\nz").unwrap();
+        assert_eq!(tokens[0].1.line, 1);
+        assert_eq!(tokens[1].1.line, 2);
+        assert_eq!(tokens[2].1.line, 3);
     }
 
     #[test]
-    fn long_string_basic() {
-        let input = "x = [[hello]]";
-        // [[hello]] starts at 4, length = 13 - 4 = 9
-        let tokens = &[(Identifier, 0, 1), (Assign, 2, 1), (LiteralString, 4, 9)];
-        check_line(input, tokens);
+    fn line_tracking_crlf() {
+        let tokens = lex_all("x\r\ny").unwrap();
+        assert_eq!(tokens[0].1.line, 1);
+        assert_eq!(tokens[1].1.line, 2);
     }
 
     #[test]
-    fn long_string_with_level() {
-        let input = "x = [=[hello]=]";
-        // [=[hello]=] starts at 4, length = 15 - 4 = 11
-        let tokens = &[(Identifier, 0, 1), (Assign, 2, 1), (LiteralString, 4, 11)];
-        check_line(input, tokens);
+    fn line_tracking_cr() {
+        let tokens = lex_all("x\ry").unwrap();
+        assert_eq!(tokens[0].1.line, 1);
+        assert_eq!(tokens[1].1.line, 2);
+    }
+
+    // -- Lookahead test --
+
+    #[test]
+    fn lookahead_does_not_consume() {
+        let mut lexer = Lexer::new(b"x y", "test");
+        let la = lexer.lookahead().unwrap().clone();
+        assert_eq!(la, Token::Name("x".into()));
+        let (tok, _) = lexer.next().unwrap();
+        assert_eq!(tok, Token::Name("x".into()));
+        let (tok2, _) = lexer.next().unwrap();
+        assert_eq!(tok2, Token::Name("y".into()));
+    }
+
+    // -- EOF tests --
+
+    #[test]
+    fn empty_source() {
+        let tokens = lex_tokens("").unwrap();
+        assert_eq!(tokens, vec![Token::Eos]);
     }
 
     #[test]
-    fn long_string_empty() {
-        let input = "x = [[]]";
-        // [[]] starts at 4, length = 4
-        let tokens = &[(Identifier, 0, 1), (Assign, 2, 1), (LiteralString, 4, 4)];
-        check_line(input, tokens);
+    fn whitespace_only() {
+        let tokens = lex_tokens("   \t  ").unwrap();
+        assert_eq!(tokens, vec![Token::Eos]);
+    }
+
+    // -- Dot disambiguation --
+
+    #[test]
+    fn dot_disambiguation() {
+        // Single dot
+        let tokens = lex_tokens("a.b").unwrap();
+        assert_eq!(tokens[0], Token::Name("a".into()));
+        assert_eq!(tokens[1], Token::Char(b'.'));
+        assert_eq!(tokens[2], Token::Name("b".into()));
     }
 
     #[test]
-    fn long_string_unfinished() {
-        let input = "x = [[no end";
-        let mut lexer = Lexer::new(input);
-        // Consume `x`, `=`, then the long string should fail
-        let _ = lexer.next_token().unwrap(); // x
-        let _ = lexer.next_token().unwrap(); // =
-        let err = lexer.next_token().unwrap_err();
-        assert!(matches!(
-            err.kind,
-            super::super::error::ErrorKind::SyntaxError(SyntaxError::UnfinishedLongString)
-        ));
+    fn dot_before_number() {
+        // .5 is a number, not dot + 5
+        let tokens = lex_tokens(".5").unwrap();
+        assert_eq!(tokens[0], Token::Number(0.5));
+    }
+
+    // -- Shebang --
+
+    #[test]
+    fn shebang_line() {
+        // Lua 5.1 skips the first line if it starts with '#'.
+        // The lexer skips from '#' to end of line, then resumes on the next line.
+        let tokens = lex_tokens("#!/usr/bin/lua\nreturn 1").unwrap();
+        assert_eq!(tokens[0], Token::Return);
+        assert_eq!(tokens[1], Token::Number(1.0));
     }
 
     #[test]
-    fn bare_lsquare() {
-        // `[` by itself should still be LSquare
-        let input = "t[1]";
-        let tokens = &[
-            (Identifier, 0, 1),
-            (LSquare, 1, 1),
-            (LiteralNumber, 2, 1),
-            (RSquare, 3, 1),
-        ];
-        check_line(input, tokens);
+    fn shebang_line_only() {
+        // A file containing only a shebang line produces just EOS.
+        let tokens = lex_tokens("#!/usr/bin/env lua").unwrap();
+        assert!(tokens.is_empty() || tokens[0] == Token::Eos);
+    }
+
+    // -- Mixed tokens --
+
+    #[test]
+    fn mixed_expression() {
+        let tokens = lex_tokens("x = 1 + 2.5").unwrap();
+        assert_eq!(tokens[0], Token::Name("x".into()));
+        assert_eq!(tokens[1], Token::Char(b'='));
+        assert_eq!(tokens[2], Token::Number(1.0));
+        assert_eq!(tokens[3], Token::Char(b'+'));
+        assert_eq!(tokens[4], Token::Number(2.5));
     }
 
     #[test]
-    fn long_comment_then_long_string() {
-        let input = "--[[ comment ]] x = [[string]]";
-        let tokens = &[
-            (Identifier, 16, 1),
-            (Assign, 18, 1),
-            (LiteralString, 20, 10),
-        ];
-        check_line(input, tokens);
+    fn function_call() {
+        let tokens = lex_tokens("print(\"hello\")").unwrap();
+        assert_eq!(tokens[0], Token::Name("print".into()));
+        assert_eq!(tokens[1], Token::Char(b'('));
+        assert_eq!(tokens[2], Token::Str(b"hello".to_vec()));
+        assert_eq!(tokens[3], Token::Char(b')'));
     }
 
     #[test]
-    fn long_string_mismatched_level() {
-        // ]] inside a level-1 string should not close it
-        let input = "[=[hello]]world]=]";
-        let tokens = &[(LiteralString, 0, 18)];
-        check_line(input, tokens);
+    fn invalid_escape() {
+        assert!(lex_tokens(r#""\z""#).is_err());
+    }
+
+    // -- Reader-based lexer tests --
+
+    #[test]
+    fn reader_basic() {
+        let chunks = vec![b"x ".to_vec(), b"= ".to_vec(), b"1".to_vec()];
+        let mut idx = 0;
+        let reader = move || -> Result<Option<Vec<u8>>, LuaError> {
+            if idx < chunks.len() {
+                let chunk = chunks[idx].clone();
+                idx += 1;
+                Ok(Some(chunk))
+            } else {
+                Ok(None)
+            }
+        };
+        let mut lexer = Lexer::from_reader(Vec::new(), reader, "test");
+        let (t1, _) = lexer.next().unwrap();
+        assert_eq!(t1, Token::Name("x".into()));
+        let (t2, _) = lexer.next().unwrap();
+        assert_eq!(t2, Token::Char(b'='));
+        let (t3, _) = lexer.next().unwrap();
+        assert_eq!(t3, Token::Number(1.0));
+        let (t4, _) = lexer.next().unwrap();
+        assert_eq!(t4, Token::Eos);
     }
 
     #[test]
-    fn long_string_leading_newline_skipped() {
-        // The newline after [[ should be consumed as part of the delimiter,
-        // not the string content. The token includes it in its span.
-        let input = "[[\nhello]]";
-        let tokens = &[(LiteralString, 0, 10)];
-        let linebreaks = &[0, 3];
-        check(input, tokens, linebreaks);
+    fn reader_one_byte_at_a_time() {
+        let source = b"x = 1";
+        let mut pos = 0;
+        let reader = move || -> Result<Option<Vec<u8>>, LuaError> {
+            if pos < source.len() {
+                let byte = vec![source[pos]];
+                pos += 1;
+                Ok(Some(byte))
+            } else {
+                Ok(None)
+            }
+        };
+        let mut lexer = Lexer::from_reader(Vec::new(), reader, "test");
+        let (t1, _) = lexer.next().unwrap();
+        assert_eq!(t1, Token::Name("x".into()));
+        let (t2, _) = lexer.next().unwrap();
+        assert_eq!(t2, Token::Char(b'='));
+        let (t3, _) = lexer.next().unwrap();
+        assert_eq!(t3, Token::Number(1.0));
+    }
+
+    #[test]
+    fn reader_error_propagates() {
+        let reader = move || -> Result<Option<Vec<u8>>, LuaError> {
+            Err(LuaError::Runtime(crate::error::RuntimeError {
+                message: "reader failed".to_string(),
+                level: 0,
+                traceback: vec![],
+            }))
+        };
+        let mut lexer = Lexer::from_reader(Vec::new(), reader, "test");
+        let result = lexer.next();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reader_empty_chunk_signals_eof() {
+        let mut called = false;
+        let reader = move || -> Result<Option<Vec<u8>>, LuaError> {
+            if !called {
+                called = true;
+                Ok(Some(b"x".to_vec()))
+            } else {
+                Ok(Some(Vec::new())) // empty chunk = eof
+            }
+        };
+        let mut lexer = Lexer::from_reader(Vec::new(), reader, "test");
+        let (t1, _) = lexer.next().unwrap();
+        assert_eq!(t1, Token::Name("x".into()));
+        let (t2, _) = lexer.next().unwrap();
+        assert_eq!(t2, Token::Eos);
     }
 }

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 #
-# compare.sh - Run Lua test files through both PUC-Rio Lua and rilua,
-# producing a markdown comparison table.
+# compare.sh - Run PUC-Rio Lua 5.1 test suite files through both
+# PUC-Rio Lua and rilua, producing a markdown comparison table.
 #
 # Usage: scripts/compare.sh <lua-path> <rilua-path>
+#
+# Paths can be relative (resolved to absolute before cd).
+# PUC-Rio test files are run from within lua-5.1-tests/ since
+# they use relative dofile() calls internally.
 #
 # Always exits 0 (informational only).
 
@@ -14,8 +18,9 @@ if [ $# -ne 2 ]; then
     exit 1
 fi
 
-LUA="$1"
-RILUA="$2"
+# Resolve to absolute paths before cd-ing into test directory.
+LUA="$(readlink -f "$1")"
+RILUA="$(readlink -f "$2")"
 
 if [ ! -x "$LUA" ]; then
     echo "Error: Lua binary not found or not executable: $LUA" >&2
@@ -27,8 +32,16 @@ if [ ! -x "$RILUA" ]; then
     exit 1
 fi
 
+TEST_DIR="lua-5.1-tests"
+if [ ! -d "$TEST_DIR" ]; then
+    echo "Error: test suite directory not found: $TEST_DIR" >&2
+    echo "See AGENTS.md for download instructions." >&2
+    exit 1
+fi
+
 # Run a single test file with an interpreter, return status string.
-# Arguments: <interpreter-path> <test-file>
+# Must be called from within the test suite directory.
+# Arguments: <interpreter-path> <test-file-basename>
 # Output: "PASS", "FAIL", or "TIMEOUT"
 run_test() {
     local interp="$1"
@@ -93,41 +106,30 @@ print_table() {
     _total_count=$total
 }
 
-# Collect test files
-rilua_tests=()
-for f in tests/test*.lua; do
-    [ -f "$f" ] && rilua_tests+=("$f")
-done
+# cd into test suite directory so relative dofile() calls work.
+cd "$TEST_DIR"
 
+# Collect test files (skip all.lua which is the runner, not a test).
 lua51_tests=()
-for f in tests/lua51/*.lua; do
+for f in *.lua; do
+    [ "$f" = "all.lua" ] && continue
     [ -f "$f" ] && lua51_tests+=("$f")
 done
 
 echo "## Compatibility: rilua vs PUC-Rio Lua 5.1.1"
 echo ""
 
-# rilua custom tests
+# PUC-Rio official tests
 _pass_count=0
 _total_count=0
 
-print_table "rilua Tests" "${rilua_tests[@]}"
-rilua_pass=$_pass_count
-rilua_total=$_total_count
-
-# PUC-Rio official tests
 print_table "PUC-Rio Lua 5.1.1 Official Tests" "${lua51_tests[@]}"
 lua51_pass=$_pass_count
 lua51_total=$_total_count
 
 # Summary
-overall_pass=$((rilua_pass + lua51_pass))
-overall_total=$((rilua_total + lua51_total))
-
 echo "### Summary"
 echo ""
-echo "- rilua tests: $rilua_pass/$rilua_total passing"
-echo "- PUC-Rio tests: $lua51_pass/$lua51_total passing"
-echo "- Overall: $overall_pass/$overall_total passing"
+echo "- PUC-Rio tests: $lua51_pass/$lua51_total passing (rilua)"
 
 exit 0

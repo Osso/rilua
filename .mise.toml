@@ -1,5 +1,59 @@
 [tools]
 node = "22"
-"npm:markdownlint-cli2" = "latest"
-actionlint = "latest"
+"npm:markdownlint-cli2" = "0.20.0"
+actionlint = "1.7.10"
+mdbook = "0.5.2"
 rust = { version = "1.92.0", profile = "default" }
+"cargo:cargo-nextest" = "0.9.127"
+"cargo:cargo-deny" = "0.19.0"
+
+[vars]
+binary_name = "rilua"
+
+[tasks.build]
+description = "Build the project"
+run = "cargo build"
+
+[tasks.build-release]
+description = "Build release binary"
+run = "cargo build --release"
+
+[tasks.test]
+description = "Run all tests"
+run = "cargo test"
+
+[tasks.test-nextest]
+description = "Run tests with nextest"
+run = "cargo nextest run"
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt -- --check"
+
+[tasks.fmt-fix]
+description = "Fix formatting"
+run = "cargo fmt"
+
+[tasks.clippy]
+description = "Run clippy linter"
+run = "cargo clippy --all-targets"
+
+[tasks.check]
+description = "Run quick checks (fmt + clippy + build)"
+run = "cargo fmt -- --check && cargo clippy --all-targets && cargo check --all-targets"
+
+[tasks.doc]
+description = "Build documentation"
+run = "cargo doc --no-deps"
+
+[tasks.quality-gate]
+description = "Run quality gate before committing"
+run = "cargo fmt -- --check && cargo clippy --all-targets && cargo test && cargo doc --no-deps && cargo deny check"
+
+[tasks.lint]
+description = "Run markdown and GitHub Actions linting"
+run = "markdownlint-cli2 '**/*.md' && actionlint"
+
+[tasks.deny]
+description = "Run cargo-deny checks"
+run = "cargo deny check"

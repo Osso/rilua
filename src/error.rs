@@ -1,224 +1,352 @@
+//! Error types for rilua.
+//!
+//! Maps to PUC-Rio's error status codes:
+//! - `LUA_ERRRUN` (2) — runtime error
+//! - `LUA_ERRSYNTAX` (3) — syntax error during parsing
+//! - `LUA_ERRMEM` (4) — memory allocation error
+//! - `LUA_ERRERR` (5) — error in error handler
+
 use std::fmt;
-use std::io;
 
-use crate::LuaType;
+/// Result type alias used throughout rilua.
+pub type LuaResult<T> = Result<T, LuaError>;
 
-// Types
-
+/// Top-level error type for all rilua errors.
+///
+/// Corresponds to PUC-Rio's `LUA_ERR*` status codes. Every fallible
+/// operation in the library returns `LuaResult<T>`.
 #[derive(Debug)]
-pub struct Error {
-    pub kind: ErrorKind,
-    pub line_num: usize,
-    pub column: usize,
+pub enum LuaError {
+    /// Syntax error during lexing or parsing (`LUA_ERRSYNTAX`).
+    Syntax(SyntaxError),
+
+    /// Runtime error during VM execution (`LUA_ERRRUN`).
+    ///
+    /// The error object may be any Lua value, not just a string.
+    /// PUC-Rio's `error()` function can throw tables, numbers, etc.
+    Runtime(RuntimeError),
+
+    /// Memory allocation failure (`LUA_ERRMEM`).
+    ///
+    /// PUC-Rio pushes `"not enough memory"` as the error message.
+    Memory,
+
+    /// Error in error handler (`LUA_ERRERR`).
+    ///
+    /// Occurs when an error is raised while running the `xpcall`
+    /// error handler, or when a C stack overflow persists during
+    /// error recovery.
+    ErrorHandler,
+
+    /// I/O error from file operations.
+    ///
+    /// Wraps `std::io::Error` for file loading and the I/O library.
+    Io(std::io::Error),
+
+    /// Coroutine yield signal (`LUA_YIELD`).
+    ///
+    /// Not a real error -- used to propagate yield through the Rust call
+    /// stack back to the resume handler. The `u32` is the number of
+    /// yielded values on the coroutine's stack.
+    ///
+    /// Must NOT be caught by `pcall`/`xpcall`. The `n_ccalls > 0` check
+    /// in `coroutine.yield()` prevents yield from inside C-call boundaries
+    /// (metamethods, pcall, etc.), so this variant only appears in the
+    /// resume path.
+    Yield(u32),
 }
 
+/// Syntax error with source location.
+///
+/// Produced by the lexer and parser. Message format matches PUC-Rio:
+/// `"source:line: message near 'token'"`.
 #[derive(Debug)]
-pub enum ErrorKind {
-    AssertionFail,
-    Io(io::Error),
-    UnsupportedFeature,
-    TypeError(TypeError),
-    WithMessage(String),
-    ArgError(ArgError),
-    SyntaxError(SyntaxError),
+pub struct SyntaxError {
+    /// Error description (e.g., `"')' expected near 'end'"`).
+    pub message: String,
+    /// Source name (e.g., `"stdin"`, `"@filename.lua"`, `"[string \"...\"]"`).
+    pub source: String,
+    /// Line number where the error was detected (1-based).
+    pub line: u32,
+    /// Raw byte message for error strings containing non-UTF-8 bytes.
+    /// When set, this is used instead of formatting via Display to
+    /// preserve raw bytes (e.g. `\xFF` in token names).
+    pub raw_message: Option<Vec<u8>>,
 }
 
+/// Runtime error with error object and traceback.
+///
+/// In Lua 5.1.1, `error()` can throw any value. The error object
+/// propagates through `pcall` and `xpcall`. Tracebacks are generated
+/// on demand (by `debug.traceback` in `xpcall` handlers), but we
+/// store trace entries for generating formatted messages.
 #[derive(Debug)]
-pub struct ArgError {
-    pub arg_number: isize,
-    pub func_name: Option<String>,
-    pub expected: Option<LuaType>,
-    pub received: Option<LuaType>,
+pub struct RuntimeError {
+    /// Human-readable error message.
+    ///
+    /// For errors raised by the VM (type errors, arithmetic errors,
+    /// etc.), this contains the formatted message matching PUC-Rio's
+    /// wording. For errors raised by `error(obj)`, this is the
+    /// string representation of `obj`.
+    pub message: String,
+
+    /// Stack level at which the error was raised.
+    ///
+    /// 0 = error position itself, 1 = caller, 2 = caller's caller.
+    /// Corresponds to the `level` parameter of `error(msg, level)`.
+    pub level: u32,
+
+    /// Stack traceback entries, from innermost to outermost.
+    pub traceback: Vec<TraceEntry>,
 }
 
-#[derive(Debug)]
-pub enum SyntaxError {
-    BadNumber,
-    BreakOutsideLoop(usize),
-    Complexity,
-    EscapeTooLarge,
-    InvalidCharacter(char),
-    TooManyLocals,
-    TooManyNumbers,
-    TooManyStrings,
-    UnclosedString,
-    UnexpectedEof,
-    UnexpectedTok,
-    UnfinishedLongComment,
-    UnfinishedLongString,
-    LParenLineStart,
-    VarargOutsideVarargFunc,
+/// A single entry in a stack traceback.
+#[derive(Debug, Clone)]
+pub struct TraceEntry {
+    /// Source name (e.g., `"stdin"`, `"@file.lua"`).
+    pub source: String,
+    /// Line number (1-based, 0 if unknown).
+    pub line: u32,
+    /// Function name, if known.
+    pub name: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum TypeError {
-    Arithmetic(LuaType),
-    Comparison(LuaType, LuaType),
-    Concat(LuaType),
-    FunctionCall(LuaType),
-    Length(LuaType),
-    TableIndex(LuaType),
-    TableKeyNan,
-    TableKeyNil,
-}
-
-// main impls
-
-impl Error {
-    pub fn new(kind: impl Into<ErrorKind>, line_num: usize, column: usize) -> Self {
-        Self {
-            kind: kind.into(),
-            line_num,
-            column,
-        }
-    }
-
-    pub fn without_location(kind: ErrorKind) -> Self {
-        Self::new(kind, 0, 0)
-    }
-
-    pub fn column(&self) -> usize {
-        self.column
-    }
-
-    pub fn line_num(&self) -> usize {
-        self.line_num
-    }
-
-    pub fn is_recoverable(&self) -> bool {
-        self.kind.is_recoverable()
-    }
-}
-
-impl ErrorKind {
-    pub fn is_recoverable(&self) -> bool {
-        if let Self::SyntaxError(e) = self {
-            e.is_recoverable()
-        } else {
-            false
+impl fmt::Display for LuaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Syntax(e) => write!(f, "{e}"),
+            Self::Runtime(e) => write!(f, "{e}"),
+            Self::Memory => write!(f, "not enough memory"),
+            Self::ErrorHandler => write!(f, "error in error handling"),
+            Self::Io(e) => write!(f, "{e}"),
+            Self::Yield(_) => write!(f, "cannot yield"),
         }
     }
 }
 
 impl SyntaxError {
-    /// Returns true if this is a SyntaxError that can be fixed by appending
-    /// more text to the source code.
-    pub fn is_recoverable(&self) -> bool {
-        matches!(
-            self,
-            Self::UnexpectedEof | Self::UnfinishedLongComment | Self::UnfinishedLongString
-        )
-    }
-}
-
-// `Display` impls
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)
-    }
-}
-
-impl fmt::Display for ErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use ErrorKind::*;
-        match self {
-            AssertionFail => write!(f, "assertion failed!"),
-            ArgError(e) => e.fmt(f),
-            Io(e) => e.fmt(f),
-            SyntaxError(e) => e.fmt(f),
-            TypeError(e) => e.fmt(f),
-            UnsupportedFeature => write!(f, "unsupported feature"),
-            WithMessage(msg) => msg.fmt(f),
+    /// Returns the error message as raw bytes for Lua string creation.
+    /// Uses `raw_message` if available (preserves non-UTF-8 bytes),
+    /// otherwise falls back to the Display-formatted UTF-8 message.
+    #[must_use]
+    pub fn to_lua_bytes(&self) -> Vec<u8> {
+        if let Some(ref raw) = self.raw_message {
+            return raw.clone();
         }
-    }
-}
-
-impl fmt::Display for ArgError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let func_name = match &self.func_name {
-            Some(s) => s.as_str(),
-            None => "?",
-        };
-        let extra = match (&self.expected, &self.received) {
-            (Some(expected), Some(got)) => format!("{expected} expected, got {got}"),
-            (Some(expected), None) => format!("{expected} expected, got no value"),
-            (None, _) => "value expected".into(),
-        };
-
-        write!(
-            f,
-            "bad argument #{} to {} ({})",
-            self.arg_number, func_name, extra
-        )
+        self.to_string().into_bytes()
     }
 }
 
 impl fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use SyntaxError::*;
-        match self {
-            BadNumber => write!(f, "malformed number"),
-            BreakOutsideLoop(line) => {
-                write!(f, "<break> at line {line} not inside a loop")
-            }
-            Complexity => write!(f, "complexity"),
-            EscapeTooLarge => write!(f, "escape sequence too large"),
-            InvalidCharacter(c) => write!(f, "invalid character {c}"),
-            TooManyLocals => write!(f, "too many local variables"),
-            TooManyNumbers => write!(f, "too many literal numbers"),
-            TooManyStrings => write!(f, "too many literal strings"),
-            UnclosedString => write!(f, "unfinished string"),
-            UnexpectedEof => write!(f, "unexpected <eof>"),
-            UnexpectedTok => write!(f, "syntax error"),
-            UnfinishedLongComment => write!(f, "unfinished long comment"),
-            UnfinishedLongString => write!(f, "unfinished long string"),
-            LParenLineStart => write!(f, "ambiguous function call"),
-            VarargOutsideVarargFunc => {
-                write!(f, "cannot use '...' outside a vararg function")
-            }
+        write!(
+            f,
+            "{}:{}: {}",
+            chunkid(&self.source),
+            self.line,
+            self.message
+        )
+    }
+}
+
+/// Maximum size for short source names (matches PUC-Rio's `LUA_IDSIZE`).
+const LUA_IDSIZE: usize = 60;
+
+/// Formats a raw source name for display in error messages.
+///
+/// Matches PUC-Rio's `luaO_chunkid`:
+/// - `"=name"` -> `"name"` (literal, truncated to `LUA_IDSIZE`)
+/// - `"@filename"` -> `"filename"` (file, with `"..."` prefix if too long)
+/// - other -> `[string "first_line..."]`
+pub fn chunkid(source: &str) -> String {
+    if let Some(rest) = source.strip_prefix('=') {
+        // Literal name -- strip the '=' prefix.
+        if rest.len() < LUA_IDSIZE {
+            rest.to_string()
+        } else {
+            rest[..LUA_IDSIZE - 1].to_string()
+        }
+    } else if let Some(rest) = source.strip_prefix('@') {
+        // File name.
+        if rest.len() < LUA_IDSIZE {
+            rest.to_string()
+        } else {
+            let skip = rest.len() - (LUA_IDSIZE - 4);
+            format!("...{}", &rest[skip..])
+        }
+    } else {
+        // String source.
+        let first_line = source.split('\n').next().unwrap_or(source);
+        let max_len = LUA_IDSIZE - "[string \"...\"]".len();
+        if first_line.len() <= max_len && !source.contains('\n') {
+            format!("[string \"{first_line}\"]")
+        } else {
+            let truncated = &first_line[..first_line.len().min(max_len)];
+            format!("[string \"{truncated}...\"]")
         }
     }
 }
 
-impl fmt::Display for TypeError {
+impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use TypeError::*;
+        write!(f, "{}", self.message)
+    }
+}
+
+impl fmt::Display for TraceEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.source, self.line)?;
+        if let Some(name) = &self.name {
+            write!(f, " in function '{name}'")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for LuaError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Arithmetic(typ) => write!(f, "attempt to perform arithmetic on a {typ} value"),
-            Comparison(type1, type2) => write!(f, "attempt to compare {type1} with {type2}"),
-            Concat(typ) => write!(f, "attempt to concatenate a {typ} value"),
-            FunctionCall(typ) => write!(f, "attempt to call a {typ} value"),
-            Length(typ) => write!(f, "attempt to get length of a {typ} value"),
-            TableIndex(typ) => write!(f, "attempt to index a {typ} value"),
-            TableKeyNan => write!(f, "table index was NaN"),
-            TableKeyNil => write!(f, "table index was nil"),
+            Self::Io(e) => Some(e),
+            Self::Syntax(_)
+            | Self::Runtime(_)
+            | Self::Memory
+            | Self::ErrorHandler
+            | Self::Yield(_) => None,
         }
     }
 }
 
-// `From` impls
-
-impl From<io::Error> for Error {
-    fn from(io_err: io::Error) -> Self {
-        Self::without_location(ErrorKind::Io(io_err))
+impl From<std::io::Error> for LuaError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
     }
 }
 
-impl From<ArgError> for ErrorKind {
-    fn from(e: ArgError) -> Self {
-        Self::ArgError(e)
+impl From<SyntaxError> for LuaError {
+    fn from(err: SyntaxError) -> Self {
+        Self::Syntax(err)
     }
 }
 
-impl From<SyntaxError> for ErrorKind {
-    fn from(e: SyntaxError) -> Self {
-        Self::SyntaxError(e)
+impl From<RuntimeError> for LuaError {
+    fn from(err: RuntimeError) -> Self {
+        Self::Runtime(err)
     }
 }
 
-impl From<TypeError> for ErrorKind {
-    fn from(e: TypeError) -> Self {
-        Self::TypeError(e)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_error_display() {
+        let err = LuaError::Memory;
+        assert_eq!(err.to_string(), "not enough memory");
+    }
+
+    #[test]
+    fn error_handler_display() {
+        let err = LuaError::ErrorHandler;
+        assert_eq!(err.to_string(), "error in error handling");
+    }
+
+    #[test]
+    fn syntax_error_display() {
+        let err = LuaError::Syntax(SyntaxError {
+            message: "')' expected near 'end'".into(),
+            source: "=stdin".into(),
+            line: 3,
+            raw_message: None,
+        });
+        assert_eq!(err.to_string(), "stdin:3: ')' expected near 'end'");
+    }
+
+    #[test]
+    fn syntax_error_display_string_source() {
+        let err = LuaError::Syntax(SyntaxError {
+            message: "unexpected symbol near 'x'".into(),
+            source: "break label".into(),
+            line: 1,
+            raw_message: None,
+        });
+        assert_eq!(
+            err.to_string(),
+            "[string \"break label\"]:1: unexpected symbol near 'x'"
+        );
+    }
+
+    #[test]
+    fn runtime_error_display() {
+        let err = LuaError::Runtime(RuntimeError {
+            message: "attempt to perform arithmetic on a string value".into(),
+            level: 0,
+            traceback: vec![],
+        });
+        assert_eq!(
+            err.to_string(),
+            "attempt to perform arithmetic on a string value"
+        );
+    }
+
+    #[test]
+    fn runtime_error_with_location() {
+        let err = RuntimeError {
+            message: "stdin:5: attempt to index a nil value".into(),
+            level: 1,
+            traceback: vec![TraceEntry {
+                source: "stdin".into(),
+                line: 5,
+                name: Some("foo".into()),
+            }],
+        };
+        assert_eq!(err.to_string(), "stdin:5: attempt to index a nil value");
+        assert_eq!(err.traceback[0].to_string(), "stdin:5 in function 'foo'");
+    }
+
+    #[test]
+    fn trace_entry_without_name() {
+        let entry = TraceEntry {
+            source: "@test.lua".into(),
+            line: 10,
+            name: None,
+        };
+        assert_eq!(entry.to_string(), "@test.lua:10");
+    }
+
+    #[test]
+    fn io_error_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err: LuaError = io_err.into();
+        assert!(matches!(err, LuaError::Io(_)));
+        assert_eq!(err.to_string(), "file not found");
+    }
+
+    #[test]
+    fn syntax_error_conversion() {
+        let syn = SyntaxError {
+            message: "unexpected symbol".into(),
+            source: "test".into(),
+            line: 1,
+            raw_message: None,
+        };
+        let err: LuaError = syn.into();
+        assert!(matches!(err, LuaError::Syntax(_)));
+    }
+
+    #[test]
+    fn runtime_error_conversion() {
+        let rt = RuntimeError {
+            message: "error".into(),
+            level: 0,
+            traceback: vec![],
+        };
+        let err: LuaError = rt.into();
+        assert!(matches!(err, LuaError::Runtime(_)));
+    }
+
+    #[test]
+    fn error_is_std_error() {
+        let err = LuaError::Memory;
+        let _: &dyn std::error::Error = &err;
     }
 }
