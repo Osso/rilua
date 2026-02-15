@@ -8,6 +8,23 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Cross-platform compilation support for Linux, macOS, and Windows
+- Centralized platform abstraction layer (`src/platform.rs`) with
+  `#[cfg(target_os)]` dispatch for all libc FFI declarations
+
+### Changed
+
+- Replaced `isatty` FFI with `std::io::IsTerminal` in CLI binary
+- Replaced `time(NULL)` FFI with `SystemTime::now()` for current time
+- Replaced `errno`/`strerror` FFI with `std::io::Error::last_os_error()`
+  in I/O library error reporting (4 sites)
+- Replaced `mkstemp`/`tmpnam` FFI with `File::create_new()` and
+  `std::env::temp_dir()` for `os.tmpname`
+- Moved scattered libc FFI declarations from `io.rs`, `os.rs`, and
+  `execute.rs` into `platform.rs`
+
 ## [0.1.0] - 2026-02-15
 
 ### Added

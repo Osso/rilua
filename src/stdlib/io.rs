@@ -9,54 +9,21 @@ use crate::vm::state::LuaState;
 use crate::vm::table::Table;
 use crate::vm::value::{Userdata, Val};
 
-// ---------------------------------------------------------------------------
-// libc FFI bindings for stdio operations
-// ---------------------------------------------------------------------------
-
-/// Opaque C `FILE` type -- never instantiated, only used as `*mut`.
-enum LibcFile {}
-
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn fopen(filename: *const u8, mode: *const u8) -> *mut LibcFile;
-    fn fclose(file: *mut LibcFile) -> i32;
-    fn fflush(file: *mut LibcFile) -> i32;
-    fn fread(ptr: *mut u8, size: usize, nmemb: usize, stream: *mut LibcFile) -> usize;
-    fn fwrite(ptr: *const u8, size: usize, nmemb: usize, stream: *mut LibcFile) -> usize;
-    fn fgets(s: *mut u8, n: i32, stream: *mut LibcFile) -> *mut u8;
-    fn fseek(stream: *mut LibcFile, offset: i64, whence: i32) -> i32;
-    fn ftell(stream: *mut LibcFile) -> i64;
-    fn ferror(stream: *mut LibcFile) -> i32;
-    fn clearerr(stream: *mut LibcFile);
-    #[allow(dead_code)]
-    fn feof(stream: *mut LibcFile) -> i32;
-    fn getc(stream: *mut LibcFile) -> i32;
-    fn ungetc(c: i32, stream: *mut LibcFile) -> i32;
-    fn setvbuf(stream: *mut LibcFile, buf: *mut u8, mode: i32, size: usize) -> i32;
-    fn tmpfile() -> *mut LibcFile;
-    fn popen(command: *const u8, r#type: *const u8) -> *mut LibcFile;
-    fn pclose(stream: *mut LibcFile) -> i32;
-    fn fscanf(stream: *mut LibcFile, format: *const u8, ...) -> i32;
-    fn fprintf(stream: *mut LibcFile, format: *const u8, ...) -> i32;
-    fn strerror(errnum: i32) -> *const u8;
-    fn strlen(s: *const u8) -> usize;
-
-    fn __errno_location() -> *mut i32;
-
-    static stdin: *mut LibcFile;
-    static stdout: *mut LibcFile;
-    static stderr: *mut LibcFile;
-}
+use crate::platform::{
+    self, LibcFile, c_pclose, c_popen, c_stderr, c_stdin, c_stdout, clearerr, fclose, ferror,
+    fflush, fgets, fopen, fprintf, fread, fscanf, fseek, ftell, fwrite, getc, setvbuf, strlen,
+    tmpfile, ungetc,
+};
 
 /// fseek whence constants (POSIX).
 const SEEK_SET: i32 = 0;
 const SEEK_CUR: i32 = 1;
 const SEEK_END: i32 = 2;
 
-/// setvbuf mode constants (POSIX).
-const IONBF: i32 = 2;
-const IOFBF: i32 = 0;
-const IOLBF: i32 = 1;
+/// setvbuf mode constants.
+const IONBF: i32 = platform::bufmode::IONBF;
+const IOFBF: i32 = platform::bufmode::IOFBF;
+const IOLBF: i32 = platform::bufmode::IOLBF;
 
 /// Default buffer size for setvbuf (matches LUAL_BUFFERSIZE).
 const LUAL_BUFFERSIZE: usize = 8192;
@@ -86,15 +53,6 @@ struct IoFile {
     is_pipe: bool,
     /// `true` for stdin/stdout/stderr (skip close in `__gc`).
     is_std_handle: bool,
-}
-
-// ---------------------------------------------------------------------------
-// errno helper
-// ---------------------------------------------------------------------------
-
-#[allow(unsafe_code)]
-fn errno() -> i32 {
-    unsafe { *__errno_location() }
 }
 
 // ---------------------------------------------------------------------------
@@ -159,25 +117,19 @@ fn opt_string(state: &LuaState, name: &str, n: usize) -> LuaResult<Option<Vec<u8
 // ---------------------------------------------------------------------------
 
 /// Pushes result in PUC-Rio `pushresult` style: true on success,
-/// nil + strerror(errno) + errno on failure.
-#[allow(unsafe_code, clippy::unnecessary_wraps)]
+/// nil + error message + errno on failure.
+///
+/// Uses `std::io::Error::last_os_error()` instead of raw errno/strerror FFI.
+#[allow(clippy::unnecessary_wraps)]
 fn pushresult(state: &mut LuaState, ok: bool, filename: Option<&str>) -> LuaResult<u32> {
     if ok {
         state.push(Val::Bool(true));
         return Ok(1);
     }
-    let en = errno();
+    let os_err = std::io::Error::last_os_error();
+    let en = os_err.raw_os_error().unwrap_or(0);
+    let msg = os_err.to_string();
     state.push(Val::Nil);
-    let msg = unsafe {
-        let p = strerror(en);
-        if p.is_null() {
-            "unknown error".to_string()
-        } else {
-            let len = strlen(p);
-            let slice = std::slice::from_raw_parts(p, len);
-            String::from_utf8_lossy(slice).into_owned()
-        }
-    };
     let full_msg = if let Some(fname) = filename {
         format!("{fname}: {msg}")
     } else {
@@ -322,7 +274,7 @@ fn aux_close(state: &mut LuaState, ud_ref: GcRef<Userdata>) -> LuaResult<u32> {
     }
     io_file.file = std::ptr::null_mut();
     if io_file.is_pipe {
-        let ok = unsafe { pclose(fp) } == 0;
+        let ok = c_pclose(fp) == 0;
         pushresult(state, ok, None)
     } else {
         let ok = unsafe { fclose(fp) } == 0;
@@ -801,18 +753,12 @@ fn g_iofile(state: &mut LuaState, key: &str, mode: &str) -> LuaResult<u32> {
             let fp = unsafe { fopen(fname_c.as_ptr(), mode_c.as_ptr()) };
             if fp.is_null() {
                 let fname_str = String::from_utf8_lossy(&filename);
-                let en = errno();
-                let msg = unsafe {
-                    let p = strerror(en);
-                    if p.is_null() {
-                        "unknown error".to_string()
-                    } else {
-                        let len = strlen(p);
-                        let sl = std::slice::from_raw_parts(p, len);
-                        String::from_utf8_lossy(sl).into_owned()
-                    }
-                };
-                return Err(bad_argument(func_name, 1, &format!("{fname_str}: {msg}")));
+                let os_err = std::io::Error::last_os_error();
+                return Err(bad_argument(
+                    func_name,
+                    1,
+                    &format!("{fname_str}: {os_err}"),
+                ));
             }
 
             let ud = state
@@ -1007,18 +953,8 @@ fn io_readline(state: &mut LuaState) -> LuaResult<u32> {
     let success = read_line(state, fp);
 
     if unsafe { ferror(fp) } != 0 {
-        let en = errno();
-        let msg = unsafe {
-            let p = strerror(en);
-            if p.is_null() {
-                "unknown error".to_string()
-            } else {
-                let len = strlen(p);
-                let sl = std::slice::from_raw_parts(p, len);
-                String::from_utf8_lossy(sl).into_owned()
-            }
-        };
-        return Err(runtime_error(msg));
+        let os_err = std::io::Error::last_os_error();
+        return Err(runtime_error(os_err.to_string()));
     }
 
     if success {
@@ -1064,18 +1000,8 @@ pub fn io_lines(state: &mut LuaState) -> LuaResult<u32> {
     let fp = unsafe { fopen(fname_c.as_ptr(), mode_c.as_ptr()) };
     if fp.is_null() {
         let fname_str = String::from_utf8_lossy(&filename);
-        let en = errno();
-        let msg = unsafe {
-            let p = strerror(en);
-            if p.is_null() {
-                "unknown error".to_string()
-            } else {
-                let len = strlen(p);
-                let sl = std::slice::from_raw_parts(p, len);
-                String::from_utf8_lossy(sl).into_owned()
-            }
-        };
-        return Err(bad_argument("lines", 1, &format!("{fname_str}: {msg}")));
+        let os_err = std::io::Error::last_os_error();
+        return Err(bad_argument("lines", 1, &format!("{fname_str}: {os_err}")));
     }
 
     let ud = state
@@ -1140,7 +1066,7 @@ pub fn io_popen(state: &mut LuaState) -> LuaResult<u32> {
     let mut mode_c = mode;
     mode_c.push(0);
 
-    let fp = unsafe { popen(cmd_c.as_ptr(), mode_c.as_ptr()) };
+    let fp = c_popen(cmd_c.as_ptr(), mode_c.as_ptr());
     if fp.is_null() {
         let cmd_str = String::from_utf8_lossy(&command);
         return pushresult(state, false, Some(&cmd_str));
@@ -1258,21 +1184,9 @@ pub fn open_io_lib(state: &mut LuaState) -> LuaResult<()> {
     super::register_table_fn(state, io_table, "write", io_write)?;
 
     // Create standard file handles.
-    createstdfile(
-        state,
-        unsafe { stdin },
-        io_table,
-        "stdin",
-        Some(IO_INPUT_KEY),
-    )?;
-    createstdfile(
-        state,
-        unsafe { stdout },
-        io_table,
-        "stdout",
-        Some(IO_OUTPUT_KEY),
-    )?;
-    createstdfile(state, unsafe { stderr }, io_table, "stderr", None)?;
+    createstdfile(state, c_stdin(), io_table, "stdin", Some(IO_INPUT_KEY))?;
+    createstdfile(state, c_stdout(), io_table, "stdout", Some(IO_OUTPUT_KEY))?;
+    createstdfile(state, c_stderr(), io_table, "stderr", None)?;
 
     // Register as global "io".
     super::register_global_val(state, "io", Val::Table(io_table))?;
@@ -1315,24 +1229,18 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)]
     fn libc_stdin_not_null() {
-        let fp = unsafe { stdin };
-        assert!(!fp.is_null());
+        assert!(!c_stdin().is_null());
     }
 
     #[test]
-    #[allow(unsafe_code)]
     fn libc_stdout_not_null() {
-        let fp = unsafe { stdout };
-        assert!(!fp.is_null());
+        assert!(!c_stdout().is_null());
     }
 
     #[test]
-    #[allow(unsafe_code)]
     fn libc_stderr_not_null() {
-        let fp = unsafe { stderr };
-        assert!(!fp.is_null());
+        assert!(!c_stderr().is_null());
     }
 
     #[test]
@@ -1381,12 +1289,13 @@ mod tests {
         let _ = std::fs::remove_file("/tmp/__rilua_io_test__");
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     #[allow(unsafe_code, clippy::expect_used)]
     fn libc_popen_echo() {
         let cmd = b"echo hello\0";
         let mode = b"r\0";
-        let fp = unsafe { popen(cmd.as_ptr(), mode.as_ptr()) };
+        let fp = c_popen(cmd.as_ptr(), mode.as_ptr());
         assert!(!fp.is_null());
         let mut buf = [0u8; 64];
         let n = unsafe { fread(buf.as_mut_ptr(), 1, buf.len(), fp) };
@@ -1396,7 +1305,7 @@ mod tests {
                 .expect("valid utf8")
                 .starts_with("hello")
         );
-        assert_eq!(unsafe { pclose(fp) }, 0);
+        assert_eq!(c_pclose(fp), 0);
     }
 
     #[test]
@@ -1407,9 +1316,10 @@ mod tests {
     }
 
     #[test]
-    fn setvbuf_constants() {
-        assert_eq!(IOFBF, 0);
-        assert_eq!(IOLBF, 1);
-        assert_eq!(IONBF, 2);
+    fn setvbuf_constants_distinct() {
+        // Values are platform-specific but must be distinct.
+        assert_ne!(IONBF, IOFBF);
+        assert_ne!(IONBF, IOLBF);
+        assert_ne!(IOFBF, IOLBF);
     }
 }

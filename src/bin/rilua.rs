@@ -6,7 +6,7 @@
 //! detection.
 
 use std::env;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
 use rilua::{Function, Lua, LuaError, StdLib, Val};
@@ -16,23 +16,6 @@ use rilua::{Function, Lua, LuaError, StdLib, Val};
 // ---------------------------------------------------------------------------
 
 const LUA_VERSION: &str = "Lua 5.1.1  Copyright (C) 1994-2006 Lua.org, PUC-Rio";
-
-// ---------------------------------------------------------------------------
-// TTY detection via libc
-// ---------------------------------------------------------------------------
-
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    #[link_name = "isatty"]
-    fn libc_isatty(fd: i32) -> i32;
-}
-
-#[allow(unsafe_code)]
-fn stdin_is_tty() -> bool {
-    // SAFETY: isatty is a standard POSIX function that only reads
-    // the file descriptor status. No memory is written.
-    unsafe { libc_isatty(0) != 0 }
-}
 
 // ---------------------------------------------------------------------------
 // Error reporting
@@ -546,7 +529,7 @@ fn main() {
     if flags.has_i {
         dotty(&mut lua);
     } else if flags.script == 0 && !flags.has_e && !flags.has_v {
-        if stdin_is_tty() {
+        if io::stdin().is_terminal() {
             eprintln!("{LUA_VERSION}");
             dotty(&mut lua);
         } else {

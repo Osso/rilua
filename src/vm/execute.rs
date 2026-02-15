@@ -26,19 +26,7 @@ use super::state::{
 use super::table::Table;
 use super::value::{Userdata, Val};
 
-// libc FFI for locale-aware number parsing (strtod, localeconv).
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn strtod(nptr: *const u8, endptr: *mut *mut u8) -> f64;
-    fn localeconv() -> *const LConv;
-}
-
-/// Minimal `struct lconv` -- we only need the `decimal_point` field.
-#[repr(C)]
-struct LConv {
-    decimal_point: *const u8,
-    // remaining fields omitted
-}
+use crate::platform::{localeconv, strcoll, strtod};
 
 /// Calls libc `strtod` on a NUL-terminated buffer.
 ///
@@ -2344,11 +2332,6 @@ fn val_equal(a: Val, b: Val, gc: &Gc) -> bool {
 // ---------------------------------------------------------------------------
 // Locale-aware string comparison (PUC-Rio's l_strcmp)
 // ---------------------------------------------------------------------------
-
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn strcoll(s1: *const u8, s2: *const u8) -> i32;
-}
 
 /// Compare two Lua strings using `strcoll` (locale-aware), matching
 /// PUC-Rio's `l_strcmp` in `lvm.c`. Handles embedded null bytes by

@@ -26,6 +26,7 @@ pub mod compiler;
 pub mod conversion;
 pub mod error;
 pub mod handles;
+pub(crate) mod platform;
 pub mod stdlib;
 pub mod vm;
 

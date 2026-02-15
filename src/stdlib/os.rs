@@ -9,78 +9,10 @@ use crate::vm::state::LuaState;
 use crate::vm::table::Table;
 use crate::vm::value::Val;
 
-// ---------------------------------------------------------------------------
-// libc FFI bindings for date/time/locale functions
-// ---------------------------------------------------------------------------
-
-/// C `time_t` -- signed 64-bit on modern Linux (matches `i64`).
-type TimeT = i64;
-
-/// C `clock_t` -- signed integer type, `i64` on Linux x86_64.
-type ClockT = i64;
-
-/// C `struct tm` for broken-down time.
-///
-/// Field names mirror the C `struct tm` convention (`tm_sec`, `tm_min`, etc.)
-/// to maintain clarity about the FFI mapping.
-#[repr(C)]
-#[allow(clippy::struct_field_names)]
-struct Tm {
-    tm_sec: i32,
-    tm_min: i32,
-    tm_hour: i32,
-    tm_mday: i32,
-    tm_mon: i32,
-    tm_year: i32,
-    tm_wday: i32,
-    tm_yday: i32,
-    tm_isdst: i32,
-    // glibc extensions (must be present for correct struct size):
-    tm_gmtoff: i64,
-    tm_zone: *const i8,
-}
-
-impl Default for Tm {
-    fn default() -> Self {
-        Self {
-            tm_sec: 0,
-            tm_min: 0,
-            tm_hour: 0,
-            tm_mday: 0,
-            tm_mon: 0,
-            tm_year: 0,
-            tm_wday: 0,
-            tm_yday: 0,
-            tm_isdst: 0,
-            tm_gmtoff: 0,
-            tm_zone: std::ptr::null(),
-        }
-    }
-}
-
-// Locale category constants (Linux/glibc values).
-const LC_ALL: i32 = 6;
-const LC_COLLATE: i32 = 3;
-const LC_CTYPE: i32 = 0;
-const LC_MONETARY: i32 = 4;
-const LC_NUMERIC: i32 = 1;
-const LC_TIME: i32 = 2;
-
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn clock() -> ClockT;
-    fn time(t: *mut TimeT) -> TimeT;
-    fn mktime(tm: *mut Tm) -> TimeT;
-    fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm;
-    fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm;
-    fn strftime(s: *mut u8, max: usize, format: *const u8, tm: *const Tm) -> usize;
-    fn setlocale(category: i32, locale: *const u8) -> *const u8;
-    fn mkstemp(template: *mut u8) -> i32;
-    fn close(fd: i32) -> i32;
-}
-
-/// `CLOCKS_PER_SEC` is 1_000_000 on POSIX systems.
-const CLOCKS_PER_SEC: f64 = 1_000_000.0;
+use crate::platform::{
+    self, CLOCKS_PER_SEC, TimeT, Tm, c_gmtime, c_localtime, c_tmpname, clock, current_time, mktime,
+    setlocale, strftime,
+};
 
 // ---------------------------------------------------------------------------
 // Argument helpers (same pattern as other stdlib modules)
@@ -189,7 +121,7 @@ fn push_error(state: &mut LuaState, filename: &str, err: &std::io::Error) -> u32
 #[allow(unsafe_code)]
 pub fn os_clock(state: &mut LuaState) -> LuaResult<u32> {
     let ticks = unsafe { clock() };
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::cast_lossless)]
     let secs = ticks as f64 / CLOCKS_PER_SEC;
     state.push(Val::Num(secs));
     Ok(1)
@@ -256,11 +188,11 @@ fn get_date_bool_field(state: &mut LuaState, table_ref: GcRef<Table>, key: &str)
 /// Table arg: reads year/month/day (required), hour/min/sec (optional,
 /// defaults 12/0/0), isdst (optional). Returns timestamp or nil if
 /// mktime fails.
-#[allow(unsafe_code)]
+#[allow(unsafe_code, clippy::field_reassign_with_default)]
 pub fn os_time(state: &mut LuaState) -> LuaResult<u32> {
     if nargs(state) == 0 || matches!(arg(state, 0), Val::Nil) {
-        // No args: current time.
-        let t = unsafe { time(std::ptr::null_mut()) };
+        // No args: current time via Rust std (no FFI needed).
+        let t = current_time();
         #[allow(clippy::cast_precision_loss)]
         let v = t as f64;
         state.push(Val::Num(v));
@@ -280,16 +212,14 @@ pub fn os_time(state: &mut LuaState) -> LuaResult<u32> {
     let year = get_date_field(state, table_ref, "year", None)?;
     let isdst = get_date_bool_field(state, table_ref, "isdst")?;
 
-    let mut tm = Tm {
-        tm_sec: sec,
-        tm_min: min,
-        tm_hour: hour,
-        tm_mday: day,
-        tm_mon: month - 1,    // Lua 1-12 -> C 0-11
-        tm_year: year - 1900, // Lua full year -> C offset from 1900
-        tm_isdst: isdst,
-        ..Tm::default()
-    };
+    let mut tm = Tm::default();
+    tm.tm_sec = sec;
+    tm.tm_min = min;
+    tm.tm_hour = hour;
+    tm.tm_mday = day;
+    tm.tm_mon = month - 1; // Lua 1-12 -> C 0-11
+    tm.tm_year = year - 1900; // Lua full year -> C offset from 1900
+    tm.tm_isdst = isdst;
 
     let t = unsafe { mktime(&raw mut tm) };
     if t == -1 {
@@ -327,7 +257,7 @@ pub fn os_date(state: &mut LuaState) -> LuaResult<u32> {
         let v = check_number(state, "date", 1)? as TimeT;
         v
     } else {
-        unsafe { time(std::ptr::null_mut()) }
+        current_time()
     };
 
     // Check for "!" prefix (UTC).
@@ -339,15 +269,13 @@ pub fn os_date(state: &mut LuaState) -> LuaResult<u32> {
 
     // Convert time_t to struct tm.
     let mut tm = Tm::default();
-    let result = unsafe {
-        if use_utc {
-            gmtime_r(&raw const t, &raw mut tm)
-        } else {
-            localtime_r(&raw const t, &raw mut tm)
-        }
+    let ok = if use_utc {
+        c_gmtime(&raw const t, &raw mut tm)
+    } else {
+        c_localtime(&raw const t, &raw mut tm)
     };
 
-    if result.is_null() {
+    if !ok {
         // Invalid date -> return nil.
         state.push(Val::Nil);
         return Ok(1);
@@ -457,8 +385,15 @@ pub fn os_execute(state: &mut LuaState) -> LuaResult<u32> {
     let cmd = check_string(state, "execute", 0)?;
     let cmd_str = String::from_utf8_lossy(&cmd);
 
+    #[cfg(not(target_os = "windows"))]
     let status = std::process::Command::new("/bin/sh")
         .arg("-c")
+        .arg(cmd_str.as_ref())
+        .status();
+
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .arg("/C")
         .arg(cmd_str.as_ref())
         .status();
 
@@ -561,27 +496,11 @@ pub fn os_rename(state: &mut LuaState) -> LuaResult<u32> {
 
 /// `os.tmpname()` -- Returns a unique temporary filename.
 ///
-/// Uses POSIX `mkstemp` to create a safe temporary file, then closes
-/// the descriptor and returns the path. Falls back to a counter-based
-/// scheme if mkstemp fails.
-#[allow(unsafe_code)]
+/// Uses POSIX `mkstemp` (or Windows `tmpnam`) to create a temporary filename.
 pub fn os_tmpname(state: &mut LuaState) -> LuaResult<u32> {
-    // PUC-Rio template: "/tmp/lua_XXXXXX"
-    let mut template = *b"/tmp/lua_XXXXXX\0";
-    let fd = unsafe { mkstemp(template.as_mut_ptr()) };
-    if fd < 0 {
-        return Err(runtime_error("unable to generate a unique filename".into()));
-    }
-    // Close the file descriptor; we only need the name.
-    unsafe { close(fd) };
-
-    // Find the NUL terminator to extract the filename.
-    let len = template
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(template.len());
-    let name = &template[..len];
-    let s = state.gc.intern_string(name);
+    let name =
+        c_tmpname().ok_or_else(|| runtime_error("unable to generate a unique filename".into()))?;
+    let s = state.gc.intern_string(&name);
     state.push(Val::Str(s));
     Ok(1)
 }
@@ -608,12 +527,12 @@ pub fn os_setlocale(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     let cat = match cat_name.as_slice() {
-        b"all" => LC_ALL,
-        b"collate" => LC_COLLATE,
-        b"ctype" => LC_CTYPE,
-        b"monetary" => LC_MONETARY,
-        b"numeric" => LC_NUMERIC,
-        b"time" => LC_TIME,
+        b"all" => platform::locale::LC_ALL,
+        b"collate" => platform::locale::LC_COLLATE,
+        b"ctype" => platform::locale::LC_CTYPE,
+        b"monetary" => platform::locale::LC_MONETARY,
+        b"numeric" => platform::locale::LC_NUMERIC,
+        b"time" => platform::locale::LC_TIME,
         _ => {
             return Err(bad_argument("setlocale", 2, "invalid option"));
         }
@@ -667,17 +586,6 @@ mod tests {
     }
 
     #[test]
-    fn locale_category_mapping() {
-        // Verify our constants match expected Linux/glibc values.
-        assert_eq!(LC_CTYPE, 0);
-        assert_eq!(LC_NUMERIC, 1);
-        assert_eq!(LC_TIME, 2);
-        assert_eq!(LC_COLLATE, 3);
-        assert_eq!(LC_MONETARY, 4);
-        assert_eq!(LC_ALL, 6);
-    }
-
-    #[test]
     #[allow(unsafe_code)]
     fn libc_clock_returns_nonnegative() {
         let ticks = unsafe { clock() };
@@ -685,33 +593,27 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)]
-    fn libc_time_returns_reasonable_value() {
-        let t = unsafe { time(std::ptr::null_mut()) };
+    fn current_time_returns_reasonable_value() {
+        let t = current_time();
         // Should be after 2024-01-01 (timestamp 1704067200).
         assert!(t > 1_704_067_200);
     }
 
     #[test]
     #[allow(unsafe_code)]
-    fn libc_localtime_roundtrip() {
+    fn c_localtime_roundtrip() {
         let t: TimeT = 1_000_000_000; // 2001-09-09 01:46:40 UTC
         let mut tm = Tm::default();
-        let result = unsafe { localtime_r(&raw const t, &raw mut tm) };
-        assert!(!result.is_null());
-        // mktime should give us back the same timestamp (or close,
-        // depending on DST).
+        assert!(c_localtime(&raw const t, &raw mut tm));
         let t2 = unsafe { mktime(&raw mut tm) };
         assert_eq!(t, t2);
     }
 
     #[test]
-    #[allow(unsafe_code)]
-    fn libc_gmtime_epoch() {
+    fn c_gmtime_epoch() {
         let t: TimeT = 0; // 1970-01-01 00:00:00 UTC
         let mut tm = Tm::default();
-        let result = unsafe { gmtime_r(&raw const t, &raw mut tm) };
-        assert!(!result.is_null());
+        assert!(c_gmtime(&raw const t, &raw mut tm));
         assert_eq!(tm.tm_year, 70); // 1970 - 1900
         assert_eq!(tm.tm_mon, 0); // January
         assert_eq!(tm.tm_mday, 1);
@@ -725,7 +627,7 @@ mod tests {
     fn libc_strftime_basic() {
         let t: TimeT = 0;
         let mut tm = Tm::default();
-        unsafe { gmtime_r(&raw const t, &raw mut tm) };
+        c_gmtime(&raw const t, &raw mut tm);
         let mut buf = [0u8; 64];
         let fmt = b"%Y-%m-%d\0";
         let n = unsafe { strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &raw const tm) };
@@ -735,18 +637,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)]
-    fn libc_mkstemp_creates_file() {
-        let mut template = *b"/tmp/lua_XXXXXX\0";
-        let fd = unsafe { mkstemp(template.as_mut_ptr()) };
-        assert!(fd >= 0);
-        unsafe { close(fd) };
-        // Clean up the temp file.
-        let len = template
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(template.len());
-        let name = std::str::from_utf8(&template[..len]).expect("valid utf8");
-        let _ = std::fs::remove_file(name);
+    fn c_tmpname_creates_file() {
+        let name = c_tmpname().expect("c_tmpname should succeed");
+        assert!(!name.is_empty());
+        let name_str = std::str::from_utf8(&name).expect("valid utf8");
+        let _ = std::fs::remove_file(name_str);
     }
 }
