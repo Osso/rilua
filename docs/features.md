@@ -457,7 +457,7 @@ rilua column:
 | `package.config` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `package.cpath` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `package.loaded` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
-| `package.loadlib` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| `package.loadlib` | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | Stub: no dynamic library loading |
 | `package.path` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `package.preload` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `package.searchpath` | | ✓ | ✓ | ✓ | ✓ | ✗ | |
