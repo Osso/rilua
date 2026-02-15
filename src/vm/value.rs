@@ -55,6 +55,11 @@ pub struct Userdata {
     /// Whether `__gc` has already been called on this object.
     /// Prevents double-finalization across GC cycles.
     finalized: bool,
+    /// Monotonic allocation sequence number for finalization ordering.
+    /// PUC-Rio finalizes userdata newest-first (LIFO). Since our arena
+    /// iteration order doesn't match allocation order after slot reuse,
+    /// we track the allocation sequence explicitly.
+    alloc_seq: u64,
 }
 
 impl Userdata {
@@ -65,6 +70,7 @@ impl Userdata {
             metatable: None,
             env: None,
             finalized: false,
+            alloc_seq: 0,
         }
     }
 
@@ -75,7 +81,18 @@ impl Userdata {
             metatable: Some(mt),
             env: None,
             finalized: false,
+            alloc_seq: 0,
         }
+    }
+
+    /// Returns the allocation sequence number.
+    pub fn alloc_seq(&self) -> u64 {
+        self.alloc_seq
+    }
+
+    /// Sets the allocation sequence number.
+    pub fn set_alloc_seq(&mut self, seq: u64) {
+        self.alloc_seq = seq;
     }
 
     /// Returns a reference to the inner data, downcasting to `T`.

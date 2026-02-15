@@ -477,8 +477,12 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
     let func_val = arg(state, 0);
     let handler_val = arg(state, 1);
 
-    // Set up to call the function with no arguments.
+    // Set up: keep handler on stack at func_pos (GC-visible), function at
+    // func_pos+1. This prevents the handler closure from being collected
+    // during a GC cycle triggered by the protected call.
     let func_pos = state.base;
+    let handler_slot = func_pos;
+    let call_pos = func_pos + 1;
 
     // Save state for error recovery.
     let saved_ci = state.ci;
@@ -486,27 +490,25 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
     let saved_call_depth = state.call_depth;
     state.error_object = None;
 
-    // Place function at func_pos, no arguments.
-    state.stack_set(func_pos, func_val);
-    state.top = func_pos + 1;
+    // Place handler at func_pos (GC anchor), function at func_pos+1.
+    state.ensure_stack(call_pos + 1);
+    state.stack_set(handler_slot, handler_val);
+    state.stack_set(call_pos, func_val);
+    state.top = call_pos + 1;
 
     // Attempt the call (through call_function for C-call boundary tracking).
-    let call_result = state.call_function(func_pos, LUA_MULTRET);
+    let call_result = state.call_function(call_pos, LUA_MULTRET);
 
     match call_result {
         Ok(()) => {
-            // Success: results at func_pos..state.top.
-            let n_inner = state.top - func_pos;
-
-            state.ensure_stack(state.top + 1);
-            for i in (func_pos..state.top).rev() {
-                let v = state.stack_get(i);
-                state.stack_set(i + 1, v);
-            }
+            // Success: results at call_pos..state.top (call_pos = func_pos + 1).
+            // The handler at func_pos is no longer needed; overwrite with true.
+            let n_results = state.top - call_pos;
             state.stack_set(func_pos, Val::Bool(true));
-            state.top = func_pos + 1 + n_inner;
+            // Results are already at func_pos+1..state.top, so just adjust count.
+            state.top = func_pos + 1 + n_results;
 
-            Ok((1 + n_inner) as u32)
+            Ok((1 + n_results) as u32)
         }
         Err(err) => {
             // Get the error value before modifying state.
@@ -517,13 +519,16 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
 
             state.close_upvalues(func_pos);
 
+            // Retrieve the handler from its GC-visible stack slot.
+            let handler_from_stack = state.stack_get(handler_slot);
+
             // Call the error handler BEFORE restoring ci, so it can see the
             // full call stack (e.g. debug.traceback). Place the handler call
             // above the current stack top to avoid clobbering error frames.
             // PUC-Rio calls the handler via luaG_errormsg before longjmp.
             let handler_pos = state.top;
             state.ensure_stack(handler_pos + 2);
-            state.stack_set(handler_pos, handler_val);
+            state.stack_set(handler_pos, handler_from_stack);
             state.stack_set(handler_pos + 1, error_val);
             state.top = handler_pos + 2;
 

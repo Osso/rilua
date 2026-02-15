@@ -948,6 +948,7 @@ fn aux_lines(state: &mut LuaState, file_val: Val, toclose: bool) -> u32 {
         func: io_readline,
         upvalues: vec![file_val, Val::Bool(toclose)],
         name: "(for generator)".to_string(),
+        env: None,
     });
     let closure_ref = state.gc.alloc_closure(closure);
     state.push(Val::Function(closure_ref));

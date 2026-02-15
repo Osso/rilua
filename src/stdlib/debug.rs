@@ -498,7 +498,7 @@ pub fn db_getfenv(state: &mut LuaState) -> LuaResult<u32> {
     let env = match val {
         Val::Function(r) => state.gc.closures.get(r).map(|cl| match cl {
             Closure::Lua(lcl) => lcl.env,
-            Closure::Rust(_) => state.global,
+            Closure::Rust(rcl) => rcl.env.unwrap_or(state.global),
         }),
         Val::Userdata(r) => {
             let e = state
@@ -542,11 +542,7 @@ pub fn db_setfenv(state: &mut LuaState) -> LuaResult<u32> {
             })?;
             match cl {
                 Closure::Lua(lcl) => lcl.env = new_env,
-                Closure::Rust(_) => {
-                    return Err(simple_error(
-                        "'setfenv' cannot change environment of given object".into(),
-                    ));
-                }
+                Closure::Rust(rcl) => rcl.env = Some(new_env),
             }
         }
         Val::Userdata(r) => {

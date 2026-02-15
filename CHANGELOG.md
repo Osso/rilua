@@ -69,9 +69,14 @@ and this project adheres to
 - Architecture documentation in `docs/` (14 documents covering pipeline,
   instructions, values, GC, tables, strings, closures, call stack,
   metatables, errors, API, stdlib, coroutines, testing)
-- 1271 tests: 583 unit + 411 integration + 277 oracle comparison
-- PUC-Rio test suite: 7/20 applicable files pass (files, gc, locals,
-  math, nextvar, pm, sort)
+- T test module (`RILUA_TEST_LIB=1`): 24 functions for PUC-Rio test
+  suite compatibility. Includes T.testC mini-interpreter (28 C API
+  commands), remote state management (newstate/closestate/doremote),
+  userdata reference tracking (ref/unref/getref), upvalue access,
+  OOM memory limit simulation (totalmem), and string substitution (gsub)
+- 1304 tests: 596 unit + 431 integration + 277 oracle comparison
+- PUC-Rio test suite: 21/23 pass (20 non-trivial + 1 trivial; 2
+  always-fail matching PUC-Rio on 64-bit Linux)
 
 ### Changed
 
@@ -111,3 +116,20 @@ and this project adheres to
   codegen calls `discharge_vars`/`set_one_ret`, matching PUC-Rio's
   `prefixexp` -> `luaK_dischargevars` -> `luaK_setoneret` chain.
   Also fixes `(f())` as statement correctly being a syntax error.
+- GC finalization order: userdata finalized in wrong order (oldest-first
+  instead of newest-first). Added `alloc_seq` counter to track allocation
+  order, sort `to_finalize` list to match PUC-Rio's LIFO semantics.
+- GC traverse_table marking nil-valued hash keys: kept dead objects alive
+  by marking keys of nil-valued entries. Now skips nil-valued entries,
+  matching PUC-Rio's `removeentry` behavior.
+- `lua_equal` returning true for out-of-range stack indices: PUC-Rio
+  returns 0 for invalid indices (`luaO_nilobject`). Added validity checks.
+- xpcall error handler collected by GC: handler closure stored only in
+  Rust local was invisible to GC mark phase. Now stored on Lua stack.
+- `call_gc_finalizer` not restoring state on `__gc` error: ci/base/top
+  left in bad state after finalizer error. Added save/restore.
+- `package.loaded` not set by library openers in remote states: caused
+  `require("_G")` to fail. Added `set_package_loaded` helper.
+- Table resize memory not tracked in `total_bytes`: OOM simulation
+  (T.totalmem) couldn't detect table growth. Added memory delta tracking
+  in `table_set` and `vm_settable`.

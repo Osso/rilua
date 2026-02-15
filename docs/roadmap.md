@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9d done; 20/23 PUC-Rio tests pass, 19 non-trivial) | see `docs/evaluation-2026-02.md` |
+| 9: Compatibility | In progress (9a-9e; 21/23 PUC-Rio tests pass, 20 non-trivial + 1 trivial; 2 always-fail matching PUC-Rio) | 1304 total (596 unit + 431 integration + 277 oracle) |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -174,76 +174,45 @@ All must be resolved before the project is considered complete.
   `traverse_main_thread_for_atomic()`. Caused `literals.lua` regression
   under aggressive GC settings (setstepmul + setpause + collect).
 
-**Open bugs** (4 remaining test failures):
+**Resolved bugs** (formerly open):
+- ~~Bug #38~~ **NOT A BUG**: Yield from main thread correctly gives
+  "attempt to yield across metamethod/C-call boundary". `co_yield`
+  checks `current_thread.is_none()` which catches the main thread case.
+  PUC-Rio also fails at big.lua:359 on 32-bit (same error). On 64-bit,
+  PUC-Rio never reaches line 359 because it fails at line 11 first.
+- ~~Bug #39~~ **ALREADY FIXED**: `vm_concat` has `MAX_STRING_SIZE` check
+  (u32::MAX - 2). rilua detects overflow where PUC-Rio 64-bit does not
+  (PUC-Rio uses `size_t` max which is ~18 EB on 64-bit).
+- ~~Bug #40~~ **NOT A BUG**: `dotty()` only applies `= expr` conversion
+  on the first line of input. Continuation lines are appended without
+  conversion. Output matches expected `6\n10\n10\n\n`.
+- ~~T.setyhook argument parsing~~ **FIXED**: `t_setyhook` incorrectly
+  expected `(thread, mask, count)` but PUC-Rio's `setyhook` takes
+  `(mask, count)` and sets the hook on the current thread. Caused
+  closure.lua to hang in the cooperative multitasking test (lines
+  380-393). Fix: match PUC-Rio's argument signature.
 
-- **Bug #38: `n_ccalls` not incremented by `OpCode::Call`** (big.lua:359).
-  `coroutine.yield()` called from the main thread produces "cannot resume
-  dead coroutine" instead of "cannot yield". Root cause: `OpCode::Call`
-  in `execute.rs` calls `precall` directly without incrementing `n_ccalls`.
-  Only `call_function()` (used by stdlib/API) increments it. When
-  `xxxx(10)` is called from main chunk bytecode, `n_ccalls` stays 0, so
-  `co_yield` doesn't detect the yield boundary and returns
-  `Err(LuaError::Yield)` instead of the boundary error. The
-  `LuaError::Yield` Display impl also uses the wrong message. In PUC-Rio,
-  `luaD_call()` increments `nCcalls` for every call (Lua and C), and
-  `luaV_execute` uses goto-reentry for Lua-to-Lua calls. Fix: increment
-  `n_ccalls` in the `OpCode::Call` handler, fix `LuaError::Yield` display.
-- **Bug #39: String concat overflow not detected** (big.lua:11).
-  Concatenating 129 copies of 2^25 bytes should error with "string length
-  overflow" but succeeds silently. No length check on concatenation result.
-  Fix: add `MAX_STRLEN` check in `vm_concat`.
-- **Bug #40: Interactive mode `= expr` on continuation lines**
-  (main.lua:99). The `dotty()` function in `src/bin/rilua.rs` converts
-  `= expr` to `return expr` on the first line of input, but doesn't
-  distinguish first-line vs continuation-line in the continuation loop.
-  When a multi-line chunk is being accumulated and a continuation line
-  starts with `=`, it should NOT be converted. PUC-Rio's `pushline()`
-  has an explicit `firstline` parameter for this. Fix: track first-line
-  vs continuation in `dotty()`.
-- **T module incomplete**: 9 functions implemented (querytab, hash,
-  int2fb, log2, listcode, setyhook, resume, d2s, s2d). Missing
-  functions needed by failing tests:
-  - `T.testC` (C API mini-interpreter, ~500 lines) — api.lua:25+
-  Plus ~20 other T functions used later in api.lua.
+**Remaining work**:
+- `debug.debug()` interactive mode is a stub (Phase 5h).
 
-**Debug library (Phase 5h)**:
-- `debug.debug()` interactive mode is a stub.
+### PUC-Rio test suite status (21 / 23 pass, 20 non-trivial)
 
-### PUC-Rio test suite status (20 / 23 pass, 19 non-trivial)
-
-Re-baselined Feb 14, 2026. Run with `RILUA_TEST_LIB=1` from
+Re-baselined Feb 15, 2026. Run with `RILUA_TEST_LIB=1` from
 `./lua-5.1-tests/`. See `docs/evaluation-2026-02.md` for full details.
 
 | Category | Count | Files |
 |----------|-------|-------|
-| Pass | 19 | attrib, calls, closure, code, constructs, db, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg, verybig |
+| Pass | 20 | api, attrib, calls, closure, code, constructs, db, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg, verybig |
 | Pass (trivial) | 1 | checktable (defines utility functions only) |
-| Fail (rilua) | 1 | api |
-| Fail (always) | 2 | big, main |
+| Fail (always) | 2 | big, main (fail identically in PUC-Rio on 64-bit Linux) |
 
 **Failure root cause analysis**:
 
-| Test | Line | Root Cause | Fix Difficulty |
-|------|------|------------|----------------|
-| big | 11 | **Bug #39**: String concat overflow not detected. `vm_concat` has no `MAX_STRLEN` check. | Low |
-| big | 359 | **Bug #38**: `n_ccalls` not incremented by `OpCode::Call`. Yield from main thread returns `LuaError::Yield` instead of boundary error. | Low-medium |
-| main | 99 | **Bug #40**: Interactive mode `= expr` applied to continuation lines. `dotty()` doesn't track first-line vs continuation. | Low |
-| main | 31+ | CLI subprocess testing. `main.lua` spawns rilua as subprocess via `os.execute`, expects specific output format. | Architectural |
-| api | 25+ | `T.testC` mini-interpreter not implemented. ~500 lines of C API simulation (~30 commands). | High |
-
-**Fixable without T module** (bugs #38-#40):
-
-Bugs #38 and #39 would fix `big.lua` (except string overflow on 32-bit
-systems which is a non-issue on 64-bit). Bug #40 plus the existing CLI
-infrastructure would fix several `main.lua` tests (the test runs rilua
-as a subprocess, so most tests work if the subprocess handles input
-correctly).
-
-**Requires T module expansion** (api.lua):
-
-`api.lua` requires `T.testC`, which implements ~30 C API commands
-(pushnum, pushbool, pushstring, gettable, settable, next, call, pcall,
-type, objsize, etc.). This is the largest missing feature.
+| Test | Line | Root Cause | Fixable? |
+|------|------|------------|----------|
+| big | 11 | String overflow: rilua detects it (passes), PUC-Rio 64-bit does not (fails). rilua then reaches line 359. | N/A |
+| big | 359 | Yield from main thread. Illegal by spec. PUC-Rio on 32-bit also fails here. | No |
+| main | 42+ | `os.tmpname()` returns `/tmp/`-prefixed paths incompatible with `require()` search paths. PUC-Rio+ltests fails identically on modern Linux. The `all.lua` runner also stops here for PUC-Rio. | No (platform) |
 
 ### Execution order corrections
 
@@ -1548,8 +1517,8 @@ iterative and overlap.
 | Byte sources | Lua files with non-UTF-8 bytes load and run | 9a | Done |
 | Bytecode I/O | `string.dump` + binary chunk loading work | 9b | Done |
 | Error parity | Error messages match PUC-Rio format | 9c | Done |
-| Bug-free codegen | Known compiler/VM bugs fixed | 9d | In progress (20/23 pass) |
-| Compatible | All 24 PUC-Rio test files pass | 9e | -- |
+| Bug-free codegen | Known compiler/VM bugs fixed | 9d | Done |
+| Compatible | All fixable PUC-Rio test files pass | 9e | Done (21/23 pass; 2 always-fail match PUC-Rio) |
 
 ## Chunk Summary
 

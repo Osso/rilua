@@ -2059,7 +2059,15 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     // the current array size triggers rehash, which rounds
                     // up to a power of 2.
                     if let Some(table) = state.gc.tables.get_mut(table_ref) {
+                        let mem_before = table.estimated_memory();
                         table.ensure_array_capacity(last);
+                        let mem_after = table.estimated_memory();
+                        if mem_after > mem_before {
+                            state.gc.gc_state.total_bytes += mem_after - mem_before;
+                        }
+                    }
+                    if state.gc.gc_state.total_bytes > state.gc.gc_state.alloc_limit {
+                        return Err(crate::LuaError::Memory);
                     }
 
                     for i in 1..=n {
@@ -2088,14 +2096,23 @@ fn table_get(state: &LuaState, table_ref: GcRef<Table>, key: Val) -> LuaResult<V
     Ok(table.get(key, &state.gc.string_arena))
 }
 
-/// Raw table set with write barrier.
+/// Raw table set with write barrier and memory tracking.
 fn table_set(state: &mut LuaState, table_ref: GcRef<Table>, key: Val, value: Val) -> LuaResult<()> {
     let table = state
         .gc
         .tables
         .get_mut(table_ref)
         .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+    let mem_before = table.estimated_memory();
     table.raw_set(key, value, &state.gc.string_arena)?;
+    let mem_after = table.estimated_memory();
+    if mem_after > mem_before {
+        state.gc.gc_state.total_bytes += mem_after - mem_before;
+    }
+    // Check alloc limit after table growth.
+    if state.gc.gc_state.total_bytes > state.gc.gc_state.alloc_limit {
+        return Err(crate::LuaError::Memory);
+    }
     state.gc.barrier_back(table_ref);
     Ok(())
 }
@@ -2258,7 +2275,15 @@ fn vm_settable(
                         .tables
                         .get_mut(table_ref)
                         .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+                    let mem_before = table.estimated_memory();
                     table.raw_set(key, value, &state.gc.string_arena)?;
+                    let mem_after = table.estimated_memory();
+                    if mem_after > mem_before {
+                        state.gc.gc_state.total_bytes += mem_after - mem_before;
+                    }
+                    if state.gc.gc_state.total_bytes > state.gc.gc_state.alloc_limit {
+                        return Err(crate::LuaError::Memory);
+                    }
                     state.gc.barrier_back(table_ref);
                     return Ok(());
                 }
@@ -2329,7 +2354,7 @@ unsafe extern "C" {
 /// PUC-Rio's `l_strcmp` in `lvm.c`. Handles embedded null bytes by
 /// iterating over null-terminated segments.
 #[allow(unsafe_code)]
-fn l_strcmp(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+pub(crate) fn l_strcmp(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
     let mut l = left;
     let mut r = right;
     loop {

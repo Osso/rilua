@@ -209,6 +209,13 @@ impl Table {
         self.array.len()
     }
 
+    /// Returns estimated memory usage of this table's array + hash parts.
+    ///
+    /// Used for memory tracking when tables resize after `raw_set`.
+    pub fn estimated_memory(&self) -> usize {
+        self.array.len() * 16 + self.hash_size() as usize * 32
+    }
+
     /// Returns the size of the hash part (always a power of 2, or 0).
     #[inline]
     pub fn hash_size(&self) -> u32 {

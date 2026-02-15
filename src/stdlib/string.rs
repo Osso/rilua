@@ -1628,6 +1628,7 @@ pub fn str_gmatch(state: &mut LuaState) -> LuaResult<u32> {
         func: gmatch_aux,
         upvalues: vec![s_val, pat_val, Val::Num(0.0)],
         name: "gmatch_aux".to_string(),
+        env: None,
     });
     let closure_ref = state.gc.alloc_closure(closure);
     state.push(Val::Function(closure_ref));

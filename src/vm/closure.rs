@@ -208,6 +208,9 @@ pub struct RustClosure {
     pub upvalues: Vec<Val>,
     /// Function name for debug/error messages.
     pub name: String,
+    /// Per-closure environment table (fenv). `None` means use global.
+    /// Matches PUC-Rio's `CClosure.env`.
+    pub env: Option<GcRef<Table>>,
 }
 
 impl std::fmt::Debug for RustClosure {
@@ -227,6 +230,7 @@ impl RustClosure {
             func,
             upvalues: Vec::new(),
             name: name.to_string(),
+            env: None,
         }
     }
 }

@@ -378,6 +378,24 @@ fn open_test_lib(state: &mut LuaState) -> LuaResult<()> {
     register_table_fn(state, t_table, "d2s", testlib::t_d2s)?;
     register_table_fn(state, t_table, "s2d", testlib::t_s2d)?;
 
+    // T.testC mini-interpreter and additional test functions.
+    register_table_fn(state, t_table, "testC", testlib::t_testc)?;
+    register_table_fn(state, t_table, "newuserdata", testlib::t_newuserdata)?;
+    register_table_fn(state, t_table, "udataval", testlib::t_udataval)?;
+    register_table_fn(state, t_table, "pushuserdata", testlib::t_pushuserdata)?;
+    register_table_fn(state, t_table, "ref", testlib::t_ref)?;
+    register_table_fn(state, t_table, "unref", testlib::t_unref)?;
+    register_table_fn(state, t_table, "getref", testlib::t_getref)?;
+    register_table_fn(state, t_table, "upvalue", testlib::t_upvalue)?;
+    register_table_fn(state, t_table, "checkmemory", testlib::t_checkmemory)?;
+    register_table_fn(state, t_table, "gsub", testlib::t_gsub)?;
+    register_table_fn(state, t_table, "doonnewstack", testlib::t_doonnewstack)?;
+    register_table_fn(state, t_table, "newstate", testlib::t_newstate)?;
+    register_table_fn(state, t_table, "closestate", testlib::t_closestate)?;
+    register_table_fn(state, t_table, "doremote", testlib::t_doremote)?;
+    register_table_fn(state, t_table, "loadlib", testlib::t_loadlib)?;
+    register_table_fn(state, t_table, "totalmem", testlib::t_totalmem)?;
+
     register_global_val(state, "T", Val::Table(t_table))?;
     Ok(())
 }

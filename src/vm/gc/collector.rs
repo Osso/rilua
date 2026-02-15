@@ -42,13 +42,13 @@
 use super::Color;
 use super::arena::GcRef;
 
-use crate::LuaResult;
 use crate::vm::closure::{Closure, Upvalue, UpvalueState};
 use crate::vm::proto::Proto;
 use crate::vm::state::{Gc, LuaState, LuaThread};
 use crate::vm::string::LuaString;
 use crate::vm::table::Table;
 use crate::vm::value::{Userdata, Val};
+use crate::{LuaError, LuaResult};
 
 // ---------------------------------------------------------------------------
 // GrayItem: typed gray-list entry
@@ -219,6 +219,13 @@ pub struct GcState {
     pub gc_debt: i64,
     /// Dead userdata with `__gc` metamethods, pending finalization.
     pub tmudata: Vec<GcRef<Userdata>>,
+    /// Monotonic counter for userdata allocation ordering.
+    /// Incremented each time a userdata is allocated. Used to ensure
+    /// `__gc` finalization runs newest-first (matching PUC-Rio's LIFO order).
+    pub ud_alloc_seq: u64,
+    /// Memory allocation limit for OOM testing. `usize::MAX` = no limit.
+    /// When `total_bytes` exceeds this, allocations return errors.
+    pub alloc_limit: usize,
 }
 
 impl GcState {
@@ -244,6 +251,8 @@ impl GcState {
             estimate: 0,
             gc_debt: 0,
             tmudata: Vec::new(),
+            ud_alloc_seq: 0,
+            alloc_limit: usize::MAX,
         }
     }
 }
@@ -408,6 +417,13 @@ impl Gc {
             }
         }
         for (key, val) in &hash_entries {
+            // PUC-Rio's traversetable skips entries with nil values
+            // (removeentry), preventing dead keys from keeping objects
+            // alive. Without this, a userdata used as a table key remains
+            // reachable even after `t[ud] = nil`.
+            if val.is_nil() {
+                continue;
+            }
             if !weak_keys {
                 self.mark_value(*key);
             }
@@ -473,7 +489,7 @@ impl Gc {
                     }
                     Closure::Rust(rc) => {
                         let inlines: Vec<Val> = rc.upvalues.clone();
-                        (None, Vec::new(), inlines, Vec::new())
+                        (rc.env, Vec::new(), inlines, Vec::new())
                     }
                 }
             } else {
@@ -734,6 +750,16 @@ impl Gc {
                 dead_size += EST_USERDATA_SIZE;
             }
         }
+
+        // Sort by alloc_seq ascending (oldest first) so that after pushing
+        // to tmudata Vec, the newest is at the end. Vec::pop() returns the
+        // last element, giving us newest-first (LIFO) finalization order
+        // matching PUC-Rio.
+        to_finalize.sort_by(|a, b| {
+            let seq_a = self.userdata.get(*a).map_or(0, Userdata::alloc_seq);
+            let seq_b = self.userdata.get(*b).map_or(0, Userdata::alloc_seq);
+            seq_a.cmp(&seq_b)
+        });
 
         // Second pass: mark them finalized and add to tmudata.
         for r in &to_finalize {
@@ -1341,10 +1367,20 @@ impl LuaState {
 
         // Push gc_fn and userdata, then call.
         // Errors propagate to caller (PUC-Rio 5.1.1 behavior).
+        // Save state so we can restore on error (unlike PUC-Rio's longjmp,
+        // our Result-based errors don't automatically unwind the call stack).
+        let saved_ci = self.ci;
+        let saved_top = self.top;
         let base = self.top;
         self.push(gc_fn);
         self.push(Val::Userdata(ud_ref));
-        self.call_function(base, 0)?;
+        let result = self.call_function(base, 0);
+        if result.is_err() {
+            self.ci = saved_ci;
+            self.base = self.call_stack[saved_ci].base;
+            self.top = saved_top;
+        }
+        result?;
 
         // Restore threshold (only reached on success; on error, PUC-Rio
         // skips this too via longjmp).
@@ -1365,6 +1401,10 @@ impl LuaState {
             && self.gc.gc_state.total_bytes >= self.gc.gc_state.gc_threshold
         {
             self.gc_step_auto()?;
+        }
+        // Check allocation limit (used by T.totalmem for OOM testing).
+        if self.gc.gc_state.total_bytes > self.gc.gc_state.alloc_limit {
+            return Err(LuaError::Memory);
         }
         Ok(())
     }

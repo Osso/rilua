@@ -838,6 +838,7 @@ fn register_table_fn_with_upvalues(
         func,
         upvalues,
         name: name.to_string(),
+        env: None,
     });
     let closure_ref = state.gc.alloc_closure(closure);
 
@@ -898,6 +899,7 @@ pub fn open_package_lib(state: &mut LuaState) -> LuaResult<()> {
             func,
             upvalues: vec![pkg_val],
             name: name.to_string(),
+            env: None,
         });
         let closure_ref = state.gc.alloc_closure(closure);
 
