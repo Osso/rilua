@@ -1800,21 +1800,29 @@ fn lib_open_package(state: &mut LuaState) -> LuaResult<u32> {
 
 /// Gets or sets the memory allocation limit.
 ///
-/// With no args: returns current total allocated bytes.
-/// With one arg: sets the limit and returns the previous total.
+/// With no args: returns (total, numblocks, maxmem).
+/// With one arg: sets the limit and returns 0 values.
+///
+/// Reference: `mem_query` in `ltests.c`.
 pub fn t_totalmem(state: &mut LuaState) -> LuaResult<u32> {
-    let current = state.gc.total_alloc();
-
     if state.base < state.top {
+        // Set mode: set alloc limit, return nothing.
         let limit = match state.stack_get(state.base) {
             Val::Num(n) => n as usize,
             _ => usize::MAX,
         };
         state.gc.set_alloc_limit(limit);
+        Ok(0)
+    } else {
+        // Query mode: return (total, numblocks, maxmem).
+        let total = state.gc.total_alloc();
+        let numblocks = state.gc.count_blocks();
+        let maxmem = state.gc.gc_state.max_bytes;
+        state.push(Val::Num(total as f64));
+        state.push(Val::Num(numblocks as f64));
+        state.push(Val::Num(maxmem as f64));
+        Ok(3)
     }
-
-    state.push(Val::Num(current as f64));
-    Ok(1)
 }
 
 // =========================================================================

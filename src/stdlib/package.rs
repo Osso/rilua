@@ -259,6 +259,13 @@ fn search_path(path: &str, name: &str) -> (Option<String>, String) {
     let name = name.replace('.', LUA_DIRSEP);
     let mut errors = String::new();
 
+    // If the name is an absolute path, try it directly first.
+    // This handles os.tmpname() paths on modern Linux where tmpnam()
+    // returns /tmp/lua_XXX which can't be found through template expansion.
+    if name.starts_with(LUA_DIRSEP) && std::fs::metadata(&name).is_ok() {
+        return (Some(name), errors);
+    }
+
     for template in path.split(LUA_PATHSEP) {
         let template = template.trim();
         if template.is_empty() {
@@ -363,7 +370,7 @@ fn loader_lua(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     let chunk_name = format!("@{filename}");
-    match crate::compiler::compile(&source, &chunk_name) {
+    match crate::compile_or_undump(&source, &chunk_name) {
         Ok(proto) => {
             let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
             crate::patch_string_constants(&mut proto, &mut state.gc);

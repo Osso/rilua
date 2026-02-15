@@ -251,13 +251,20 @@ impl Lua {
     }
 
     /// Stops the garbage collector.
+    ///
+    /// Sets the threshold to `usize::MAX` so automatic GC never triggers.
+    /// A subsequent `gc_collect()` resets the threshold, re-enabling auto-GC
+    /// (matching PUC-Rio's behavior).
     pub fn gc_stop(&mut self) {
-        self.state.gc.gc_state.gc_enabled = false;
+        self.state.gc.gc_state.gc_threshold = usize::MAX;
     }
 
     /// Restarts the garbage collector.
+    ///
+    /// Sets the threshold to `total_bytes` so the next allocation
+    /// triggers a GC step (matching PUC-Rio's behavior).
     pub fn gc_restart(&mut self) {
-        self.state.gc.gc_state.gc_enabled = true;
+        self.state.gc.gc_state.gc_threshold = self.state.gc.gc_state.total_bytes;
     }
 
     /// Performs an incremental GC step. Returns true if the step
@@ -564,9 +571,23 @@ pub fn exec_with_name(source: &[u8], name: &str) -> LuaResult<()> {
 /// chunks or `compile` for source text. Both return an unpatched Proto
 /// (strings in `string_pool`, `Val::Nil` placeholders).
 pub(crate) fn compile_or_undump(source: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
-    if source.starts_with(vm::dump::LUA_SIGNATURE) {
-        vm::undump::undump(source, name)
+    // Skip shebang line before checking for binary signature.
+    // PUC-Rio's luaL_loadfile reads past the leading '#' line, then
+    // checks if the remaining content starts with LUA_SIGNATURE.
+    let data = if source.first() == Some(&b'#') {
+        // Find end of first line.
+        match source.iter().position(|&b| b == b'\n') {
+            Some(pos) => &source[pos + 1..],
+            None => &[], // Only a shebang line, no content.
+        }
     } else {
+        source
+    };
+    if data.starts_with(vm::dump::LUA_SIGNATURE) {
+        vm::undump::undump(data, name)
+    } else {
+        // Pass the original source (with shebang) to the compiler.
+        // The lexer handles shebang stripping internally.
         compiler::compile(source, name)
     }
 }
@@ -689,10 +710,13 @@ mod tests {
         assert!(count > 0);
 
         lua.gc_stop();
-        assert!(!lua.state.gc.gc_state.gc_enabled);
+        assert_eq!(lua.state.gc.gc_state.gc_threshold, usize::MAX);
 
         lua.gc_restart();
-        assert!(lua.state.gc.gc_state.gc_enabled);
+        assert_eq!(
+            lua.state.gc.gc_state.gc_threshold,
+            lua.state.gc.gc_state.total_bytes
+        );
 
         let old_pause = lua.gc_set_pause(300);
         assert_eq!(old_pause, 200); // default

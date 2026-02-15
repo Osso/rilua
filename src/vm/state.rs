@@ -140,7 +140,7 @@ impl Gc {
         // Only track memory if a new string was actually allocated.
         if self.string_arena.len() > old_count {
             let est = super::gc::collector::EST_STRING_SIZE + data.len();
-            self.gc_state.total_bytes += est;
+            self.gc_state.track_alloc(est);
         }
         r
     }
@@ -150,25 +150,28 @@ impl Gc {
         let est = super::gc::collector::EST_TABLE_SIZE
             + table.array_slice().len() * 16
             + table.hash_size() as usize * 32;
-        self.gc_state.total_bytes += est;
+        self.gc_state.track_alloc(est);
         self.tables.alloc(table, self.current_white)
     }
 
     /// Allocates a new closure in the GC arena.
     pub fn alloc_closure(&mut self, closure: Closure) -> GcRef<Closure> {
-        self.gc_state.total_bytes += super::gc::collector::EST_CLOSURE_SIZE;
+        self.gc_state
+            .track_alloc(super::gc::collector::EST_CLOSURE_SIZE);
         self.closures.alloc(closure, self.current_white)
     }
 
     /// Allocates a new upvalue in the GC arena.
     pub fn alloc_upvalue(&mut self, upvalue: Upvalue) -> GcRef<Upvalue> {
-        self.gc_state.total_bytes += super::gc::collector::EST_UPVALUE_SIZE;
+        self.gc_state
+            .track_alloc(super::gc::collector::EST_UPVALUE_SIZE);
         self.upvalues.alloc(upvalue, self.current_white)
     }
 
     /// Allocates a new userdata in the GC arena.
     pub fn alloc_userdata(&mut self, mut userdata: Userdata) -> GcRef<Userdata> {
-        self.gc_state.total_bytes += super::gc::collector::EST_USERDATA_SIZE;
+        self.gc_state
+            .track_alloc(super::gc::collector::EST_USERDATA_SIZE);
         let seq = self.gc_state.ud_alloc_seq;
         self.gc_state.ud_alloc_seq += 1;
         userdata.set_alloc_seq(seq);
@@ -177,8 +180,19 @@ impl Gc {
 
     /// Allocates a new thread (coroutine) in the GC arena.
     pub fn alloc_thread(&mut self, thread: LuaThread) -> GcRef<LuaThread> {
-        self.gc_state.total_bytes += super::gc::collector::EST_THREAD_SIZE;
+        self.gc_state
+            .track_alloc(super::gc::collector::EST_THREAD_SIZE);
         self.threads.alloc(thread, self.current_white)
+    }
+
+    /// Returns the total number of live GC-managed objects across all arenas.
+    pub fn count_blocks(&self) -> usize {
+        self.string_arena.len() as usize
+            + self.tables.len() as usize
+            + self.closures.len() as usize
+            + self.upvalues.len() as usize
+            + self.userdata.len() as usize
+            + self.threads.len() as usize
     }
 
     /// Returns the interned string GcRef for a metamethod name.

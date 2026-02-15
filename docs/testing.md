@@ -9,7 +9,8 @@ compatibility target.**
 
 Current: 1304 tests (596 unit, 431 integration, 277 oracle).
 All oracle test cases pass against PUC-Rio 5.1.1. All 5 layers
-are active. PUC-Rio official test suite: 20 of 23 files pass.
+are active. PUC-Rio official test suite: all 23 files pass via
+the `all.lua` runner.
 
 ## Test Layers
 
@@ -343,25 +344,19 @@ end`) are skipped. `code.lua` and `closure.lua` pass fully with
 
 #### Current Status
 
-20 of 23 files pass (run with `RILUA_TEST_LIB=1`):
+All 23 files pass (run with `RILUA_TEST_LIB=1`), including the
+`all.lua` runner which executes all tests sequentially with aggressive
+GC settings (stepmul=180, pause=190).
 
-**Passing** (19 non-trivial + 1 trivial):
-attrib, calls, checktable, closure, code, constructs, db, errors,
-events, files, gc, literals, locals, math, nextvar, pm, sort, strings,
-vararg, verybig.
+**Passing** (all 23):
+api, attrib, big, calls, checktable, closure, code, constructs, db,
+errors, events, files, gc, literals, locals, main, math, nextvar, pm,
+sort, strings, vararg, verybig.
 
-**Failing** (1 rilua-specific):
-
-| Test | Reason |
-|------|--------|
-| `api.lua` | Requires T.testC mini-interpreter (~500 lines) |
-
-**Always-fail** (2):
-
-| Test | Reason |
-|------|--------|
-| `big.lua` | Yield from main thread gives wrong error + string overflow |
-| `main.lua` | Tests CLI subprocess behavior (requires `os.execute("lua ...")`) |
+The `all.lua` runner wraps big.lua in a coroutine (so yield-from-main
+works) and redefines `dofile` to dump/undump each file (tests bytecode
+serialization). main.lua tests CLI subprocess behavior via
+`os.execute`.
 
 **Compatibility flags**: The PUC-Rio test suite was written with
 default compat options enabled (e.g., `LUA_COMPAT_VARARG` enables

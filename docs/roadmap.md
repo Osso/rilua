@@ -17,7 +17,7 @@ integrated at every step.
 | 6: Coroutines | Done | 1071 total (481 unit + 342 integration + 248 oracle) |
 | 7: GC Collector | Done (7a-7b) | 1080 total (490 unit + 342 integration + 248 oracle) |
 | 8: Public API + CLI | Done (8a-8e) | 1189 total (560 unit + 376 integration + 253 oracle) |
-| 9: Compatibility | In progress (9a-9e; 21/23 PUC-Rio tests pass, 20 non-trivial + 1 trivial; 2 always-fail matching PUC-Rio) | 1304 total (596 unit + 431 integration + 277 oracle) |
+| 9: Compatibility | Done (9a-9e; 23/23 PUC-Rio tests pass via `all.lua` runner) | 1304 total (596 unit + 431 integration + 277 oracle) |
 
 Phase 3 audit found and fixed 9 bugs across the compiler and VM.
 Phase 4 added metatables, metamethods, protected calls, and 15 stdlib
@@ -1518,7 +1518,7 @@ iterative and overlap.
 | Bytecode I/O | `string.dump` + binary chunk loading work | 9b | Done |
 | Error parity | Error messages match PUC-Rio format | 9c | Done |
 | Bug-free codegen | Known compiler/VM bugs fixed | 9d | Done |
-| Compatible | All fixable PUC-Rio test files pass | 9e | Done (21/23 pass; 2 always-fail match PUC-Rio) |
+| Compatible | All PUC-Rio test files pass via `all.lua` | 9e | Done (23/23 pass) |
 
 ## Chunk Summary
 

@@ -201,8 +201,6 @@ pub struct GcState {
     pub gc_stepmul: u32,
     /// Whether the GC is currently running (prevents re-entrant collection).
     pub gc_running: bool,
-    /// Whether automatic GC is enabled.
-    pub gc_enabled: bool,
     /// Current phase of the incremental GC cycle.
     pub phase: GcPhase,
     /// Cursor tracking incremental sweep position.
@@ -226,6 +224,9 @@ pub struct GcState {
     /// Memory allocation limit for OOM testing. `usize::MAX` = no limit.
     /// When `total_bytes` exceeds this, allocations return errors.
     pub alloc_limit: usize,
+    /// Peak memory usage (bytes). Tracks the maximum value of `total_bytes`
+    /// over the lifetime of the state. Used by `T.totalmem()`.
+    pub max_bytes: usize,
 }
 
 impl GcState {
@@ -242,7 +243,6 @@ impl GcState {
             gc_pause: DEFAULT_GC_PAUSE,
             gc_stepmul: DEFAULT_GC_STEPMUL,
             gc_running: false,
-            gc_enabled: true,
             phase: GcPhase::Pause,
             sweep_cursor: SweepCursor {
                 arena_index: 0,
@@ -253,6 +253,17 @@ impl GcState {
             tmudata: Vec::new(),
             ud_alloc_seq: 0,
             alloc_limit: usize::MAX,
+            max_bytes: 0,
+        }
+    }
+
+    /// Tracks an allocation: adds `size` to `total_bytes` and updates
+    /// `max_bytes` if a new peak is reached.
+    #[inline]
+    pub fn track_alloc(&mut self, size: usize) {
+        self.total_bytes += size;
+        if self.total_bytes > self.max_bytes {
+            self.max_bytes = self.total_bytes;
         }
     }
 }
@@ -1127,9 +1138,7 @@ impl Gc {
 
     /// Returns whether the GC threshold has been exceeded.
     pub fn should_collect(&self) -> bool {
-        self.gc_state.gc_enabled
-            && !self.gc_state.gc_running
-            && self.gc_state.total_bytes >= self.gc_state.gc_threshold
+        !self.gc_state.gc_running && self.gc_state.total_bytes >= self.gc_state.gc_threshold
     }
 
     /// Updates the threshold after a collection cycle completes.
@@ -1396,8 +1405,10 @@ impl LuaState {
     /// runs an incremental step with a budget based on the step multiplier.
     #[inline]
     pub fn gc_check(&mut self) -> LuaResult<()> {
-        if self.gc.gc_state.gc_enabled
-            && !self.gc.gc_state.gc_running
+        // PUC-Rio's luaC_checkGC: only checks totalbytes >= GCthreshold.
+        // "stop" sets threshold = MAX to disable auto-GC; a subsequent
+        // full GC resets the threshold via update_threshold().
+        if !self.gc.gc_state.gc_running
             && self.gc.gc_state.total_bytes >= self.gc.gc_state.gc_threshold
         {
             self.gc_step_auto()?;

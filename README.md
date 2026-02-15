@@ -174,20 +174,14 @@ Arena-based incremental mark-sweep with generational indices:
 
 ### PUC-Rio Test Suite Compatibility
 
-20 of 23 official Lua 5.1.1 test files pass (19 non-trivial + 1
-trivial). Passing: attrib, calls, checktable, closure, code,
-constructs, db, errors, events, files, gc, literals, locals, math,
-nextvar, pm, sort, strings, vararg, verybig.
+All 23 official Lua 5.1.1 test files pass, including the `all.lua`
+runner which executes all tests sequentially with aggressive GC settings.
+Tests: api, attrib, big, calls, checktable, closure, code, constructs,
+db, errors, events, files, gc, literals, locals, main, math, nextvar,
+pm, sort, strings, vararg, verybig.
 
-Failing tests and reasons:
+The `all.lua` runner completes in ~17 seconds.
 
-| Test | Reason |
-|------|--------|
-| `api.lua` | Requires T.testC mini-interpreter |
-| `big.lua` | Yield from main thread + string overflow |
-| `main.lua` | Tests CLI subprocess behavior |
-
-Tests are run individually, not through the official `all.lua` runner.
 See `docs/testing.md` for details on running modes and the comparison
 script.
 

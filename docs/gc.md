@@ -122,7 +122,6 @@ pub struct GcHeap {
     threshold: usize,
     gc_pause: u32,      // Default: 200
     gc_step_mul: u32,   // Default: 200
-    enabled: bool,
 }
 
 enum GcState {
@@ -415,8 +414,8 @@ Lua 5.1.1 weak table semantics:
 
 | Option | Behavior |
 |--------|----------|
-| `"stop"` | Disable GC. PUC-Rio sets `GCthreshold = MAX_LUMEM`; rilua sets `enabled = false`. Returns 0. |
-| `"restart"` | Re-enable GC. PUC-Rio sets `GCthreshold = totalbytes`; rilua sets `enabled = true`. Returns 0. |
+| `"stop"` | Disable auto-GC by setting `threshold = usize::MAX`. A subsequent full GC resets the threshold, re-enabling auto-GC. Matches PUC-Rio's `GCthreshold = MAX_LUMEM`. Returns 0. |
+| `"restart"` | Re-enable auto-GC by setting `threshold = total_bytes`, triggering on the next allocation. Matches PUC-Rio's `GCthreshold = totalbytes`. Returns 0. |
 | `"collect"` | Run a full mark-sweep cycle. Returns 0. |
 | `"count"` | Return memory in use in KB (float). PUC-Rio computes `(totalbytes >> 10) + (totalbytes & 0x3ff) / 1024.0`. |
 | `"step"` | Perform incremental work. Return true if cycle completed. |

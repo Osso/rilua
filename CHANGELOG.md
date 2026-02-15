@@ -75,8 +75,7 @@ and this project adheres to
   userdata reference tracking (ref/unref/getref), upvalue access,
   OOM memory limit simulation (totalmem), and string substitution (gsub)
 - 1304 tests: 596 unit + 431 integration + 277 oracle comparison
-- PUC-Rio test suite: 21/23 pass (20 non-trivial + 1 trivial; 2
-  always-fail matching PUC-Rio on 64-bit Linux)
+- PUC-Rio test suite: 23/23 pass via `all.lua` runner
 
 ### Changed
 

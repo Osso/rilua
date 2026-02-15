@@ -1,10 +1,11 @@
 # rilua Compatibility and Performance Evaluation
 
 Initial: February 12, 2026
-Updated: February 15, 2026 (Phase 9e: T.testC mini-interpreter,
-T module expansion to 24 functions, OOM memory limit simulation,
-GC finalization order, GC nil-valued hash key traversal fix;
-21/23 PUC-Rio tests pass)
+Updated: February 15, 2026 (Phase 9e complete: T.testC
+mini-interpreter, T module expansion to 24 functions, OOM memory limit
+simulation, GC finalization order, GC nil-valued hash key traversal
+fix, GC stop/restart threshold fix, shebang+binary loading fix,
+absolute path require fix; 23/23 PUC-Rio tests pass via `all.lua`)
 Branch: `rewrite/v2`
 rilua version: 0.1.0 (Phase 9e)
 Reference: PUC-Rio Lua 5.1.1 (official tarball at `./lua-5.1.1/`)
@@ -13,10 +14,8 @@ Platform: AMD Ryzen 7 8840U, Linux 6.18.8, Fedora 43
 ## Executive Summary
 
 Against the PUC-Rio official test suite (23 files in
-`./lua-5.1-tests/`), rilua passes 21 of 23 tests (20 non-trivial + 1
-trivially passing). The 2 failures (big.lua, main.lua) fail identically
-in PUC-Rio on 64-bit Linux. All fixable test failures have been
-resolved.
+`./lua-5.1-tests/`), rilua passes all 23 tests. The `all.lua` runner
+completes the full suite in ~17 seconds.
 
 Performance ranges from 0.92x to 2.18x vs PUC-Rio on most benchmarks,
 with one outlier (string operations at 9.33x). Memory usage is 1.15x
@@ -49,7 +48,7 @@ relative `dofile()` calls).
 |----------------|------------|----------|-----------------------------------|
 | **api**        | **PASS**   | PASS     |                                   |
 | **attrib**     | **PASS**   | PASS     |                                   |
-| big            | FAIL:359   | FAIL     | Yield from main thread + overflow |
+| **big**        | **PASS**   | FAIL     | Passes via `all.lua` coroutine wrapper |
 | **calls**      | **PASS**   | PASS     |                                   |
 | **checktable** | **PASS***  | PASS     | Trivial (defines utilities only)  |
 | **closure**    | **PASS**   | PASS     |                                   |
@@ -62,7 +61,7 @@ relative `dofile()` calls).
 | **gc**         | **PASS**   | PASS     |                                   |
 | **literals**   | **PASS**   | PASS     |                                   |
 | **locals**     | **PASS**   | PASS     |                                   |
-| main           | FAIL       | FAIL     | Both fail (CLI subprocess infra)  |
+| **main**       | **PASS**   | FAIL     | Fixed: shebang+binary loading, absolute path require |
 | **math**       | **PASS**   | PASS     |                                   |
 | **nextvar**    | **PASS**   | PASS     |                                   |
 | **pm**         | **PASS**   | PASS     |                                   |
@@ -78,10 +77,9 @@ assertions).
 
 | Category               | Count | Tests |
 |------------------------|-------|-------|
-| Pass                   | 20    | api, attrib, calls, closure, code, constructs, db, errors, events, files, gc, literals, locals, math, nextvar, pm, sort, strings, vararg, verybig |
+| Pass                   | 22    | api, attrib, big, calls, closure, code, constructs, db, errors, events, files, gc, literals, locals, main, math, nextvar, pm, sort, strings, vararg, verybig |
 | Pass (trivial)         | 1     | checktable |
-| Fail (both)            | 2     | big (yield + overflow), main (CLI subprocess) |
-| **Total**              | **23** | **21 pass / 2 both-fail** |
+| **Total**              | **23** | **23 pass** |
 
 ### Progress Since Initial Evaluation (Feb 12)
 
@@ -130,27 +128,28 @@ Bugs #15-#28 were discovered during the initial evaluation and Phase
 | 27 | Syntax nesting limits | FIXED | errors |
 | 28 | Parser-level local/upvalue limits | FIXED | errors |
 
-### Remaining Failures (2 tests, both fail in PUC-Rio)
+### All Tests Pass
 
-All previously reported blockers have been fixed. The 2 remaining
-failures fail identically in PUC-Rio on 64-bit Linux.
+All previously reported blockers have been fixed. Tests that previously
+failed standalone (big.lua, main.lua) now pass through the `all.lua`
+runner.
 
-| Test | Line | Root Cause | Fixable? |
-|------|------|------------|----------|
-| big | 11 | String overflow: rilua detects it, PUC-Rio 64-bit does not | N/A |
-| big | 359 | Yield from main thread, illegal by spec | No |
-| main | 42+ | `os.tmpname()` path incompatibility, PUC-Rio fails identically | No (platform) |
+**big.lua**: Passes via `all.lua` which wraps big.lua in a coroutine,
+making the yield-from-main-thread test work. Standalone, big.lua still
+fails at line 359 (yield from main thread) -- this matches PUC-Rio on
+32-bit.
 
-**big.lua**: rilua detects string concat overflow at line 11 (passes),
-then reaches line 359 where `coroutine.yield` from the main thread
-correctly errors with "cannot yield across metamethod/C-call boundary".
-PUC-Rio on 32-bit also fails at line 359 with the same error. On
-64-bit, PUC-Rio fails at line 11 first (no overflow detection for
-size_t max ~18 EB).
+**main.lua**: Fixed by three changes: (1) `compile_or_undump` now
+strips shebang lines before checking for binary signature;
+(2) `dofile` and `loader_lua` use `compile_or_undump` instead of
+calling the compiler directly; (3) `search_path` handles absolute
+paths from `os.tmpname()`.
 
-**main.lua**: Tests CLI subprocess invocations. `os.tmpname()` returns
-`/tmp/`-prefixed paths incompatible with `require()` search paths.
-PUC-Rio+ltests fails identically on modern Linux.
+**GC stop/restart**: Fixed `collectgarbage("stop")` to use
+threshold-based disabling (matching PUC-Rio's `GCthreshold = MAX_LUMEM`)
+instead of a boolean flag. A subsequent full GC cycle resets the
+threshold, re-enabling auto-GC. This was the root cause of closure.lua
+failing after api.lua in the `all.lua` run.
 
 **T module** (api.lua): `api.lua` requires T module functions that are
 internal to PUC-Rio's test build (compiled with `ltests.c`). `T.testC`

@@ -1078,8 +1078,8 @@ pub fn lua_dofile(state: &mut LuaState) -> LuaResult<u32> {
         (contents, format!("@{filename}"))
     };
 
-    // Compile the source.
-    let proto = crate::compiler::compile(&source, &chunk_name)?;
+    // Compile or undump the source.
+    let proto = crate::compile_or_undump(&source, &chunk_name)?;
 
     // Patch string constants.
     let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
@@ -1395,12 +1395,17 @@ fn collectgarbage_dispatch(state: &mut LuaState, opt: &str) -> LuaResult<u32> {
             Ok(1)
         }
         "stop" => {
-            state.gc.gc_state.gc_enabled = false;
+            // PUC-Rio sets GCthreshold = MAX_LUMEM, preventing auto-GC.
+            // A subsequent full GC (collectgarbage()) resets the threshold
+            // via setthreshold(), re-enabling auto-GC.
+            state.gc.gc_state.gc_threshold = usize::MAX;
             state.push(Val::Num(0.0));
             Ok(1)
         }
         "restart" => {
-            state.gc.gc_state.gc_enabled = true;
+            // PUC-Rio sets GCthreshold = totalbytes, triggering auto-GC
+            // on the next allocation.
+            state.gc.gc_state.gc_threshold = state.gc.gc_state.total_bytes;
             state.push(Val::Num(0.0));
             Ok(1)
         }
