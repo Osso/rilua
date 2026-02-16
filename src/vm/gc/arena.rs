@@ -179,6 +179,7 @@ impl<T> Arena<T> {
     ///
     /// Returns `None` if the generation does not match (stale ref)
     /// or the index is out of bounds.
+    #[inline]
     pub fn get(&self, r: GcRef<T>) -> Option<&T> {
         let entry = self.entries.get(r.index as usize)?;
         if entry.generation != r.generation {
@@ -191,6 +192,7 @@ impl<T> Arena<T> {
     }
 
     /// Returns a mutable reference to the value if the `GcRef` is valid.
+    #[inline]
     pub fn get_mut(&mut self, r: GcRef<T>) -> Option<&mut T> {
         let entry = self.entries.get_mut(r.index as usize)?;
         if entry.generation != r.generation {
@@ -238,6 +240,7 @@ impl<T> Arena<T> {
     }
 
     /// Returns the GC color of the object, or `None` if the ref is stale.
+    #[inline]
     pub fn color(&self, r: GcRef<T>) -> Option<Color> {
         let entry = self.entries.get(r.index as usize)?;
         if entry.generation != r.generation {
@@ -250,6 +253,7 @@ impl<T> Arena<T> {
     }
 
     /// Sets the GC color of the object. Returns `true` if successful.
+    #[inline]
     pub fn set_color(&mut self, r: GcRef<T>, new_color: Color) -> bool {
         let Some(entry) = self.entries.get_mut(r.index as usize) else {
             return false;
@@ -301,27 +305,23 @@ impl<T> Arena<T> {
     pub fn sweep(&mut self, dead_color: Color, new_color: Color) -> u32 {
         let mut freed = 0u32;
         for i in 0..self.entries.len() {
-            let is_dead = matches!(
-                &self.entries[i].state,
-                EntryState::Occupied { color, .. } if *color == dead_color
-            );
-
-            if is_dead {
-                let entry = &mut self.entries[i];
-                // Replace the occupied state with Free, dropping the value.
-                let _old = std::mem::replace(
-                    &mut entry.state,
-                    EntryState::Free {
+            match self.entries[i].state {
+                EntryState::Occupied { color, .. } if color == dead_color => {
+                    let entry = &mut self.entries[i];
+                    entry.state = EntryState::Free {
                         next_free: self.free_head,
-                    },
-                );
-                entry.generation = entry.generation.wrapping_add(1);
-                self.free_head = Some(i as u32);
-                self.len -= 1;
-                freed += 1;
-            } else if let EntryState::Occupied { color, .. } = &mut self.entries[i].state {
-                // Live object: reset to new white for next cycle.
-                *color = new_color;
+                    };
+                    entry.generation = entry.generation.wrapping_add(1);
+                    self.free_head = Some(i as u32);
+                    self.len -= 1;
+                    freed += 1;
+                }
+                EntryState::Occupied { .. } => {
+                    if let EntryState::Occupied { color, .. } = &mut self.entries[i].state {
+                        *color = new_color;
+                    }
+                }
+                EntryState::Free { .. } => {}
             }
         }
         freed
@@ -336,6 +336,7 @@ impl<T> Arena<T> {
     /// - `is_done`: `true` if the entire arena has been swept
     ///
     /// Used by the incremental GC to spread sweep work across multiple steps.
+    #[inline]
     pub fn sweep_partial(
         &mut self,
         dead_color: Color,
@@ -352,15 +353,12 @@ impl<T> Arena<T> {
         // skipped at near-zero cost, matching PUC-Rio's linked-list sweep
         // which never visits already-freed objects.
         while i < total && occupied_seen < max_count {
-            match &self.entries[i as usize].state {
-                EntryState::Occupied { color, .. } if *color == dead_color => {
+            match self.entries[i as usize].state {
+                EntryState::Occupied { color, .. } if color == dead_color => {
                     let entry = &mut self.entries[i as usize];
-                    let _old = std::mem::replace(
-                        &mut entry.state,
-                        EntryState::Free {
-                            next_free: self.free_head,
-                        },
-                    );
+                    entry.state = EntryState::Free {
+                        next_free: self.free_head,
+                    };
                     entry.generation = entry.generation.wrapping_add(1);
                     self.free_head = Some(i);
                     self.len -= 1;
@@ -374,9 +372,7 @@ impl<T> Arena<T> {
                     }
                     occupied_seen += 1;
                 }
-                EntryState::Free { .. } => {
-                    // Skip free entries -- no cost.
-                }
+                EntryState::Free { .. } => {}
             }
             i += 1;
         }

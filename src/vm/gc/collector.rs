@@ -150,8 +150,10 @@ const INITIAL_GC_THRESHOLD: usize = 64 * 1024;
 pub const GCSTEPSIZE: usize = 1024;
 
 /// Maximum number of arena slots to sweep per incremental step.
-/// Reference: `GCSWEEPMAX` in `lgc.c`.
-const GCSWEEPMAX: u32 = 40;
+/// PUC-Rio uses 40, but our per-slot cost is higher (Rust bounds checking +
+/// enum matching vs C pointer chasing). Larger batches amortize the fixed
+/// overhead of `gc_singlestep` and `sweep_other_step` dispatch.
+const GCSWEEPMAX: u32 = 80;
 
 /// Cost (work units) of sweeping one batch of slots.
 /// Reference: `GCSWEEPCOST` in `lgc.c`.
@@ -280,6 +282,7 @@ impl Default for GcState {
 
 impl Gc {
     /// Marks a Val if it is a collectable (GC-managed) type.
+    #[inline]
     pub fn mark_value(&mut self, val: Val) {
         match val {
             Val::Str(r) => self.mark_string(r),
@@ -292,6 +295,7 @@ impl Gc {
     }
 
     /// Marks a string (directly to black -- strings have no children).
+    #[inline]
     fn mark_string(&mut self, r: GcRef<LuaString>) {
         if let Some(color) = self.string_arena.color(r)
             && color.is_white()
@@ -301,6 +305,7 @@ impl Gc {
     }
 
     /// Marks a table: white -> gray, added to gray list for traversal.
+    #[inline]
     fn mark_table(&mut self, r: GcRef<Table>) {
         if let Some(color) = self.tables.color(r)
             && color.is_white()
@@ -311,6 +316,7 @@ impl Gc {
     }
 
     /// Marks a closure: white -> gray, added to gray list.
+    #[inline]
     fn mark_closure(&mut self, r: GcRef<Closure>) {
         if let Some(color) = self.closures.color(r)
             && color.is_white()
@@ -321,6 +327,7 @@ impl Gc {
     }
 
     /// Marks a thread: white -> gray, added to gray list.
+    #[inline]
     fn mark_thread(&mut self, r: GcRef<LuaThread>) {
         if let Some(color) = self.threads.color(r)
             && color.is_white()
@@ -353,6 +360,7 @@ impl Gc {
     }
 
     /// Marks an upvalue: if closed, marks the stored value.
+    #[inline]
     fn mark_upvalue(&mut self, r: GcRef<Upvalue>) {
         if let Some(color) = self.upvalues.color(r)
             && color.is_white()
@@ -576,18 +584,18 @@ impl Gc {
 
     /// Traverses a gray thread: marks stack values and open upvalues.
     /// Threads are moved to `grayagain` for atomic re-traversal.
+    ///
+    /// Uses indexed access to avoid allocating temporary Vecs for the
+    /// thread's stack and upvalue lists. Each Val/GcRef is Copy, so we
+    /// extract one at a time via re-borrow per iteration.
     fn traverse_thread(&mut self, r: GcRef<LuaThread>) {
-        let (stack_vals, open_upvals, suspended_upvals, thread_global, hook_func) = {
+        // Extract scalar metadata in one borrow.
+        let (stack_top, open_uv_len, suspended_uv_len, thread_global, hook_func) = {
             if let Some(thread) = self.threads.get(r) {
-                let top = thread.top.min(thread.stack.len());
-                let stack: Vec<Val> = thread.stack[..top].to_vec();
-                let upvals: Vec<GcRef<Upvalue>> = thread.open_upvalues.clone();
-                let suspended: Vec<GcRef<Upvalue>> =
-                    thread.suspended_upvals.iter().map(|(r, _)| *r).collect();
                 (
-                    stack,
-                    upvals,
-                    suspended,
+                    thread.top.min(thread.stack.len()),
+                    thread.open_upvalues.len(),
+                    thread.suspended_upvals.len(),
                     thread.global,
                     thread.hook.hook_func,
                 )
@@ -599,16 +607,30 @@ impl Gc {
         self.threads.set_color(r, Color::Black);
 
         self.mark_table(thread_global);
-        // Mark the thread's debug hook function.
         self.mark_value(hook_func);
-        for val in &stack_vals {
-            self.mark_value(*val);
+
+        // Mark stack values by index (no Vec allocation).
+        for i in 0..stack_top {
+            let val = self.threads.get(r).map(|t| t.stack[i]);
+            if let Some(val) = val {
+                self.mark_value(val);
+            }
         }
-        for uv_ref in &open_upvals {
-            self.mark_upvalue(*uv_ref);
+
+        // Mark open upvalues by index.
+        for i in 0..open_uv_len {
+            let uv_ref = self.threads.get(r).map(|t| t.open_upvalues[i]);
+            if let Some(uv_ref) = uv_ref {
+                self.mark_upvalue(uv_ref);
+            }
         }
-        for uv_ref in &suspended_upvals {
-            self.mark_upvalue(*uv_ref);
+
+        // Mark suspended upvalues by index.
+        for i in 0..suspended_uv_len {
+            let uv_ref = self.threads.get(r).map(|t| t.suspended_upvals[i].0);
+            if let Some(uv_ref) = uv_ref {
+                self.mark_upvalue(uv_ref);
+            }
         }
 
         self.gc_state.grayagain.push(GrayItem::Thread(r));
@@ -699,28 +721,39 @@ impl Gc {
         for item in grayagain {
             match item {
                 GrayItem::Thread(r) => {
-                    let (stack_vals, open_upvals, suspended_upvals, thread_global) = {
+                    // Extract scalar metadata, then use indexed access
+                    // (same pattern as traverse_thread).
+                    let (stack_top, open_uv_len, suspended_uv_len, thread_global) = {
                         if let Some(thread) = self.threads.get(r) {
-                            let top = thread.top.min(thread.stack.len());
-                            let stack: Vec<Val> = thread.stack[..top].to_vec();
-                            let upvals: Vec<GcRef<Upvalue>> = thread.open_upvalues.clone();
-                            let suspended: Vec<GcRef<Upvalue>> =
-                                thread.suspended_upvals.iter().map(|(r, _)| *r).collect();
-                            (stack, upvals, suspended, thread.global)
+                            (
+                                thread.top.min(thread.stack.len()),
+                                thread.open_upvalues.len(),
+                                thread.suspended_upvals.len(),
+                                thread.global,
+                            )
                         } else {
                             continue;
                         }
                     };
                     self.threads.set_color(r, Color::Black);
                     self.mark_table(thread_global);
-                    for val in &stack_vals {
-                        self.mark_value(*val);
+                    for i in 0..stack_top {
+                        let val = self.threads.get(r).map(|t| t.stack[i]);
+                        if let Some(val) = val {
+                            self.mark_value(val);
+                        }
                     }
-                    for uv_ref in &open_upvals {
-                        self.mark_upvalue(*uv_ref);
+                    for i in 0..open_uv_len {
+                        let uv_ref = self.threads.get(r).map(|t| t.open_upvalues[i]);
+                        if let Some(uv_ref) = uv_ref {
+                            self.mark_upvalue(uv_ref);
+                        }
                     }
-                    for uv_ref in &suspended_upvals {
-                        self.mark_upvalue(*uv_ref);
+                    for i in 0..suspended_uv_len {
+                        let uv_ref = self.threads.get(r).map(|t| t.suspended_upvals[i].0);
+                        if let Some(uv_ref) = uv_ref {
+                            self.mark_upvalue(uv_ref);
+                        }
                     }
                 }
                 GrayItem::Table(r) => {
