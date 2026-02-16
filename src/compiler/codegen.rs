@@ -5,6 +5,7 @@
 //! `ExprContext` (maps to PUC-Rio's `expdesc`) tracks expression state
 //! during code generation, and `BlockContext` tracks lexical scopes.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{LuaError, LuaResult, SyntaxError};
@@ -169,6 +170,18 @@ struct BlockContext {
 // FuncState
 // ---------------------------------------------------------------------------
 
+/// Key for constant pool deduplication hash map.
+/// Uses bitwise equality for numbers (NaN != NaN, +0.0 != -0.0).
+#[derive(Hash, Eq, PartialEq)]
+enum ConstantKey {
+    /// Number constant keyed by f64 bit pattern.
+    Num(u64),
+    /// Boolean constant.
+    Bool(bool),
+    /// String constant keyed by raw bytes.
+    Str(Vec<u8>),
+}
+
 /// Per-function compilation state.
 ///
 /// Maps to PUC-Rio's `FuncState`. One `FuncState` exists per function
@@ -195,6 +208,10 @@ pub(crate) struct FuncState {
     /// separately because `Val::Nil` is also used as a placeholder for
     /// unresolved string constants in the constant pool.
     nil_k: Option<u32>,
+    /// O(1) constant pool dedup index. Maps constant values to their
+    /// index in `proto.constants`. Mirrors PUC-Rio's `fs->h` hash table
+    /// (`addk` in `lcode.c:224`).
+    constant_index: HashMap<ConstantKey, u32>,
 }
 
 impl FuncState {
@@ -209,6 +226,7 @@ impl FuncState {
             jpc: NO_JUMP,
             last_target: -1,
             nil_k: None,
+            constant_index: HashMap::new(),
         }
     }
 
@@ -521,17 +539,31 @@ impl Compiler {
 
     // -- Constant pool --
 
-    /// Adds a value to the constant pool, deduplicating.
+    /// Adds a value to the constant pool, deduplicating via hash map.
     /// Returns the constant index.
+    ///
+    /// Uses `constant_index` for O(1) lookup, mirroring PUC-Rio's `addk`
+    /// which uses `luaH_set` on `fs->h` (`lcode.c:224`).
     pub(crate) fn add_constant(&mut self, val: Val) -> LuaResult<u32> {
-        let fs = self.fs_mut();
-        // Linear search for dedup (PUC-Rio uses a hash table, but linear
-        // is fine for the constant pool sizes we'll encounter)
-        for (i, existing) in fs.proto.constants.iter().enumerate() {
-            if constants_equal(existing, &val) {
+        let key = match val {
+            Val::Num(n) => ConstantKey::Num(n.to_bits()),
+            Val::Bool(b) => ConstantKey::Bool(b),
+            // Nil placeholders are never deduped here; nil_constant()
+            // handles its own caching.
+            _ => {
+                let fs = self.fs_mut();
+                let idx = fs.proto.constants.len();
+                if idx > MAXARG_BX as usize {
+                    return Err(self.syntax_error("constant table overflow"));
+                }
+                fs.proto.constants.push(val);
                 #[allow(clippy::cast_possible_truncation)]
-                return Ok(i as u32);
+                return Ok(idx as u32);
             }
+        };
+        let fs = self.fs_mut();
+        if let Some(&idx) = fs.constant_index.get(&key) {
+            return Ok(idx);
         }
         let idx = fs.proto.constants.len();
         if idx > MAXARG_BX as usize {
@@ -539,27 +571,22 @@ impl Compiler {
         }
         fs.proto.constants.push(val);
         #[allow(clippy::cast_possible_truncation)]
-        Ok(idx as u32)
+        let idx = idx as u32;
+        fs.constant_index.insert(key, idx);
+        Ok(idx)
     }
 
     /// Adds a string constant to the pool. Returns the constant index.
     ///
-    /// Deduplicates by comparing raw byte content in `proto.string_pool`.
+    /// Deduplicates via hash map lookup on raw byte content.
     /// Stores `Val::Nil` as a placeholder in the constant pool; the real
     /// `Val::Str` is patched in by `patch_string_constants` before execution.
     pub(crate) fn string_constant(&mut self, s: &[u8]) -> LuaResult<u32> {
-        let fs = self.fs();
-
-        // Check existing string constants for byte-equal match.
-        for &(idx, ref existing) in &fs.proto.string_pool {
-            if existing == s {
-                return Ok(idx);
-            }
-        }
-
-        // Not found: push a new Val::Nil placeholder directly (bypass
-        // add_constant to avoid nil-vs-nil dedup).
+        let key = ConstantKey::Str(s.to_vec());
         let fs = self.fs_mut();
+        if let Some(&idx) = fs.constant_index.get(&key) {
+            return Ok(idx);
+        }
         let idx = fs.proto.constants.len();
         if idx > MAXARG_BX as usize {
             return Err(self.syntax_error("constant table overflow"));
@@ -568,6 +595,7 @@ impl Compiler {
         #[allow(clippy::cast_possible_truncation)]
         let idx = idx as u32;
         fs.proto.string_pool.push((idx, s.to_vec()));
+        fs.constant_index.insert(key, idx);
         Ok(idx)
     }
 
@@ -1687,24 +1715,6 @@ impl Compiler {
         // Copy upvalue names to proto for debug info.
         fs.proto.upvalue_names = fs.upvalues.iter().map(|uv| uv.name.clone()).collect();
         fs.proto
-    }
-}
-
-/// Checks if two Val constants are equal for deduplication.
-fn constants_equal(a: &Val, b: &Val) -> bool {
-    #[allow(clippy::match_same_arms)]
-    match (a, b) {
-        // Val::Nil is used as a placeholder for unresolved string constants
-        // (see `string_constant`). Never dedup nil entries: a real nil
-        // constant must not share an index with a string placeholder.
-        (Val::Nil, Val::Nil) => false,
-        (Val::Bool(x), Val::Bool(y)) => x == y,
-        (Val::Num(x), Val::Num(y)) => {
-            // For constant dedup, we need bitwise equality (NaN != NaN, but
-            // +0.0 and -0.0 should be separate). Use to_bits for exact match.
-            x.to_bits() == y.to_bits()
-        }
-        _ => false,
     }
 }
 
