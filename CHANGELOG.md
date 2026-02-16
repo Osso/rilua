@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/wowemulation-dev/rilua/compare/v0.1.3...v0.1.4) - 2026-02-16
+
+### Performance
+
+- arena sweep cache optimization (phase 4)
+
 ## [0.1.3](https://github.com/wowemulation-dev/rilua/compare/v0.1.2...v0.1.3) - 2026-02-16
 
 ### Performance
