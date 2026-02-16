@@ -8,6 +8,13 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/wowemulation-dev/rilua/compare/v0.1.2...v0.1.3) - 2026-02-16
+
+### Performance
+
+- GC and traceback optimizations (phase 3)
+- hash-based constant pool deduplication in compiler
+
 ## [0.1.2](https://github.com/wowemulation-dev/rilua/compare/v0.1.1...v0.1.2) - 2026-02-15
 
 ### Performance
