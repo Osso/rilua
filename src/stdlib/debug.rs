@@ -117,7 +117,7 @@ fn resolve_stack_level_raw(
     stack: &[Val],
     call_stack: &[CallInfo],
     ci: usize,
-    gc: &Gc,
+    _gc: &Gc,
     level: usize,
 ) -> Option<StackLevel> {
     let mut ci_idx = ci;
@@ -129,16 +129,10 @@ fn resolve_stack_level_raw(
     //       if (f_isLua(ci)) level -= ci->tailcalls;
     //   }
     // Body executes with current `ci`, then ci is decremented.
+    // Uses the cached `is_lua` flag instead of arena lookups.
     while remaining > 0 && ci_idx > 0 {
         remaining -= 1;
-        let func_slot = call_stack[ci_idx].func;
-        if func_slot < stack.len()
-            && let Val::Function(r) = stack[func_slot]
-            && gc
-                .closures
-                .get(r)
-                .is_some_and(|c| matches!(c, Closure::Lua(_)))
-        {
+        if call_stack[ci_idx].is_lua {
             remaining -= i64::from(call_stack[ci_idx].tail_calls);
         }
         ci_idx -= 1;

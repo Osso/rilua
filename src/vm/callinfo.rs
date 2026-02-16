@@ -47,6 +47,11 @@ pub struct CallInfo {
     /// Count of tail calls optimized under this frame. Used by
     /// debug hooks to report elided frames.
     pub tail_calls: i32,
+
+    /// Whether this frame holds a Lua closure (vs Rust or sentinel).
+    /// Cached at frame creation to avoid arena lookups in hot paths
+    /// like `resolve_stack_level_raw`.
+    pub is_lua: bool,
 }
 
 impl CallInfo {
@@ -63,6 +68,7 @@ impl CallInfo {
             saved_pc: 0,
             num_results,
             tail_calls: 0,
+            is_lua: false,
         }
     }
 }

@@ -537,7 +537,8 @@ impl LuaState {
                 self.top = ci_top;
 
                 // Push new CallInfo.
-                let ci = CallInfo::new(func_idx, new_base, ci_top, num_results);
+                let mut ci = CallInfo::new(func_idx, new_base, ci_top, num_results);
+                ci.is_lua = true;
                 self.push_ci(ci);
                 self.base = new_base;
 
