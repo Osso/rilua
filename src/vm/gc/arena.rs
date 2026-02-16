@@ -6,12 +6,49 @@
 //!
 //! This prevents use-after-free without `unsafe` code: a stale `GcRef`
 //! has a generation mismatch and `get()` returns `None`.
+//!
+//! GC colors are stored in a separate parallel `Vec<u8>` for cache-friendly
+//! sweep. The sweep loop iterates the compact color array (1 byte per slot,
+//! ~64 per cache line) and only touches the full `Entry<T>` when freeing
+//! dead objects.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use super::Color;
+
+// ---------------------------------------------------------------------------
+// Color byte encoding
+// ---------------------------------------------------------------------------
+
+/// Color stored as `u8` for cache-friendly sweep iteration.
+const COLOR_FREE: u8 = 0;
+const COLOR_WHITE0: u8 = 1;
+const COLOR_WHITE1: u8 = 2;
+const COLOR_GRAY: u8 = 3;
+const COLOR_BLACK: u8 = 4;
+
+#[inline]
+fn color_to_byte(c: Color) -> u8 {
+    match c {
+        Color::White0 => COLOR_WHITE0,
+        Color::White1 => COLOR_WHITE1,
+        Color::Gray => COLOR_GRAY,
+        Color::Black => COLOR_BLACK,
+    }
+}
+
+#[inline]
+fn byte_to_color(b: u8) -> Option<Color> {
+    match b {
+        COLOR_WHITE0 => Some(Color::White0),
+        COLOR_WHITE1 => Some(Color::White1),
+        COLOR_GRAY => Some(Color::Gray),
+        COLOR_BLACK => Some(Color::Black),
+        _ => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GcRef<T>
@@ -82,7 +119,7 @@ impl<T> GcRef<T> {
 
 /// Slot state: either occupied with a value or on the free list.
 enum EntryState<T> {
-    Occupied { value: T, color: Color },
+    Occupied { value: T },
     Free { next_free: Option<u32> },
 }
 
@@ -103,8 +140,16 @@ struct Entry<T> {
 /// Freed slots are recycled through a free list. Each slot tracks a
 /// generation counter that increments on free, invalidating stale
 /// references.
+///
+/// GC colors are stored in a parallel `Vec<u8>` (`colors`) that is
+/// always the same length as `entries`. This layout allows the sweep
+/// to iterate a compact byte array without loading full `Entry<T>`
+/// values for surviving objects.
 pub struct Arena<T> {
     entries: Vec<Entry<T>>,
+    /// Parallel color array. `colors[i]` holds the color byte for
+    /// `entries[i]`. `COLOR_FREE` (0) for free slots.
+    colors: Vec<u8>,
     free_head: Option<u32>,
     len: u32,
 }
@@ -114,6 +159,7 @@ impl<T> Arena<T> {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            colors: Vec::new(),
             free_head: None,
             len: 0,
         }
@@ -143,6 +189,7 @@ impl<T> Arena<T> {
     /// Returns a `GcRef` that is valid until the slot is freed.
     pub fn alloc(&mut self, value: T, color: Color) -> GcRef<T> {
         self.len += 1;
+        let color_byte = color_to_byte(color);
 
         if let Some(free_idx) = self.free_head {
             let entry = &mut self.entries[free_idx as usize];
@@ -153,7 +200,8 @@ impl<T> Arena<T> {
             }
 
             let generation = entry.generation;
-            entry.state = EntryState::Occupied { value, color };
+            entry.state = EntryState::Occupied { value };
+            self.colors[free_idx as usize] = color_byte;
 
             GcRef {
                 index: free_idx,
@@ -164,8 +212,9 @@ impl<T> Arena<T> {
             let index = self.entries.len() as u32;
             self.entries.push(Entry {
                 generation: 0,
-                state: EntryState::Occupied { value, color },
+                state: EntryState::Occupied { value },
             });
+            self.colors.push(color_byte);
 
             GcRef {
                 index,
@@ -186,7 +235,7 @@ impl<T> Arena<T> {
             return None;
         }
         match &entry.state {
-            EntryState::Occupied { value, .. } => Some(value),
+            EntryState::Occupied { value } => Some(value),
             EntryState::Free { .. } => None,
         }
     }
@@ -199,7 +248,7 @@ impl<T> Arena<T> {
             return None;
         }
         match &mut entry.state {
-            EntryState::Occupied { value, .. } => Some(value),
+            EntryState::Occupied { value } => Some(value),
             EntryState::Free { .. } => None,
         }
     }
@@ -226,9 +275,10 @@ impl<T> Arena<T> {
         entry.generation = entry.generation.wrapping_add(1);
         self.free_head = Some(r.index);
         self.len -= 1;
+        self.colors[r.index as usize] = COLOR_FREE;
 
         match old_state {
-            EntryState::Occupied { value, .. } => Some(value),
+            EntryState::Occupied { value } => Some(value),
             EntryState::Free { .. } => None,
         }
     }
@@ -246,37 +296,33 @@ impl<T> Arena<T> {
         if entry.generation != r.generation {
             return None;
         }
-        match &entry.state {
-            EntryState::Occupied { color, .. } => Some(*color),
-            EntryState::Free { .. } => None,
-        }
+        byte_to_color(self.colors[r.index as usize])
     }
 
     /// Sets the GC color of the object. Returns `true` if successful.
     #[inline]
     pub fn set_color(&mut self, r: GcRef<T>, new_color: Color) -> bool {
-        let Some(entry) = self.entries.get_mut(r.index as usize) else {
+        let Some(entry) = self.entries.get(r.index as usize) else {
             return false;
         };
         if entry.generation != r.generation {
             return false;
         }
-        match &mut entry.state {
-            EntryState::Occupied { color, .. } => {
-                *color = new_color;
-                true
-            }
-            EntryState::Free { .. } => false,
+        if self.colors[r.index as usize] == COLOR_FREE {
+            return false;
         }
+        self.colors[r.index as usize] = color_to_byte(new_color);
+        true
     }
 
     /// Iterates over all occupied entries.
     ///
     /// Yields `(GcRef<T>, &T, Color)` for each live object. Used by the
-    /// GC sweep phase to examine all objects in this arena.
+    /// GC propagate phase to examine all objects in this arena.
     pub fn iter(&self) -> ArenaIter<'_, T> {
         ArenaIter {
             entries: &self.entries,
+            colors: &self.colors,
             pos: 0,
         }
     }
@@ -286,12 +332,10 @@ impl<T> Arena<T> {
     /// Used during GC cycle initialization to reset all objects to the
     /// current white.
     pub fn reset_colors(&mut self, color: Color) {
-        for entry in &mut self.entries {
-            if let EntryState::Occupied {
-                color: ref mut c, ..
-            } = entry.state
-            {
-                *c = color;
+        let byte = color_to_byte(color);
+        for c in &mut self.colors {
+            if *c != COLOR_FREE {
+                *c = byte;
             }
         }
     }
@@ -303,32 +347,43 @@ impl<T> Arena<T> {
     /// "other white" from the previous cycle) are freed. Live objects
     /// (marked during the current cycle) are reset to the new current white.
     pub fn sweep(&mut self, dead_color: Color, new_color: Color) -> u32 {
+        let dead_byte = color_to_byte(dead_color);
+        let new_byte = color_to_byte(new_color);
+        let mut local_free_head = self.free_head;
+        let mut local_len = self.len;
         let mut freed = 0u32;
-        for i in 0..self.entries.len() {
-            match self.entries[i].state {
-                EntryState::Occupied { color, .. } if color == dead_color => {
-                    let entry = &mut self.entries[i];
-                    entry.state = EntryState::Free {
-                        next_free: self.free_head,
-                    };
-                    entry.generation = entry.generation.wrapping_add(1);
-                    self.free_head = Some(i as u32);
-                    self.len -= 1;
-                    freed += 1;
-                }
-                EntryState::Occupied { .. } => {
-                    if let EntryState::Occupied { color, .. } = &mut self.entries[i].state {
-                        *color = new_color;
-                    }
-                }
-                EntryState::Free { .. } => {}
+
+        for (i, (entry, color_byte)) in self
+            .entries
+            .iter_mut()
+            .zip(self.colors.iter_mut())
+            .enumerate()
+        {
+            if *color_byte == COLOR_FREE {
+                continue;
+            }
+
+            if *color_byte == dead_byte {
+                entry.state = EntryState::Free {
+                    next_free: local_free_head,
+                };
+                entry.generation = entry.generation.wrapping_add(1);
+                local_free_head = Some(i as u32);
+                local_len -= 1;
+                *color_byte = COLOR_FREE;
+                freed += 1;
+            } else {
+                *color_byte = new_byte;
             }
         }
+
+        self.free_head = local_free_head;
+        self.len = local_len;
         freed
     }
 
-    /// Sweeps up to `max_count` slots starting from `start`, freeing dead
-    /// objects and resetting survivors to `new_color`.
+    /// Sweeps up to `max_count` occupied slots starting from `start`,
+    /// freeing dead objects and resetting survivors to `new_color`.
     ///
     /// Returns `(freed_count, next_position, is_done)`:
     /// - `freed_count`: number of objects freed in this batch
@@ -344,41 +399,54 @@ impl<T> Arena<T> {
         start: u32,
         max_count: u32,
     ) -> (u32, u32, bool) {
+        let start_usize = start as usize;
         let total = self.entries.len() as u32;
+        let dead_byte = color_to_byte(dead_color);
+        let new_byte = color_to_byte(new_color);
+        let mut local_free_head = self.free_head;
+        let mut local_len = self.len;
         let mut freed = 0u32;
         let mut occupied_seen = 0u32;
-        let mut i = start;
+        let mut scanned = 0u32;
 
-        // Only count Occupied entries toward max_count. Free entries are
-        // skipped at near-zero cost, matching PUC-Rio's linked-list sweep
-        // which never visits already-freed objects.
-        while i < total && occupied_seen < max_count {
-            match self.entries[i as usize].state {
-                EntryState::Occupied { color, .. } if color == dead_color => {
-                    let entry = &mut self.entries[i as usize];
-                    entry.state = EntryState::Free {
-                        next_free: self.free_head,
-                    };
-                    entry.generation = entry.generation.wrapping_add(1);
-                    self.free_head = Some(i);
-                    self.len -= 1;
-                    freed += 1;
-                    occupied_seen += 1;
-                }
-                EntryState::Occupied { .. } => {
-                    if let EntryState::Occupied { color, .. } = &mut self.entries[i as usize].state
-                    {
-                        *color = new_color;
-                    }
-                    occupied_seen += 1;
-                }
-                EntryState::Free { .. } => {}
+        let entries = &mut self.entries[start_usize..];
+        let colors = &mut self.colors[start_usize..];
+
+        // Iterator-based loop over zip of entries and colors eliminates
+        // per-access bounds checks. Only Occupied entries count toward
+        // max_count. Free entries are skipped at near-zero cost.
+        for (entry, color_byte) in entries.iter_mut().zip(colors.iter_mut()) {
+            if occupied_seen >= max_count {
+                break;
             }
-            i += 1;
+            let abs_index = start + scanned;
+            scanned += 1;
+
+            if *color_byte == COLOR_FREE {
+                continue;
+            }
+
+            if *color_byte == dead_byte {
+                entry.state = EntryState::Free {
+                    next_free: local_free_head,
+                };
+                entry.generation = entry.generation.wrapping_add(1);
+                local_free_head = Some(abs_index);
+                local_len -= 1;
+                *color_byte = COLOR_FREE;
+                freed += 1;
+            } else {
+                *color_byte = new_byte;
+            }
+            occupied_seen += 1;
         }
 
-        let is_done = i >= total;
-        (freed, i, is_done)
+        self.free_head = local_free_head;
+        self.len = local_len;
+
+        let next_pos = start + scanned;
+        let is_done = next_pos >= total;
+        (freed, next_pos, is_done)
     }
 }
 
@@ -404,6 +472,7 @@ impl<'a, T> IntoIterator for &'a Arena<T> {
 /// Iterator over occupied arena entries.
 pub struct ArenaIter<'a, T> {
     entries: &'a [Entry<T>],
+    colors: &'a [u8],
     pos: u32,
 }
 
@@ -414,17 +483,20 @@ impl<'a, T> Iterator for ArenaIter<'a, T> {
         while (self.pos as usize) < self.entries.len() {
             let idx = self.pos;
             self.pos += 1;
-            let entry = &self.entries[idx as usize];
-            if let EntryState::Occupied { value, color } = &entry.state {
-                return Some((
-                    GcRef {
-                        index: idx,
-                        generation: entry.generation,
-                        _marker: PhantomData,
-                    },
-                    value,
-                    *color,
-                ));
+            let color_byte = self.colors[idx as usize];
+            if let Some(color) = byte_to_color(color_byte) {
+                let entry = &self.entries[idx as usize];
+                if let EntryState::Occupied { value } = &entry.state {
+                    return Some((
+                        GcRef {
+                            index: idx,
+                            generation: entry.generation,
+                            _marker: PhantomData,
+                        },
+                        value,
+                        color,
+                    ));
+                }
             }
         }
         None
