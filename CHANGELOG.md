@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/wowemulation-dev/rilua/compare/v0.1.4...v0.1.5) - 2026-02-19
+
+### Documentation
+
+- sync documentation with current code state
+
 ## [0.1.4](https://github.com/wowemulation-dev/rilua/compare/v0.1.3...v0.1.4) - 2026-02-16
 
 ### Performance
