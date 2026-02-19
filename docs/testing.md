@@ -7,7 +7,7 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Current: 1304 tests (596 unit, 431 integration, 277 oracle).
+Current: 1316 tests (578 unit, 431 integration, 267 oracle, 40 doc/other).
 All oracle test cases pass against PUC-Rio 5.1.1. All 5 layers
 are active. PUC-Rio official test suite: all 23 files pass via
 the `all.lua` runner.
@@ -289,9 +289,10 @@ individual tests to pass first, plus:
 
 #### T Module
 
-rilua provides a partial implementation of PUC-Rio's internal test
-library (`T` global). Activate it with the `RILUA_TEST_LIB=1`
-environment variable. Implemented functions:
+rilua implements PUC-Rio's internal test library (`T` global),
+the Rust equivalent of `ltests.c`. Activate it with the
+`RILUA_TEST_LIB=1` environment variable. 25 functions are
+registered:
 
 | Function | Description |
 |----------|-------------|
@@ -304,14 +305,26 @@ environment variable. Implemented functions:
 | `T.resume` | Resumes a coroutine (no arguments) |
 | `T.d2s` | Converts f64 to 8-byte native-endian string |
 | `T.s2d` | Converts 8-byte native-endian string to f64 |
-
-Not implemented: `T.testC` (C API mini-interpreter), `T.checkmemory`,
-`T.totalmem`.
+| `T.testC` | C API mini-interpreter (28 commands) |
+| `T.newuserdata` | Create userdata with given byte size |
+| `T.udataval` | Return unique integer ID for userdata |
+| `T.pushuserdata` | Find/create userdata by its ID |
+| `T.ref` | Store object in registry, return integer key |
+| `T.unref` | Remove registry entry |
+| `T.getref` | Get value from registry by key |
+| `T.upvalue` | Get/set upvalue n of closure f |
+| `T.checkmemory` | No-op stub (GC consistency check) |
+| `T.gsub` | String substitution |
+| `T.doonnewstack` | Run code in a new coroutine |
+| `T.newstate` | Create independent Lua state |
+| `T.closestate` | Close a state created by newstate |
+| `T.doremote` | Execute code string in remote state |
+| `T.loadlib` | Load standard libraries into remote state |
+| `T.totalmem` | Get/set memory limit (OOM simulation) |
 
 Four tests (`api.lua`, `checktable.lua`, `closure.lua`, `code.lua`)
 use T extensively. When `T` is nil, guarded sections (`if T then ...
-end`) are skipped. `code.lua` and `closure.lua` pass fully with
-`RILUA_TEST_LIB=1`.
+end`) are skipped. All four pass with `RILUA_TEST_LIB=1`.
 
 #### Test Files
 
@@ -425,7 +438,7 @@ Test coverage is measured by:
 
 1. **Feature coverage** -- which Lua 5.1.1 features are implemented
    and tested (tracked in CHANGELOG.md).
-2. **PUC-Rio test suite progress** -- N of 24 official test files
+2. **PUC-Rio test suite progress** -- 23 of 23 official test files
    passing (tracked in CI).
 3. **Oracle comparison count** -- number of Lua snippets verified
    against PUC-Rio output.
