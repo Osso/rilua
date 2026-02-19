@@ -61,6 +61,12 @@ Benefits of the AST phase:
 src/
   lib.rs              Public API (Lua struct, traits, types)
   error.rs            Error types (syntax, runtime, argument)
+  conversion.rs       IntoLua/FromLua trait implementations
+  handles.rs          Table/Function/Thread/AnyUserData handle types
+  platform.rs         Centralized FFI declarations (libc wrappers)
+  bin/
+    rilua.rs          Standalone interpreter (matches lua.c)
+    riluac.rs         Bytecode compiler/lister (matches luac)
   compiler/
     mod.rs            Compiler module root
     lexer.rs          Tokenizer (source -> tokens)
@@ -84,6 +90,11 @@ src/
     string.rs         String interning
     closure.rs        Closures and upvalues
     callinfo.rs       Call stack (CallInfo chain)
+    metatable.rs      Metamethod dispatch
+    debug_info.rs     Debug info and variable name resolution
+    dump.rs           Binary chunk serialization (string.dump)
+    undump.rs         Binary chunk deserialization (loadstring)
+    listing.rs        Bytecode listing (riluac -l output)
   stdlib/
     mod.rs            Standard library registration
     base.rs           Base library (print, assert, type, etc.)
@@ -95,28 +106,27 @@ src/
     os.rs             OS library
     debug.rs          Debug library
     package.rs        Package/module library
+    testlib.rs        T test module (PUC-Rio ltests.c equivalent)
 ```
 
 ## Key Architectural Decisions
 
-Each decision is documented in detail in its own file:
-
-| Decision | Choice | Rationale | Detail |
-|----------|--------|-----------|--------|
-| Compilation pipeline | Lexer -> Parser -> AST -> Compiler | Separation of concerns, testability | [pipeline.md](pipeline.md) |
-| Instruction set | PUC-Rio's 38 opcodes as Rust enums | Behavioral equivalence, type safety | [instructions.md](instructions.md) |
-| Value representation | Rust enum (Val) | Type safety, pattern matching | [values.md](values.md) |
-| Garbage collection | Arena with generational indices | Zero unsafe, mark-sweep | [gc.md](gc.md) |
-| Tables | Array + hash dual representation | Performance, PUC-Rio compatibility | [tables.md](tables.md) |
-| Strings | Interned with cached hash | Pointer equality, O(1) comparison | [strings.md](strings.md) |
-| Closures and upvalues | Open/closed upvalue model | PUC-Rio semantics | [closures.md](closures.md) |
-| Error handling | Result-based | Idiomatic Rust, no longjmp | [errors.md](errors.md) |
-| Public API | Trait-based, Rust-idiomatic | Ergonomic embedding | [api.md](api.md) |
-| Standard library | Modular, per-library files | Independent testing, optional loading | [stdlib.md](stdlib.md) |
-| Call stack | Dynamic CallInfo array | Separate from value stack, index-based | [callinfo.md](callinfo.md) |
-| Metatables | PUC-Rio 5.1.1 dispatch semantics | 17 metamethods, type coercion rules | [metatables.md](metatables.md) |
-| Coroutines | Threads with shared GC heap | Independent stacks, cooperative multithreading | [coroutines.md](coroutines.md) |
-| Testing strategy | Spec-driven, multi-layer | Correctness assurance | [testing.md](testing.md) |
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Compilation pipeline | Lexer -> Parser -> AST -> Compiler | Separation of concerns, testability |
+| Instruction set | PUC-Rio's 38 opcodes as Rust enums | Behavioral equivalence, type safety |
+| Value representation | Rust enum (Val) | Type safety, pattern matching |
+| Garbage collection | Arena with generational indices | Zero unsafe, mark-sweep |
+| Tables | Array + hash dual representation | Performance, PUC-Rio compatibility |
+| Strings | Interned with cached hash | Pointer equality, O(1) comparison |
+| Closures and upvalues | Open/closed upvalue model | PUC-Rio semantics |
+| Error handling | Result-based | Idiomatic Rust, no longjmp |
+| Public API | Trait-based, Rust-idiomatic | Ergonomic embedding ([api.md](api.md)) |
+| Standard library | Modular, per-library files | Independent testing, optional loading ([stdlib.md](stdlib.md)) |
+| Call stack | Dynamic CallInfo array | Separate from value stack, index-based |
+| Metatables | PUC-Rio 5.1.1 dispatch semantics | 17 metamethods, type coercion rules |
+| Coroutines | Threads with shared GC heap | Independent stacks, cooperative multithreading |
+| Testing strategy | Spec-driven, multi-layer | Correctness assurance ([testing.md](testing.md)) |
 
 ## Reference Implementations
 

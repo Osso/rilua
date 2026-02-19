@@ -180,7 +180,7 @@ Tests: api, attrib, big, calls, checktable, closure, code, constructs,
 db, errors, events, files, gc, literals, locals, main, math, nextvar,
 pm, sort, strings, vararg, verybig.
 
-The `all.lua` runner completes in ~17 seconds.
+The `all.lua` runner completes in ~3 seconds (release mode).
 
 See `docs/testing.md` for details on running modes and the comparison
 script.
