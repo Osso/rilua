@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/wowemulation-dev/rilua/compare/v0.1.10...v0.1.11) - 2026-02-20
+
+### Fixed
+
+- use correct MSVC symbol names and link libraries for CRT functions
+
 ### Fixed
 
 - Link `legacy_stdio_definitions` for `fprintf`/`fscanf` on MSVC (inline since VS2015)
