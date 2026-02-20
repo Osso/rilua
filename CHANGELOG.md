@@ -15,6 +15,7 @@ and this project adheres to
   No-op on other platforms (e.g. WASM).
 - `set_interrupted()` and `clear_interrupted()` public API for embedders
   to integrate custom interrupt sources
+- `examples/run_file.rs` embedding example with `hello.lua` sample script
 
 ### Changed
 
