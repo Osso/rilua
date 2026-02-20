@@ -1,0 +1,5 @@
+# Add directories, files, and symbolic links which should not be stored within
+# the repository here.
+
+# Rust/Cargo
+target/
