@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/wowemulation-dev/rilua/compare/v0.1.8...v0.1.9) - 2026-02-20
+
+### Added
+
+- add advanced embedding example with API extensions
+
 ## [0.1.7](https://github.com/wowemulation-dev/rilua/compare/v0.1.6...v0.1.7) - 2026-02-20
 
 ### Added
