@@ -8,6 +8,25 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Cross-platform SIGINT handling (Unix via raw `signal()` FFI, Windows
+  via `SetConsoleCtrlHandler`). Second Ctrl+C terminates immediately.
+  No-op on other platforms (e.g. WASM).
+- `set_interrupted()` and `clear_interrupted()` public API for embedders
+  to integrate custom interrupt sources
+
+### Changed
+
+- Interrupt flag is unconditional (`AtomicBool` with `Relaxed` ordering,
+  no `#[cfg]` gates). Compiles on all targets including wasm32.
+- `INTERRUPTED` static is now private; `check_interrupted()` is `pub(crate)`
+
+### Removed
+
+- `libc` crate dependency (replaced with raw `extern "C"` FFI, restoring
+  zero external runtime dependencies)
+
 ## [0.1.5](https://github.com/wowemulation-dev/rilua/compare/v0.1.4...v0.1.5) - 2026-02-19
 
 ### Documentation
