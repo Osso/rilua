@@ -100,6 +100,24 @@ pub struct RuntimeError {
     pub traceback: Vec<TraceEntry>,
 }
 
+impl RuntimeError {
+    /// Creates a new runtime error with the given message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            level: 0,
+            traceback: vec![],
+        }
+    }
+}
+
+/// Creates a `LuaError::Runtime` with the given message.
+///
+/// Convenience function for use in `RustFn` implementations.
+pub fn runtime_error(message: impl Into<String>) -> LuaError {
+    LuaError::Runtime(RuntimeError::new(message))
+}
+
 /// A single entry in a stack traceback.
 #[derive(Debug, Clone)]
 pub struct TraceEntry {
