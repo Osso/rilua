@@ -11,7 +11,7 @@ targets = [
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ]
-# Exclude dev-dependencies from checks (only flamegraph)
+# Exclude dev-dependencies from checks (criterion, flamegraph)
 exclude-dev = true
 
 [output]

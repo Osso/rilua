@@ -80,4 +80,9 @@ cargo_common_metadata = { level = "allow", priority = 1 }
 redundant_else = { level = "allow", priority = 1 }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 flamegraph = "0.6"
+
+[[bench]]
+name = "interpreter"
+harness = false

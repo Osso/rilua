@@ -12,14 +12,15 @@
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use rilua::{Lua, StdLib};
+//! ```rust
+//! use rilua::Lua;
 //!
-//! let mut lua = Lua::new()?;
-//! lua.exec("print(1 + 2)")?;
+//! let mut lua = Lua::new().unwrap();
+//! lua.exec("print(1 + 2)").unwrap();
 //!
-//! lua.set_global("x", 42.0)?;
-//! let x: f64 = lua.global("x")?;
+//! lua.set_global("x", 42.0).unwrap();
+//! let x: f64 = lua.global("x").unwrap();
+//! assert_eq!(x, 42.0);
 //! ```
 
 pub mod compiler;
@@ -129,8 +130,10 @@ impl Lua {
 
     /// Creates a new Lua state with selected standard libraries.
     ///
-    /// ```ignore
-    /// let lua = Lua::new_with(StdLib::BASE | StdLib::STRING)?;
+    /// ```rust
+    /// use rilua::{Lua, StdLib};
+    ///
+    /// let lua = Lua::new_with(StdLib::BASE | StdLib::STRING).unwrap();
     /// ```
     pub fn new_with(libs: StdLib) -> LuaResult<Self> {
         let mut lua = Self {
