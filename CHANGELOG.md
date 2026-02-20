@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/wowemulation-dev/rilua/compare/v0.1.11...v0.1.12) - 2026-02-20
+
+### Added
+
+- add property-based fuzzing for lexer, parser, compiler, and VM
+
 ## [0.1.11](https://github.com/wowemulation-dev/rilua/compare/v0.1.10...v0.1.11) - 2026-02-20
 
 ### Fixed
