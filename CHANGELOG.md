@@ -8,6 +8,15 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/wowemulation-dev/rilua/compare/v0.1.12...v0.1.13) - 2026-02-20
+
+### Documentation
+
+- update sponsor link and tailor .editorconfig
+- standardize README badges
+- add performance documentation and gitignore flamegraphs
+- fix stale test counts, loadlib description, and contradictions
+
 ## [0.1.12](https://github.com/wowemulation-dev/rilua/compare/v0.1.11...v0.1.12) - 2026-02-20
 
 ### Added
