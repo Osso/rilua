@@ -387,12 +387,15 @@ fn loader_lua(state: &mut LuaState) -> LuaResult<u32> {
     }
 }
 
-/// Loader 3: C library loader (not supported).
+/// Loader 3: native module loader.
 ///
-/// rilua cannot load C modules because its closure ABI differs from
-/// PUC-Rio's `extern "C" fn(*mut lua_State) -> c_int`. Returns the
-/// same "no file" error listing as PUC-Rio when files are not found,
-/// matching `loader_C` in `loadlib.c`.
+/// When the `dynmod` feature is enabled, searches `package.cpath` for a
+/// shared library and loads it as a rilua-native module. Without the feature,
+/// returns the same "no file" error listing as PUC-Rio when files are not
+/// found.
+///
+/// Reference: `loader_C` in `loadlib.c`.
+#[cfg(not(feature = "dynmod"))]
 fn loader_c(state: &mut LuaState) -> LuaResult<u32> {
     let name = check_string(state, "loader_c", 0)?;
     let pkg = get_package_table(state)?;
@@ -412,8 +415,7 @@ fn loader_c(state: &mut LuaState) -> LuaResult<u32> {
 
     let (found, errors) = search_path(&cpath, &name);
     if found.is_some() {
-        // File exists but we cannot load C modules.
-        let msg = format!("\n\tC modules not supported (cannot load '{name}')");
+        let msg = format!("\n\tnative modules not enabled (cannot load '{name}')");
         let msg_ref = state.gc.intern_string(msg.as_bytes());
         state.push(Val::Str(msg_ref));
     } else {
@@ -423,14 +425,44 @@ fn loader_c(state: &mut LuaState) -> LuaResult<u32> {
     Ok(1)
 }
 
-/// Loader 4: C root loader (not supported).
+#[cfg(feature = "dynmod")]
+fn loader_c(state: &mut LuaState) -> LuaResult<u32> {
+    let name = check_string(state, "loader_c", 0)?;
+    let pkg = get_package_table(state)?;
+
+    let cpath_val = get_field(state, pkg, "cpath");
+    let cpath = match cpath_val {
+        Val::Str(r) => state
+            .gc
+            .string_arena
+            .get(r)
+            .map(|s| String::from_utf8_lossy(s.data()).to_string())
+            .unwrap_or_default(),
+        _ => {
+            return Err(simple_error("'package.cpath' must be a string".to_string()));
+        }
+    };
+
+    let (found, errors) = search_path(&cpath, &name);
+    let Some(filename) = found else {
+        let msg = state.gc.intern_string(errors.as_bytes());
+        state.push(Val::Str(msg));
+        return Ok(1);
+    };
+
+    let sym_name = mkfuncname(&name);
+    ll_loadfunc(state, &filename, &sym_name)
+}
+
+/// Loader 4: native root loader.
 ///
+/// For `"foo.bar"`, loads `foo.so` and looks up `rilua_open_foo_bar`.
 /// Extracts root module name (before first `.`) and searches
 /// `package.cpath`. Matches PUC-Rio's `loader_Croot` in `loadlib.c`.
+#[cfg(not(feature = "dynmod"))]
 fn loader_croot(state: &mut LuaState) -> LuaResult<u32> {
     let name = check_string(state, "loader_croot", 0)?;
 
-    // If name has no dot, this loader does nothing (returns 0).
     let Some(dot_pos) = name.find('.') else {
         return Ok(0);
     };
@@ -452,8 +484,7 @@ fn loader_croot(state: &mut LuaState) -> LuaResult<u32> {
 
     let (found, errors) = search_path(&cpath, root);
     if found.is_some() {
-        // File exists but we cannot load the C function from it.
-        let msg = format!("\n\tno module '{name}' in C root file");
+        let msg = format!("\n\tno module '{name}' in native root file");
         let msg_ref = state.gc.intern_string(msg.as_bytes());
         state.push(Val::Str(msg_ref));
     } else {
@@ -461,6 +492,41 @@ fn loader_croot(state: &mut LuaState) -> LuaResult<u32> {
         state.push(Val::Str(msg));
     }
     Ok(1)
+}
+
+#[cfg(feature = "dynmod")]
+fn loader_croot(state: &mut LuaState) -> LuaResult<u32> {
+    let name = check_string(state, "loader_croot", 0)?;
+
+    let Some(dot_pos) = name.find('.') else {
+        return Ok(0);
+    };
+    let root = &name[..dot_pos];
+
+    let pkg = get_package_table(state)?;
+    let cpath_val = get_field(state, pkg, "cpath");
+    let cpath = match cpath_val {
+        Val::Str(r) => state
+            .gc
+            .string_arena
+            .get(r)
+            .map(|s| String::from_utf8_lossy(s.data()).to_string())
+            .unwrap_or_default(),
+        _ => {
+            return Err(simple_error("'package.cpath' must be a string".to_string()));
+        }
+    };
+
+    let (found, errors) = search_path(&cpath, root);
+    let Some(filename) = found else {
+        let msg = state.gc.intern_string(errors.as_bytes());
+        state.push(Val::Str(msg));
+        return Ok(1);
+    };
+
+    // For "foo.bar", look up "rilua_open_foo_bar".
+    let sym_name = mkfuncname(&name);
+    ll_loadfunc(state, &filename, &sym_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -811,9 +877,12 @@ pub fn ll_seeall(state: &mut LuaState) -> LuaResult<u32> {
 
 /// Implements `package.loadlib(path, init)`.
 ///
-/// C dynamic loading is not supported. Returns `(nil, message, "absent")`.
+/// Without the `dynmod` feature, returns `(nil, message, "absent")`.
+/// With `dynmod`, loads a rilua-native shared library and returns the
+/// requested entry point as a Lua function.
 ///
 /// Reference: `ll_loadlib` in `loadlib.c`.
+#[cfg(not(feature = "dynmod"))]
 pub fn ll_loadlib(state: &mut LuaState) -> LuaResult<u32> {
     state.push(Val::Nil);
     let msg = state
@@ -825,9 +894,235 @@ pub fn ll_loadlib(state: &mut LuaState) -> LuaResult<u32> {
     Ok(3)
 }
 
+#[cfg(feature = "dynmod")]
+pub fn ll_loadlib(state: &mut LuaState) -> LuaResult<u32> {
+    let path = check_string(state, "loadlib", 0)?;
+    let funcname = check_string(state, "loadlib", 1)?;
+
+    // Special case: if funcname is "*", just check if library can be loaded.
+    if funcname == "*" {
+        match crate::platform::dynlib::DynLib::open(&path) {
+            Ok(lib) => {
+                // Store the handle so it stays loaded.
+                store_lib_handle(state, lib)?;
+                state.push(Val::Bool(true));
+                return Ok(1);
+            }
+            Err(msg) => {
+                return push_loaderror(state, &msg, "open");
+            }
+        }
+    }
+
+    ll_loadfunc(state, &path, &funcname)
+}
+
 // ---------------------------------------------------------------------------
 // package.searchpath (not in 5.1.1, but we expose search_path for internal use)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Dynamic module helpers (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "dynmod")]
+use crate::platform::dynlib::DynLib;
+
+/// Registry key for the `_LOADLIB` metatable.
+#[cfg(feature = "dynmod")]
+const LOADLIB_MT_KEY: &str = "_LOADLIB";
+
+/// Builds the entry point symbol name from a module name.
+///
+/// Dots are replaced with underscores. If the name contains a `-` (the
+/// ignore mark), everything before and including the `-` is stripped.
+///
+/// Examples:
+/// - `"hello"` -> `"rilua_open_hello"`
+/// - `"foo.bar"` -> `"rilua_open_foo_bar"`
+/// - `"foo-bar.baz"` -> `"rilua_open_bar_baz"` (strips up to `-`)
+#[cfg(feature = "dynmod")]
+fn mkfuncname(modname: &str) -> String {
+    let name = if let Some(pos) = modname.find(LUA_IGMARK) {
+        &modname[pos + LUA_IGMARK.len()..]
+    } else {
+        modname
+    };
+    format!("rilua_open_{}", name.replace('.', "_"))
+}
+
+/// Pushes `(nil, msg, errtype)` onto the stack -- the standard loadlib error
+/// return convention. Returns `Ok(3)` for use in `-> LuaResult<u32>` functions.
+#[cfg(feature = "dynmod")]
+#[allow(clippy::unnecessary_wraps)]
+fn push_loaderror(state: &mut LuaState, msg: &str, errtype: &str) -> LuaResult<u32> {
+    state.push(Val::Nil);
+    let msg_ref = state.gc.intern_string(msg.as_bytes());
+    state.push(Val::Str(msg_ref));
+    let err_ref = state.gc.intern_string(errtype.as_bytes());
+    state.push(Val::Str(err_ref));
+    Ok(3)
+}
+
+/// Stores a `DynLib` handle as userdata in the registry, keyed by
+/// `"LOADLIB: <path>"`. The `_LOADLIB` metatable's `__gc` ensures
+/// `dlclose`/`FreeLibrary` runs on GC finalization.
+///
+/// If a handle for this path already exists, the new one is dropped
+/// (deduplicated).
+#[cfg(feature = "dynmod")]
+fn store_lib_handle(state: &mut LuaState, lib: DynLib) -> LuaResult<()> {
+    let reg_key = format!("LOADLIB: {}", lib.path());
+    let key_ref = state.gc.intern_string(reg_key.as_bytes());
+
+    // Check if already loaded.
+    let registry = state.registry;
+    let existing = {
+        let reg = state
+            .gc
+            .tables
+            .get(registry)
+            .ok_or_else(|| simple_error("registry not found".into()))?;
+        reg.get_str(key_ref, &state.gc.string_arena)
+    };
+    if !existing.is_nil() {
+        // Already loaded -- drop the new handle (DynLib::drop calls dlclose).
+        return Ok(());
+    }
+
+    // Get or create the _LOADLIB metatable.
+    let mt = super::new_metatable(state, LOADLIB_MT_KEY)?;
+
+    // Create userdata wrapping the DynLib.
+    let ud = crate::vm::value::Userdata::with_metatable(Box::new(lib), mt);
+    let ud_ref = state.gc.alloc_userdata(ud);
+
+    // Store in registry.
+    let reg = state
+        .gc
+        .tables
+        .get_mut(registry)
+        .ok_or_else(|| simple_error("registry not found".into()))?;
+    reg.raw_set(
+        Val::Str(key_ref),
+        Val::Userdata(ud_ref),
+        &state.gc.string_arena,
+    )?;
+
+    Ok(())
+}
+
+/// Shared logic for `ll_loadlib` and `loader_c`/`loader_croot`.
+///
+/// Loads the shared library at `path`, validates the module info, looks up
+/// the `sym_name` symbol, wraps it as a `RustClosure`, and pushes it onto
+/// the stack. On error, pushes `(nil, msg, errtype)`.
+#[cfg(feature = "dynmod")]
+fn ll_loadfunc(state: &mut LuaState, path: &str, sym_name: &str) -> LuaResult<u32> {
+    // 1. Load the library.
+    let lib = match DynLib::open(path) {
+        Ok(lib) => lib,
+        Err(msg) => return push_loaderror(state, &msg, "open"),
+    };
+
+    // 2. Validate module info.
+    if let Err(msg) = crate::dynmod::validate_module_info(&lib) {
+        return push_loaderror(state, &msg, "open");
+    }
+
+    // 3. Look up the entry point.
+    let entry = match crate::dynmod::load_entry_point(&lib, sym_name) {
+        Ok(entry) => entry,
+        Err(msg) => {
+            // Store the lib handle even on init failure (PUC-Rio behavior).
+            store_lib_handle(state, lib)?;
+            return push_loaderror(state, &msg, "init");
+        }
+    };
+
+    // 4. Store the library handle to prevent dlclose.
+    store_lib_handle(state, lib)?;
+
+    // 5. Wrap the entry point in a RustClosure and push it.
+    make_module_wrapper(state, entry)
+}
+
+/// Creates a `RustClosure` that wraps a [`RiluaModuleEntry`] function pointer.
+///
+/// The raw function pointer is stored as a `LightUserdata` upvalue. The
+/// wrapper reads it back, casts to `RiluaModuleEntry`, and calls it with
+/// `catch_unwind`.
+#[cfg(feature = "dynmod")]
+#[allow(unsafe_code, clippy::unnecessary_wraps)]
+fn make_module_wrapper(
+    state: &mut LuaState,
+    entry: crate::dynmod::RiluaModuleEntry,
+) -> LuaResult<u32> {
+    // Store the function pointer as a lightuserdata upvalue.
+    let ptr_val = Val::LightUserdata(entry as usize);
+
+    let wrapper: crate::vm::closure::RustFn = |state: &mut LuaState| {
+        // Read the function pointer from upvalue[0].
+        let ci = &state.call_stack[state.ci];
+        let func_val = state.stack_get(ci.func);
+        let Val::Function(closure_ref) = func_val else {
+            return Err(simple_error("dynmod wrapper: not a function".into()));
+        };
+        let cl = state
+            .gc
+            .closures
+            .get(closure_ref)
+            .ok_or_else(|| simple_error("dynmod wrapper: closure not found".into()))?;
+        let uv = match cl {
+            Closure::Rust(rc) => rc.upvalues.first().copied().unwrap_or(Val::Nil),
+            Closure::Lua(_) => {
+                return Err(simple_error("dynmod wrapper: expected Rust closure".into()));
+            }
+        };
+        let Val::LightUserdata(ptr) = uv else {
+            return Err(simple_error("dynmod wrapper: bad upvalue".into()));
+        };
+
+        let entry: crate::dynmod::RiluaModuleEntry = unsafe { std::mem::transmute(ptr) };
+
+        match crate::dynmod::call_entry_point(entry, state) {
+            Ok(n) => Ok(n as u32),
+            Err(msg) => Err(simple_error(msg)),
+        }
+    };
+
+    let closure = Closure::Rust(RustClosure {
+        func: wrapper,
+        upvalues: vec![ptr_val],
+        name: "dynmod_entry".to_string(),
+        env: None,
+    });
+    let closure_ref = state.gc.alloc_closure(closure);
+    state.push(Val::Function(closure_ref));
+    Ok(1)
+}
+
+/// `__gc` metamethod for `_LOADLIB` userdata.
+///
+/// The `DynLib` stored inside the userdata calls `dlclose`/`FreeLibrary`
+/// via its `Drop` impl. This function is a no-op since Rust drops the
+/// `Box<dyn Any>` (and thus the `DynLib`) when the userdata is collected.
+/// However, we register it to ensure the `_LOADLIB` metatable has `__gc`,
+/// which is the signal to the GC that finalization is needed.
+#[cfg(feature = "dynmod")]
+#[allow(clippy::unnecessary_wraps)]
+fn loadlib_gc(_state: &mut LuaState) -> LuaResult<u32> {
+    // DynLib::drop handles dlclose automatically. No extra work needed.
+    Ok(0)
+}
+
+/// Creates the `_LOADLIB` metatable in the registry with a `__gc` method.
+#[cfg(feature = "dynmod")]
+fn create_loadlib_metatable(state: &mut LuaState) -> LuaResult<()> {
+    let mt = super::new_metatable(state, LOADLIB_MT_KEY)?;
+    super::register_table_fn(state, mt, "__gc", loadlib_gc)?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Registration
@@ -887,6 +1182,10 @@ fn register_global_fn_with_upvalues(
 pub fn open_package_lib(state: &mut LuaState) -> LuaResult<()> {
     let pkg_table = state.gc.alloc_table(Table::new());
     let pkg_val = Val::Table(pkg_table);
+
+    // Create _LOADLIB metatable (dynmod only, must be before loadlib registration).
+    #[cfg(feature = "dynmod")]
+    create_loadlib_metatable(state)?;
 
     // Register simple functions (no upvalue needed).
     super::register_table_fn(state, pkg_table, "loadlib", ll_loadlib)?;

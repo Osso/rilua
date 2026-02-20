@@ -411,6 +411,209 @@ pub(crate) mod bufmode {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic library loading (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "dynmod")]
+pub(crate) mod dynlib {
+    /// Handle to a dynamically loaded shared library.
+    ///
+    /// Wraps `dlopen`/`LoadLibraryA` and automatically calls
+    /// `dlclose`/`FreeLibrary` on drop. Stores the path for diagnostics.
+    pub(crate) struct DynLib {
+        handle: *mut (),
+        path: String,
+    }
+
+    impl DynLib {
+        /// Opens a shared library at `path`.
+        pub(crate) fn open(path: &str) -> Result<Self, String> {
+            let handle = sys::open(path)?;
+            Ok(Self {
+                handle,
+                path: path.to_string(),
+            })
+        }
+
+        /// Looks up a symbol by name. Returns a raw pointer to the symbol.
+        ///
+        /// # Safety
+        ///
+        /// The caller must ensure the returned pointer is cast to the correct
+        /// type before use.
+        pub(crate) fn symbol(&self, name: &str) -> Result<*mut (), String> {
+            sys::symbol(self.handle, name, &self.path)
+        }
+
+        /// Returns the path this library was loaded from.
+        pub(crate) fn path(&self) -> &str {
+            &self.path
+        }
+    }
+
+    impl Drop for DynLib {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                sys::close(self.handle);
+                self.handle = std::ptr::null_mut();
+            }
+        }
+    }
+
+    // -- Unix (Linux, macOS, BSDs) --
+
+    #[cfg(unix)]
+    mod sys {
+        use std::ffi::CString;
+
+        #[allow(unsafe_code)]
+        unsafe extern "C" {
+            fn dlopen(filename: *const i8, flags: i32) -> *mut ();
+            fn dlsym(handle: *mut (), symbol: *const i8) -> *mut ();
+            fn dlclose(handle: *mut ()) -> i32;
+            fn dlerror() -> *const i8;
+        }
+
+        const RTLD_NOW: i32 = 2;
+
+        fn last_error() -> String {
+            #[allow(unsafe_code)]
+            let msg = unsafe { dlerror() };
+            if msg.is_null() {
+                "unknown error".to_string()
+            } else {
+                #[allow(unsafe_code)]
+                let cstr = unsafe { std::ffi::CStr::from_ptr(msg) };
+                cstr.to_string_lossy().into_owned()
+            }
+        }
+
+        pub(super) fn open(path: &str) -> Result<*mut (), String> {
+            let cpath = CString::new(path).map_err(|_| format!("invalid path: {path}"))?;
+            #[allow(unsafe_code)]
+            let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_NOW) };
+            if handle.is_null() {
+                Err(last_error())
+            } else {
+                Ok(handle)
+            }
+        }
+
+        pub(super) fn symbol(
+            handle: *mut (),
+            name: &str,
+            lib_path: &str,
+        ) -> Result<*mut (), String> {
+            let cname = CString::new(name).map_err(|_| format!("invalid symbol name: {name}"))?;
+            // Clear any previous error.
+            #[allow(unsafe_code)]
+            unsafe {
+                dlerror();
+            }
+            #[allow(unsafe_code)]
+            let ptr = unsafe { dlsym(handle, cname.as_ptr()) };
+            // dlsym can legitimately return null for a symbol whose value is 0.
+            // Check dlerror to distinguish real errors.
+            #[allow(unsafe_code)]
+            let err = unsafe { dlerror() };
+            if err.is_null() {
+                Ok(ptr)
+            } else {
+                #[allow(unsafe_code)]
+                let cstr = unsafe { std::ffi::CStr::from_ptr(err) };
+                Err(format!(
+                    "symbol '{}' not found in '{}': {}",
+                    name,
+                    lib_path,
+                    cstr.to_string_lossy()
+                ))
+            }
+        }
+
+        pub(super) fn close(handle: *mut ()) {
+            #[allow(unsafe_code)]
+            unsafe {
+                dlclose(handle);
+            }
+        }
+    }
+
+    // -- Windows --
+
+    #[cfg(windows)]
+    mod sys {
+        use std::ffi::CString;
+
+        #[allow(unsafe_code)]
+        unsafe extern "stdcall" {
+            fn LoadLibraryA(filename: *const i8) -> *mut ();
+            fn GetProcAddress(module: *mut (), name: *const i8) -> *mut ();
+            fn FreeLibrary(module: *mut ()) -> i32;
+            fn GetLastError() -> u32;
+        }
+
+        pub(super) fn open(path: &str) -> Result<*mut (), String> {
+            let cpath = CString::new(path).map_err(|_| format!("invalid path: {path}"))?;
+            #[allow(unsafe_code)]
+            let handle = unsafe { LoadLibraryA(cpath.as_ptr()) };
+            if handle.is_null() {
+                #[allow(unsafe_code)]
+                let err = unsafe { GetLastError() };
+                Err(format!("cannot load '{}': system error {}", path, err))
+            } else {
+                Ok(handle)
+            }
+        }
+
+        pub(super) fn symbol(
+            handle: *mut (),
+            name: &str,
+            lib_path: &str,
+        ) -> Result<*mut (), String> {
+            let cname = CString::new(name).map_err(|_| format!("invalid symbol name: {name}"))?;
+            #[allow(unsafe_code)]
+            let ptr = unsafe { GetProcAddress(handle, cname.as_ptr()) };
+            if ptr.is_null() {
+                #[allow(unsafe_code)]
+                let err = unsafe { GetLastError() };
+                Err(format!(
+                    "symbol '{}' not found in '{}': system error {}",
+                    name, lib_path, err
+                ))
+            } else {
+                Ok(ptr)
+            }
+        }
+
+        pub(super) fn close(handle: *mut ()) {
+            #[allow(unsafe_code)]
+            unsafe {
+                FreeLibrary(handle);
+            }
+        }
+    }
+
+    // -- Unsupported platforms (WASM, etc.) --
+
+    #[cfg(not(any(unix, windows)))]
+    mod sys {
+        pub(super) fn open(path: &str) -> Result<*mut (), String> {
+            Err("dynamic libraries not supported on this platform".to_string())
+        }
+
+        pub(super) fn symbol(
+            _handle: *mut (),
+            _name: &str,
+            _lib_path: &str,
+        ) -> Result<*mut (), String> {
+            Err("dynamic libraries not supported on this platform".to_string())
+        }
+
+        pub(super) fn close(_handle: *mut ()) {}
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

@@ -415,10 +415,43 @@ uses C `fmod` (result has same sign as `a`). Example: `-1 % 5` is
 | `package.cpath` | C module search path |
 | `package.loaded` | Cache of loaded modules |
 | `package.loaders` | Ordered list of module searchers |
-| `package.loadlib` | Load C module |
+| `package.loadlib` | Load native module (see [Native Module Loading](#native-module-loading)) |
 | `package.path` | Lua module search path |
 | `package.preload` | Pre-registered module loaders |
 | `package.seeall` | Set module environment to globals |
+
+#### Native Module Loading
+
+PUC-Rio Lua's `package.loadlib` loads C modules via `lua_CFunction`
+(`int (*)(lua_State *)`). rilua cannot load PUC-Rio C modules because:
+
+- Rust has no stable ABI. The internal types (`LuaState`, `Val`) change
+  layout between compiler versions.
+- rilua's function signature (`fn(&mut LuaState) -> LuaResult<u32>`)
+  differs from PUC-Rio's `extern "C" fn(*mut lua_State) -> c_int`.
+- Building a C API compatibility shim (`lua.h`-compatible) would require
+  reimplementing the entire PUC-Rio stack API (~120 functions) with
+  `extern "C"` wrappers, plus maintaining ABI stability guarantees that
+  Rust does not provide.
+
+Instead, rilua defines its own native module ABI. Modules are Rust
+`cdylib` crates compiled against the same rilua version and `rustc`
+version as the host. This is gated behind the `dynmod` Cargo feature
+(default off). Without the feature, `package.loadlib` returns
+`(nil, msg, "absent")`.
+
+When `dynmod` is enabled:
+
+- `package.loadlib(path, funcname)` loads a shared library, validates
+  a `RILUA_MODULE_INFO` descriptor (magic bytes, version, struct sizes),
+  and looks up the named entry point.
+- The C module loaders (`package.loaders[3]` and `[4]`) search
+  `package.cpath` for modules named `rilua_open_<modname>`.
+- Library handles are stored as userdata with a `__gc` metamethod that
+  calls `dlclose`/`FreeLibrary` on collection.
+
+See `src/dynmod.rs` for the ABI contract and `examples/native_module/`
+for a working example.
 
 ## Loading
 

@@ -2562,7 +2562,13 @@ fn package_loadlib_returns_nil() {
          print(f, kind)",
     );
     assert_eq!(code, 0);
-    assert_eq!(stdout, "nil\tabsent\n");
+    // Without dynmod: returns "absent" (feature not enabled).
+    // With dynmod: returns "open" (dlopen fails on nonexistent file).
+    if cfg!(feature = "dynmod") {
+        assert_eq!(stdout, "nil\topen\n");
+    } else {
+        assert_eq!(stdout, "nil\tabsent\n");
+    }
 }
 
 #[test]

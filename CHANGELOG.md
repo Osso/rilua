@@ -10,6 +10,12 @@ and this project adheres to
 
 ### Added
 
+- `dynmod` feature: native module loading via `package.loadlib`. Modules
+  are Rust `cdylib` crates compiled against the same rilua/rustc version.
+  ABI validation (magic, version, struct sizes) before calling module code.
+  Platform support: Unix (`dlopen`), Windows (`LoadLibraryA`), fallback stub.
+  Disabled by default; without the feature, `package.loadlib` returns `"absent"`.
+- Example native module (`examples/native_module/`) demonstrating the ABI
 - Cross-platform SIGINT handling (Unix via raw `signal()` FFI, Windows
   via `SetConsoleCtrlHandler`). Second Ctrl+C terminates immediately.
   No-op on other platforms (e.g. WASM).
@@ -115,8 +121,9 @@ and this project adheres to
   - Debug: 14 functions (getinfo, getlocal, setlocal, getupvalue,
     setupvalue, traceback, getregistry, getmetatable, setmetatable,
     getfenv, setfenv, gethook, sethook, debug)
-  - Package: require, module, 4 loaders (preload, Lua file, 2 C stubs),
-    path searching, package.loaded/preload/loaders/config/path/cpath
+  - Package: require, module, 4 loaders (preload, Lua file, 2 native module
+    loaders via `dynmod` feature), path searching,
+    package.loaded/preload/loaders/config/path/cpath
 - Userdata infrastructure: typed arena, per-instance metatables,
   `__gc` support, registry metatable helpers
 - Public Rust embedding API: `Lua` struct, `IntoLua`/`FromLua` traits,

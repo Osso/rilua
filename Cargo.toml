@@ -11,6 +11,10 @@ repository = "https://github.com/wowemulation-dev/rilua"
 categories = ["compilers", "game-development", "command-line-utilities"]
 keywords = ["lua", "interpreter", "scripting", "wow", "vm"]
 
+[features]
+default = []
+dynmod = []
+
 [[bin]]
 name = "rilua"
 path = "src/bin/rilua.rs"
