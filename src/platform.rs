@@ -28,6 +28,7 @@ pub(crate) enum LibcFile {}
 // ---------------------------------------------------------------------------
 
 #[allow(unsafe_code)]
+#[cfg_attr(target_env = "msvc", link(name = "ucrt"))]
 unsafe extern "C" {
     pub(crate) fn fopen(filename: *const u8, mode: *const u8) -> *mut LibcFile;
     pub(crate) fn fclose(file: *mut LibcFile) -> i32;
@@ -190,6 +191,7 @@ unsafe extern "C" {
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
+#[link(name = "ucrt")]
 unsafe extern "C" {
     fn __acrt_iob_func(index: u32) -> *mut LibcFile;
 }
@@ -252,6 +254,7 @@ unsafe extern "C" {
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
+#[link(name = "ucrt")]
 unsafe extern "C" {
     #[link_name = "_popen"]
     fn popen(command: *const u8, r#type: *const u8) -> *mut LibcFile;
@@ -284,6 +287,7 @@ unsafe extern "C" {
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
+#[link(name = "ucrt")]
 unsafe extern "C" {
     // Windows reverses parameter order and returns errno_t.
     fn localtime_s(result: *mut Tm, timep: *const TimeT) -> i32;
