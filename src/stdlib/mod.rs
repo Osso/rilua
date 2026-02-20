@@ -29,8 +29,10 @@ use crate::vm::value::{Userdata, Val};
 ///
 /// Combines with `|` for ergonomic selective loading:
 ///
-/// ```ignore
-/// let lua = Lua::new_with(StdLib::BASE | StdLib::STRING | StdLib::TABLE)?;
+/// ```rust
+/// use rilua::{Lua, StdLib};
+///
+/// let lua = Lua::new_with(StdLib::BASE | StdLib::STRING | StdLib::TABLE).unwrap();
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StdLib(u16);
