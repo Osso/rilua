@@ -8,6 +8,18 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/wowemulation-dev/rilua/compare/v0.1.5...v0.1.6) - 2026-02-20
+
+### Added
+
+- cross-platform signal handling with raw FFI, no libc dependency
+
+### Documentation
+
+- add embedding example and examples README
+- add changelog entry for cross-platform signal handling
+- sync documentation with signal handling changes
+
 ### Added
 
 - Cross-platform SIGINT handling (Unix via raw `signal()` FFI, Windows
