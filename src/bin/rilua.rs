@@ -12,6 +12,115 @@ use std::process;
 use rilua::{Function, Lua, LuaError, StdLib, Val};
 
 // ---------------------------------------------------------------------------
+// SIGINT handling — raw FFI, no libc crate
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+mod sigint {
+    use rilua::{clear_interrupted, set_interrupted};
+
+    /// POSIX-mandated value for SIGINT (constant across all Unix platforms).
+    const SIGINT: i32 = 2;
+
+    // `Option<extern "C" fn(i32)>` uses null-pointer optimization:
+    // `None` is address 0, which is `SIG_DFL` in POSIX.
+    #[expect(unsafe_code, reason = "raw POSIX signal FFI")]
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: Option<extern "C" fn(i32)>) -> Option<extern "C" fn(i32)>;
+    }
+
+    /// Signal handler: reset to SIG_DFL first (second Ctrl+C kills), then
+    /// set the interrupt flag for the VM to pick up.
+    extern "C" fn handler(_sig: i32) {
+        // SAFETY: signal() with SIG_DFL (None) is async-signal-safe.
+        #[expect(unsafe_code, reason = "reset signal handler in signal context")]
+        unsafe {
+            signal(SIGINT, None);
+        }
+        set_interrupted();
+    }
+
+    /// Installs a SIGINT handler, runs `f`, then restores `SIG_DFL`.
+    pub(crate) fn with_sigint<F, T>(f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        clear_interrupted();
+        // SAFETY: signal() is async-signal-safe when setting a simple handler.
+        #[expect(unsafe_code, reason = "POSIX signal handling requires unsafe")]
+        unsafe {
+            signal(SIGINT, Some(handler));
+        }
+        let result = f();
+        #[expect(unsafe_code, reason = "POSIX signal handling requires unsafe")]
+        unsafe {
+            signal(SIGINT, None);
+        }
+        result
+    }
+}
+
+#[cfg(windows)]
+mod sigint {
+    use rilua::{clear_interrupted, set_interrupted};
+
+    type BOOL = i32;
+    type DWORD = u32;
+
+    const TRUE: BOOL = 1;
+    const FALSE: BOOL = 0;
+    const CTRL_C_EVENT: DWORD = 0;
+
+    #[expect(unsafe_code, reason = "Win32 console control handler FFI")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<extern "system" fn(DWORD) -> BOOL>,
+            add: BOOL,
+        ) -> BOOL;
+    }
+
+    extern "system" fn handler(ctrl_type: DWORD) -> BOOL {
+        if ctrl_type == CTRL_C_EVENT {
+            set_interrupted();
+            TRUE
+        } else {
+            FALSE
+        }
+    }
+
+    /// Installs a console Ctrl+C handler, runs `f`, then removes it.
+    pub(crate) fn with_sigint<F, T>(f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        clear_interrupted();
+        #[expect(unsafe_code, reason = "Win32 SetConsoleCtrlHandler requires unsafe")]
+        unsafe {
+            SetConsoleCtrlHandler(Some(handler), TRUE);
+        }
+        let result = f();
+        #[expect(unsafe_code, reason = "Win32 SetConsoleCtrlHandler requires unsafe")]
+        unsafe {
+            SetConsoleCtrlHandler(Some(handler), FALSE);
+        }
+        result
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod sigint {
+    /// No-op on platforms without signal support (e.g. WASM).
+    pub(crate) fn with_sigint<F, T>(f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        f()
+    }
+}
+
+use sigint::with_sigint;
+
+// ---------------------------------------------------------------------------
 // Version string (matches PUC-Rio LUA_RELEASE + LUA_COPYRIGHT)
 // ---------------------------------------------------------------------------
 
@@ -357,13 +466,13 @@ fn handle_script(
         }
     };
 
-    match lua.call_function_traced(&func, &script_args) {
+    with_sigint(|| match lua.call_function_traced(&func, &script_args) {
         Ok(_) => false,
         Err(e) => {
             report(progname, &e);
             true
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +528,7 @@ fn dotty(lua: &mut Lua) {
 
         // Execute the loaded chunk.
         if let Some(func) = func {
-            match lua.call_function_traced(&func, &[]) {
+            with_sigint(|| match lua.call_function_traced(&func, &[]) {
                 Ok(results) => {
                     if !results.is_empty() {
                         // Print results via print().
@@ -429,7 +538,7 @@ fn dotty(lua: &mut Lua) {
                 Err(e) => {
                     report(None, &e);
                 }
-            }
+            });
         }
     }
 
@@ -536,7 +645,7 @@ fn main() {
             // Execute stdin as a file.
             match lua.load_file(None) {
                 Ok(func) => {
-                    if let Err(e) = lua.call_function_traced(&func, &[]) {
+                    if let Err(e) = with_sigint(|| lua.call_function_traced(&func, &[])) {
                         report(progname, &e);
                         process::exit(1);
                     }
