@@ -30,3 +30,5 @@ in Rust.
 
 1. [testing.md](testing.md) -- Unit tests, integration tests, PUC-Rio
    suite, behavioral equivalence
+2. [performance.md](performance.md) -- Profiling, benchmarks, regression
+   gate, optimization history

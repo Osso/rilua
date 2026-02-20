@@ -15,8 +15,8 @@
 .DS_Store
 Thumbs.db
 
-# Rust/Cargo
-/target/
+# Added by cargo
+/target
 
 # Lua compiler output
 luac.out
@@ -28,11 +28,10 @@ luac.out
 /lua5.1-tests/
 /lua-5.1-tests.tar.gz
 
+# Flamegraph output
+/flamegraphs/
+
 # cargo-fuzz artifacts
 /fuzz/target/
 /fuzz/corpus/
 /fuzz/artifacts/
-
-# Added by cargo
-
-/target
