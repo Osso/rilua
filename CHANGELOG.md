@@ -8,6 +8,10 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- Link `ucrt` on Windows MSVC for libc FFI symbols (`gmtime_s`, `localtime_s`, `fprintf`, `fscanf`)
+
 ## [0.1.9](https://github.com/wowemulation-dev/rilua/compare/v0.1.8...v0.1.9) - 2026-02-20
 
 ### Added
