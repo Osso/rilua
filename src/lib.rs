@@ -38,14 +38,13 @@ use std::rc::Rc;
 
 // Re-exports for public API.
 pub use conversion::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti};
-pub use error::{LuaError, LuaResult};
+pub use error::{LuaError, LuaResult, RuntimeError, runtime_error};
 pub use handles::{AnyUserData, Function, Table, Thread};
 pub use stdlib::StdLib;
 pub use vm::closure::RustFn;
 pub use vm::state::ThreadStatus;
 pub use vm::value::Val;
 
-use error::RuntimeError;
 use vm::callinfo::LUA_MULTRET;
 use vm::closure::{Closure, LuaClosure, RustClosure};
 use vm::execute::{CallResult, execute};
@@ -507,6 +506,29 @@ impl Lua {
     /// Sets `table[key] = value` without metamethod dispatch.
     pub fn table_raw_set(&mut self, table: &Table, key: Val, value: Val) -> LuaResult<()> {
         table.raw_set(&mut self.state, key, value)
+    }
+
+    /// Raw get on a table handle via the public API.
+    ///
+    /// Returns `table[key]` without metamethod dispatch.
+    pub fn table_raw_get(&self, table: &Table, key: Val) -> LuaResult<Val> {
+        table.raw_get(&self.state, key)
+    }
+
+    /// Returns the raw length of a table (no `__len` metamethod).
+    pub fn table_raw_len(&self, table: &Table) -> i64 {
+        table.raw_len(&self.state)
+    }
+
+    /// Sets a named Rust function on a table.
+    ///
+    /// Creates a closure wrapping `func` and stores it as `table[name]`.
+    /// Useful for building method tables and metatables.
+    pub fn table_set_function(&mut self, table: &Table, name: &str, func: RustFn) -> LuaResult<()> {
+        let key = Val::Str(self.state.gc.intern_string(name.as_bytes()));
+        let closure = Closure::Rust(RustClosure::new(func, name));
+        let closure_ref = self.state.gc.alloc_closure(closure);
+        table.raw_set(&mut self.state, key, Val::Function(closure_ref))
     }
 
     // -----------------------------------------------------------------------
