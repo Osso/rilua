@@ -8,6 +8,11 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- Link `legacy_stdio_definitions` for `fprintf`/`fscanf` on MSVC (inline since VS2015)
+- Use `_gmtime64_s`/`_localtime64_s` symbol names on MSVC (header wrappers don't exist in ucrtbase.dll)
+
 ## [0.1.10](https://github.com/wowemulation-dev/rilua/compare/v0.1.9...v0.1.10) - 2026-02-20
 
 ### Fixed

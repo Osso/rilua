@@ -27,8 +27,12 @@ pub(crate) enum LibcFile {}
 // Portable C functions (identical on all platforms)
 // ---------------------------------------------------------------------------
 
+// On MSVC, `fprintf`/`fscanf` are inline functions in headers since VS2015.
+// The non-inline definitions live in `legacy_stdio_definitions.lib`.
+// All other C runtime functions are in `ucrt.lib`.
 #[allow(unsafe_code)]
 #[cfg_attr(target_env = "msvc", link(name = "ucrt"))]
+#[cfg_attr(target_env = "msvc", link(name = "legacy_stdio_definitions"))]
 unsafe extern "C" {
     pub(crate) fn fopen(filename: *const u8, mode: *const u8) -> *mut LibcFile;
     pub(crate) fn fclose(file: *mut LibcFile) -> i32;
@@ -290,7 +294,11 @@ unsafe extern "C" {
 #[link(name = "ucrt")]
 unsafe extern "C" {
     // Windows reverses parameter order and returns errno_t.
+    // On 64-bit MSVC, `localtime_s`/`gmtime_s` are header-level wrappers
+    // that resolve to `_localtime64_s`/`_gmtime64_s` in ucrtbase.dll.
+    #[cfg_attr(target_env = "msvc", link_name = "_localtime64_s")]
     fn localtime_s(result: *mut Tm, timep: *const TimeT) -> i32;
+    #[cfg_attr(target_env = "msvc", link_name = "_gmtime64_s")]
     fn gmtime_s(result: *mut Tm, timep: *const TimeT) -> i32;
 }
 
