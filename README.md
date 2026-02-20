@@ -6,12 +6,12 @@ A Rust implementation of [Lua 5.1.1](https://lua.org/manual/5.1/).
 
 [![Discord](https://img.shields.io/discord/1394228766414471219?logo=discord&style=flat-square)](https://discord.gg/Q44pPMvGEd)
 [![Sponsor](https://img.shields.io/github/sponsors/wowemulation-dev?logo=github&style=flat-square)](https://github.com/sponsors/wowemulation-dev)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE-APACHE)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![CI Status](https://github.com/wowemulation-dev/rilua/workflows/CI/badge.svg)](https://github.com/wowemulation-dev/rilua/actions)
-[![Crates.io Version](https://img.shields.io/crates/v/rilua)](https://crates.io/crates/rilua)
 [![docs.rs](https://img.shields.io/docsrs/rilua)](https://docs.rs/rilua)
 [![Rust Version](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
+[![Crates.io Version](https://img.shields.io/crates/v/rilua)](https://crates.io/crates/rilua)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE-APACHE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 
 </div>
 
