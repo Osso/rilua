@@ -82,6 +82,7 @@ redundant_else = { level = "allow", priority = 1 }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 flamegraph = "0.6"
+proptest = "1"
 
 [[bench]]
 name = "interpreter"

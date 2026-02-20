@@ -28,6 +28,11 @@ luac.out
 /lua5.1-tests/
 /lua-5.1-tests.tar.gz
 
+# cargo-fuzz artifacts
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+
 # Added by cargo
 
 /target
