@@ -1,0 +1,12 @@
+[package]
+name = "rilua-example-hello"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "hello"
+crate-type = ["cdylib"]
+
+[dependencies]
+rilua = { path = "../..", features = ["dynmod"] }

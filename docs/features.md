@@ -457,7 +457,7 @@ rilua column:
 | `package.config` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `package.cpath` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `package.loaded` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
-| `package.loadlib` | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | Stub: no dynamic library loading |
+| `package.loadlib` | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | Loads rilua-native modules (not PUC-Rio C modules); requires `dynmod` feature |
 | `package.path` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `package.preload` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | `package.searchpath` | | ✓ | ✓ | ✓ | ✓ | ✗ | |

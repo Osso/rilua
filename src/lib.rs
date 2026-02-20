@@ -24,6 +24,8 @@
 
 pub mod compiler;
 pub mod conversion;
+#[cfg(feature = "dynmod")]
+pub mod dynmod;
 pub mod error;
 pub mod handles;
 pub(crate) mod platform;
