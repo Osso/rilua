@@ -50,6 +50,49 @@ use vm::proto::Proto;
 use vm::state::{Gc, LuaState};
 
 // ---------------------------------------------------------------------------
+// Interrupt flag — cross-platform, WASM-safe
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global interrupt flag set by the embedder's signal handler.
+///
+/// The VM checks this in the execute loop and raises a runtime error
+/// when set. `AtomicBool` is async-signal-safe on all platforms.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Sets the interrupt flag.
+///
+/// Call this from a signal handler or other external interrupt source.
+/// The VM will check the flag on the next instruction dispatch and
+/// raise a runtime error.
+pub fn set_interrupted() {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+/// Clears the interrupt flag.
+///
+/// Call this before starting execution to ensure a stale flag from a
+/// previous run does not immediately trigger an error.
+pub fn clear_interrupted() {
+    INTERRUPTED.store(false, Ordering::Relaxed);
+}
+
+/// Checks and auto-clears the interrupt flag.
+///
+/// Returns `true` if the flag was set, and atomically clears it.
+/// The clear-on-read avoids repeated interrupts from a single Ctrl+C.
+pub(crate) fn check_interrupted() -> bool {
+    // Fast path: a relaxed load (mov on x86, ldr on ARM) costs ~1 cycle.
+    // Only pay for the store on the rare true path.
+    if INTERRUPTED.load(Ordering::Relaxed) {
+        INTERRUPTED.store(false, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Lua struct: high-level embedding API
 // ---------------------------------------------------------------------------
 
@@ -877,5 +920,26 @@ mod tests {
     fn backward_compat_exec_with_name() {
         let result = exec_with_name(b"local x = 1 + 2", "=test");
         assert!(result.is_ok());
+    }
+
+    // -- Interrupt flag --
+
+    #[test]
+    fn interrupt_flag_set_and_check() {
+        // Ensure clean state.
+        clear_interrupted();
+
+        set_interrupted();
+        assert!(check_interrupted(), "flag should be true after set");
+        assert!(!check_interrupted(), "flag should auto-clear after check");
+    }
+
+    #[test]
+    fn interrupt_flag_clear() {
+        clear_interrupted();
+
+        set_interrupted();
+        clear_interrupted();
+        assert!(!check_interrupted(), "flag should be false after clear");
     }
 }

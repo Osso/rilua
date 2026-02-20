@@ -170,7 +170,11 @@ Arena-based incremental mark-sweep with generational indices:
 - **`debug.debug()` interactive mode**: Stub (returns immediately).
 - **C library loading**: `package.loadlib` returns "not supported"
   (incompatible ABI). Lua file loading via `require` works.
-- **SIGINT handling**: No signal-based interruption of running code.
+
+### Platform Notes
+
+- **SIGINT handling**: Ctrl+C interrupts running code on Unix and Windows.
+  Second Ctrl+C terminates immediately. No-op on other platforms (e.g. WASM).
 
 ### PUC-Rio Test Suite Compatibility
 

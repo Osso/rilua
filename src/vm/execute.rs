@@ -13,6 +13,8 @@ use std::rc::Rc;
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
 
+use crate::check_interrupted;
+
 use super::callinfo::{CallInfo, LUA_MULTRET};
 use super::closure::{Closure, LuaClosure, Upvalue};
 use super::debug_info;
@@ -1158,6 +1160,11 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
             // gives the current instruction's index.
             let instr = Instruction::from_raw(proto.code[pc]);
             pc += 1;
+
+            // Interrupt check: abort if the embedder's signal handler set the flag.
+            if check_interrupted() {
+                return Err(runtime_error(&proto, pc, "interrupted!"));
+            }
 
             // Hook check: line and count hooks (PUC-Rio: lvm.c lines 388-396).
             // The decrement runs every instruction when line or count hooks
