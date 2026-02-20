@@ -63,7 +63,7 @@ src/
   error.rs            Error types (syntax, runtime, argument)
   conversion.rs       IntoLua/FromLua trait implementations
   handles.rs          Table/Function/Thread/AnyUserData handle types
-  platform.rs         Centralized FFI declarations (libc wrappers)
+  platform.rs         Centralized FFI declarations (raw extern "C")
   bin/
     rilua.rs          Standalone interpreter (matches lua.c)
     riluac.rs         Bytecode compiler/lister (matches luac)
