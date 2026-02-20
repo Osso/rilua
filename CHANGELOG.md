@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/wowemulation-dev/rilua/compare/v0.1.6...v0.1.7) - 2026-02-20
+
+### Added
+
+- implement package.loadlib with rilua-native module ABI
+
 ## [0.1.6](https://github.com/wowemulation-dev/rilua/compare/v0.1.5...v0.1.6) - 2026-02-20
 
 ### Added
