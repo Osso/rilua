@@ -194,10 +194,9 @@ and this project adheres to
 - CLI stack tracebacks on unhandled errors via `call_function_traced`
 - `LUA_COMPAT_VARARG`: implicit `arg` table for old-style vararg functions
 - `LUA_COMPAT_GFIND`: `string.gfind` as alias for `string.gmatch`
-- Architecture documentation in `docs/` (14 documents covering pipeline,
-  instructions, values, GC, tables, strings, closures, call stack,
-  metatables, errors, API, stdlib, coroutines, testing)
-- T test module (`RILUA_TEST_LIB=1`): 24 functions for PUC-Rio test
+- Architecture documentation in `docs/` (9 documents covering architecture,
+  API, features, stdlib, testing, future API, references, use cases)
+- T test module (`RILUA_TEST_LIB=1`): 25 functions for PUC-Rio test
   suite compatibility. Includes T.testC mini-interpreter (28 C API
   commands), remote state management (newstate/closestate/doremote),
   userdata reference tracking (ref/unref/getref), upvalue access,

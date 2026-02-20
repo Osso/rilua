@@ -2,8 +2,18 @@
 
 A Rust implementation of [Lua 5.1.1](https://lua.org/manual/5.1/).
 
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
+<div align="center">
+
+[![Discord](https://img.shields.io/discord/1394228766414471219?logo=discord&style=flat-square)](https://discord.gg/Q44pPMvGEd)
+[![Sponsor](https://img.shields.io/github/sponsors/wowemulation-dev?logo=github&style=flat-square)](https://github.com/sponsors/wowemulation-dev)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE-APACHE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
+[![CI Status](https://github.com/wowemulation-dev/rilua/workflows/CI/badge.svg)](https://github.com/wowemulation-dev/rilua/actions)
+[![Crates.io Version](https://img.shields.io/crates/v/rilua)](https://crates.io/crates/rilua)
+[![docs.rs](https://img.shields.io/docsrs/rilua)](https://docs.rs/rilua)
 [![Rust Version](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
+
+</div>
 
 ## Overview
 
@@ -168,8 +178,10 @@ Arena-based incremental mark-sweep with generational indices:
 ### Not Yet Implemented
 
 - **`debug.debug()` interactive mode**: Stub (returns immediately).
-- **C library loading**: `package.loadlib` returns "not supported"
-  (incompatible ABI). Lua file loading via `require` works.
+- **C library loading**: `package.loadlib` returns `(nil, msg, "absent")`
+  by default (incompatible ABI with PUC-Rio C modules). With the `dynmod`
+  feature, `package.loadlib` loads rilua-native Rust modules.
+  Lua file loading via `require` works in all configurations.
 
 ### Platform Notes
 

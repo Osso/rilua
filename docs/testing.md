@@ -7,7 +7,9 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Current: 1316 tests (578 unit, 431 integration, 267 oracle, 40 doc/other).
+Current: 1323 tests (607 unit, 431 integration, 277 oracle, 5 proptest, 3 lua51).
+With `dynmod` feature: 1331 tests (609 unit, 6 dynmod, 431 integration,
+277 oracle, 5 proptest, 3 lua51).
 All oracle test cases pass against PUC-Rio 5.1.1. All 5 layers
 are active. PUC-Rio official test suite: all 23 files pass via
 the `all.lua` runner.
@@ -281,11 +283,10 @@ for both interpreters. This differs from `all.lua` in that:
   coroutine; `calls.lua` runs without `deep` from `main.lua`).
 - Each test gets a fresh interpreter state.
 
-Running `all.lua` directly is a stretch goal that requires all
-individual tests to pass first, plus:
-- `main.lua` passing (CLI subprocess testing).
-- The `string.dump` round-trip working for all test files.
-- `debug.sethook` for the cleanup hook at the end.
+rilua also passes `all.lua` directly, which requires all individual
+tests to pass plus `main.lua` (CLI subprocess testing), the
+`string.dump` round-trip for all test files, and `debug.sethook`
+for the cleanup hook at the end.
 
 #### T Module
 
