@@ -1,18 +1,19 @@
 # Read the Docs configuration file
 # See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
 
-# Required
 version: 2
 
-# Set the OS, Python version, and other tools you might need
 build:
   os: ubuntu-lts-latest
   tools:
     rust: latest
   jobs:
     install:
-      - cargo install mdbook
+      # Install to a known location since RTD uses asdf for Rust,
+      # which places binaries outside the standard ~/.cargo/bin path.
+      # Each job command runs in its own shell, so PATH changes don't
+      # persist between lines.
+      - cargo install mdbook --root "$HOME/.local"
     build:
       html:
-        - PATH=${PATH}:${HOME}/.cargo/bin
-        - mdbook build docs --dest-dir $READTHEDOCS_OUTPUT/html
+        - "$HOME/.local/bin/mdbook" build docs --dest-dir "$READTHEDOCS_OUTPUT/html"
