@@ -565,6 +565,33 @@ impl Lua {
         table.raw_len(&self.state)
     }
 
+    /// Returns the next key-value pair after `key` in the table.
+    ///
+    /// Pass `Val::Nil` to start iteration. Returns `None` when the
+    /// table is exhausted. This mirrors PUC-Rio's `lua_next`.
+    pub fn table_next(&self, table: &Table, key: Val) -> LuaResult<Option<(Val, Val)>> {
+        let t = self.state.gc.tables.get(table.0).ok_or_else(|| {
+            LuaError::Runtime(RuntimeError {
+                message: "table has been collected".into(),
+                level: 0,
+                traceback: vec![],
+            })
+        })?;
+        t.next(key, &self.state.gc.string_arena)
+    }
+
+    /// Returns the byte content of a `Val::Str`.
+    ///
+    /// Returns `None` if the value is not a string or the string has
+    /// been collected.
+    pub fn val_as_bytes(&self, val: Val) -> Option<&[u8]> {
+        if let Val::Str(str_ref) = val {
+            self.state.gc.string_arena.get(str_ref).map(|s| s.data())
+        } else {
+            None
+        }
+    }
+
     /// Sets a named Rust function on a table.
     ///
     /// Creates a closure wrapping `func` and stores it as `table[name]`.
