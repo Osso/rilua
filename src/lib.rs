@@ -592,6 +592,14 @@ impl Lua {
         }
     }
 
+    /// Borrows a typed value from a userdata handle.
+    ///
+    /// Returns `None` if the stored type is not `T` or the userdata has
+    /// been collected.
+    pub fn borrow_userdata<T: std::any::Any>(&self, ud: &AnyUserData) -> Option<&T> {
+        ud.borrow::<T>(&self.state)
+    }
+
     /// Sets a named Rust function on a table.
     ///
     /// Creates a closure wrapping `func` and stores it as `table[name]`.
