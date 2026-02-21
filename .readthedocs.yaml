@@ -14,4 +14,5 @@ build:
       - cargo install mdbook
     build:
       html:
+        - PATH=${PATH}:${HOME}/.cargo/bin
         - mdbook build docs --dest-dir $READTHEDOCS_OUTPUT/html
