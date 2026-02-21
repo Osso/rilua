@@ -35,3 +35,7 @@ luac.out
 /fuzz/target/
 /fuzz/corpus/
 /fuzz/artifacts/
+
+# WASM demo build output
+/examples/wasm-demo/pkg/
+/examples/wasm-demo/target/
