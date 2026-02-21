@@ -1,62 +1,29 @@
+# mise configuration for WoW Emulation Rust projects
+# https://mise.jdx.dev/configuration.html
+
 [tools]
+# ── Toolchain ──────────────────────────────────
+rust = "1.92"
 node = "22"
-"npm:markdownlint-cli2" = "0.20.0"
-actionlint = "1.7.10"
-mdbook = "0.5.2"
-rust = { version = "1.92.0", profile = "default" }
-"cargo:cargo-nextest" = "0.9.127"
-"cargo:cargo-deny" = "0.19.0"
-"cargo:cargo-binstall" = "1.12.3"
-"cargo:cross" = "0.2.5"
-"cargo:wasm-pack" = "0.14.0"
 
-[vars]
-binary_name = "rilua"
+# ── Build tools ────────────────────────────────
+"cargo:cross" = "latest"
+"cargo:cargo-binstall" = "latest"
+"cargo:wasm-pack" = "latest"
 
-[tasks.build]
-description = "Build the project"
-run = "cargo build"
+# ── Testing and coverage ──────────────────────
+"cargo:cargo-nextest" = "latest"
+"cargo:cargo-llvm-cov" = "latest"
 
-[tasks.build-release]
-description = "Build release binary"
-run = "cargo build --release"
+# ── Linting and auditing ─────────────────────
+"cargo:cargo-deny" = "latest"
+"npm:markdownlint-cli2" = "latest"
+actionlint = "latest"
 
-[tasks.test]
-description = "Run all tests"
-run = "cargo test"
+# ── Documentation ─────────────────────────────
+mdbook = "latest"
+"cargo:mdbook-mermaid" = "latest"
 
-[tasks.test-nextest]
-description = "Run tests with nextest"
-run = "cargo nextest run"
-
-[tasks.fmt]
-description = "Check formatting"
-run = "cargo fmt -- --check"
-
-[tasks.fmt-fix]
-description = "Fix formatting"
-run = "cargo fmt"
-
-[tasks.clippy]
-description = "Run clippy linter"
-run = "cargo clippy --all-targets"
-
-[tasks.check]
-description = "Run quick checks (fmt + clippy + build)"
-run = "cargo fmt -- --check && cargo clippy --all-targets && cargo check --all-targets"
-
-[tasks.doc]
-description = "Build documentation"
-run = "cargo doc --no-deps"
-
-[tasks.quality-gate]
-description = "Run quality gate before committing"
-run = "cargo fmt -- --check && cargo clippy --all-targets && cargo test && cargo doc --no-deps && cargo deny check"
-
-[tasks.lint]
-description = "Run markdown and GitHub Actions linting"
-run = "markdownlint-cli2 '**/*.md' && actionlint"
-
-[tasks.deny]
-description = "Run cargo-deny checks"
-run = "cargo deny check"
+# ── Profiling ─────────────────────────────────
+"cargo:flamegraph" = "latest"
+"cargo:inferno" = "latest"

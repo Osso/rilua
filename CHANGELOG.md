@@ -8,12 +8,27 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- Simplify `.mise.toml`: use `"latest"` versions for all dev tools, remove
+  inline task definitions, add profiling tools (flamegraph, inferno) and
+  coverage tool (cargo-llvm-cov), organize sections with comments
+
+### Other
+
+- Track `examples/wasm-demo/Cargo.lock` for reproducible builds
+
 ## [0.1.14](https://github.com/wowemulation-dev/rilua/compare/v0.1.13...v0.1.14) - 2026-02-21
 
 ### Added
 
-- add browser-based WASM demo
-- add wasm32 support
+- WASM support: compile rilua to `wasm32-unknown-unknown` with pure-Rust
+  replacements for all C FFI (strtod, localeconv, strcoll, ctype functions).
+  Stdlib I/O and OS functions return errors since there is no filesystem
+  in WASM. Loads base, string, table, math, and coroutine libraries.
+- Browser-based WASM demo (`examples/wasm-demo/`): single-page HTML UI
+  that runs Lua code in the browser via wasm-pack + wasm-bindgen.
+  Custom print captures output to a thread-local buffer.
 
 ## [0.1.13](https://github.com/wowemulation-dev/rilua/compare/v0.1.12...v0.1.13) - 2026-02-20
 
