@@ -13,7 +13,7 @@ build:
       # which places binaries outside the standard ~/.cargo/bin path.
       # Each job command runs in its own shell, so PATH changes don't
       # persist between lines.
-      - cargo install mdbook --root "$HOME/.local"
+      - cargo install mdbook --root $HOME/.local
     build:
       html:
-        - "$HOME/.local/bin/mdbook" build docs --dest-dir "$READTHEDOCS_OUTPUT/html"
+        - $HOME/.local/bin/mdbook build docs --dest-dir $READTHEDOCS_OUTPUT/html
