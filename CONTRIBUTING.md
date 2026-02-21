@@ -223,7 +223,7 @@ rilua is a Lua 5.1.1 interpreter. The main components are:
 - `src/platform.rs` -- Platform-specific FFI (centralized)
 - `src/lib.rs` -- Public Rust embedding API
 
-See `docs/architecture.md` for a detailed overview.
+See `docs/src/architecture.md` for a detailed overview.
 
 ### Tips
 

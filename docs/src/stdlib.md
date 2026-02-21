@@ -23,7 +23,7 @@ Global functions not in any table.
 | Function | Status | Notes |
 |----------|--------|-------|
 | `assert` | Required | Error with optional message |
-| `collectgarbage` | Required | 7 options, see [gc.md](gc.md) |
+| `collectgarbage` | Required | 7 options, 7 options |
 | `dofile` | Required | Load and execute file |
 | `error` | Required | Throw error object at level |
 | `getfenv` | Required | Get function environment |

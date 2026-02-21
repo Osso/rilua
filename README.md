@@ -41,7 +41,7 @@ rilua is built for the World of Warcraft emulation ecosystem:
 
 It also serves as an embeddable Lua 5.1.1 interpreter for Rust applications
 and as a readable reference implementation for studying Lua internals.
-See `docs/use-cases.md` for details.
+See `docs/src/use-cases.md` for details.
 
 ### Why Lua 5.1.1
 
@@ -114,7 +114,7 @@ lua.set_global("greeting", "hello")?;
 let mut sandbox = Lua::new_with(StdLib::BASE | StdLib::STRING | StdLib::TABLE)?;
 ```
 
-See `docs/api.md` for the full API reference.
+See `docs/src/api.md` for the full API reference.
 
 ## Supported Features
 
@@ -191,7 +191,7 @@ WASM. Core VM, compiler, and computational libraries (base, string,
 table, math, coroutine, debug) work on all platforms. I/O and OS
 libraries require a filesystem and return errors on WASM.
 
-See `docs/wasm.md` for building WASM targets and `examples/wasm-demo/`
+See `docs/src/wasm.md` for building WASM targets and `examples/wasm-demo/`
 for a browser demo.
 
 ### Platform Notes
@@ -209,7 +209,7 @@ pm, sort, strings, vararg, verybig.
 
 The `all.lua` runner completes in ~3 seconds (release mode).
 
-See `docs/testing.md` for details on running modes and the comparison
+See `docs/src/testing.md` for details on running modes and the comparison
 script.
 
 ## Architecture
@@ -225,7 +225,7 @@ Pipeline: **Source -> Lexer -> Parser -> AST -> Compiler -> Proto -> VM**
 | GC | Arena-based incremental mark-sweep, write barriers, finalizers |
 | API | Trait-based Rust-idiomatic embedding (`IntoLua`/`FromLua`) |
 
-See `docs/architecture.md` for design documentation.
+See `docs/src/architecture.md` for design documentation.
 
 ## Building
 
@@ -259,7 +259,7 @@ the PUC-Rio official test suite as a compatibility target, and
 behavioral equivalence tests for edge cases.
 
 PUC-Rio tests pass both individually and through the `all.lua` runner.
-See `docs/testing.md` for the testing strategy and
+See `docs/src/testing.md` for the testing strategy and
 [lua.org/tests/](https://lua.org/tests/) for the official test
 documentation.
 

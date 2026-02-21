@@ -8,7 +8,7 @@
 //!
 //! Pipeline: Source -> Lexer -> Parser -> AST -> Compiler -> Proto -> VM
 //!
-//! See `docs/architecture.md` for design documentation.
+//! See `docs/src/architecture.md` for design documentation.
 //!
 //! # Usage
 //!
