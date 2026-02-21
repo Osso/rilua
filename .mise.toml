@@ -8,6 +8,7 @@ rust = { version = "1.92.0", profile = "default" }
 "cargo:cargo-deny" = "0.19.0"
 "cargo:cargo-binstall" = "1.12.3"
 "cargo:cross" = "0.2.5"
+"cargo:wasm-pack" = "0.14.0"
 
 [vars]
 binary_name = "rilua"
