@@ -9,12 +9,10 @@
 //! Error messages match PUC-Rio format:
 //! `"{name}: {reason} in precompiled chunk"`.
 
-use std::rc::Rc;
-
 use crate::error::{LuaError, LuaResult, SyntaxError};
 
 use super::dump::{LUA_SIGNATURE, LUAC_HEADERSIZE, make_header};
-use super::proto::{LocalVar, Proto};
+use super::proto::{LocalVar, Proto, ProtoRef};
 use super::value::Val;
 
 // ---------------------------------------------------------------------------
@@ -239,7 +237,7 @@ impl<'a> LoadState<'a> {
     /// `parent_source` is used for source name reconstruction: if the
     /// loaded source is NULL, the parent's source is used instead
     /// (matching PUC-Rio's `LoadFunction` in `lundump.c`).
-    fn load_function(&mut self, parent_source: &str) -> LuaResult<Rc<Proto>> {
+    fn load_function(&mut self, parent_source: &str) -> LuaResult<ProtoRef> {
         // Source name.
         let source = match self.load_string()? {
             Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -259,7 +257,7 @@ impl<'a> LoadState<'a> {
         self.load_constants(&mut proto, &source)?;
         self.load_debug(&mut proto)?;
 
-        Ok(Rc::new(proto))
+        Ok(ProtoRef::new(proto))
     }
 }
 
@@ -282,7 +280,7 @@ impl<'a> LoadState<'a> {
 ///
 /// Returns `LuaError::Syntax` for invalid binary chunks, with messages
 /// matching PUC-Rio format: `"{name}: {reason} in precompiled chunk"`.
-pub fn undump(data: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
+pub fn undump(data: &[u8], name: &str) -> LuaResult<ProtoRef> {
     let mut s = LoadState::new(data, name);
     s.load_header()?;
     s.load_function(name)
@@ -402,7 +400,7 @@ mod tests {
         inner.last_line_defined = 10;
 
         let mut outer = Proto::new("=test");
-        outer.protos.push(Rc::new(inner));
+        outer.protos.push(ProtoRef::new(inner));
         outer
             .code
             .push(Instruction::abc(OpCode::Return, 0, 1, 0).raw());

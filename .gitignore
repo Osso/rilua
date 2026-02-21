@@ -5,21 +5,8 @@
 !.gitignore
 !.gitattributes
 
-# Project files
-/.cache/
-/.fleet/
-/.idea/
-/.vscode/
-
-# OS specific temporary files
-.DS_Store
-Thumbs.db
-
 # Added by cargo
 /target
-
-# Lua compiler output
-luac.out
 
 # PUC-Rio Lua 5.1.1 reference (downloaded via AGENTS.md setup)
 /lua-5.1.1/

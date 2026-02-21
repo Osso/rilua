@@ -245,7 +245,7 @@ pub fn getfuncname(
         Val::Function(r) => {
             let cl = state.gc.closures.get(r)?;
             match cl {
-                Closure::Lua(lcl) => std::rc::Rc::clone(&lcl.proto),
+                Closure::Lua(lcl) => crate::vm::proto::ProtoRef::clone(&lcl.proto),
                 Closure::Rust(_) => return None,
             }
         }
@@ -308,7 +308,7 @@ pub fn getfuncname_raw(
         Val::Function(r) => {
             let cl = gc.closures.get(r)?;
             match cl {
-                Closure::Lua(lcl) => std::rc::Rc::clone(&lcl.proto),
+                Closure::Lua(lcl) => crate::vm::proto::ProtoRef::clone(&lcl.proto),
                 Closure::Rust(_) => return None,
             }
         }

@@ -34,7 +34,6 @@ pub mod stdlib;
 pub mod vm;
 
 use std::any::Any;
-use std::rc::Rc;
 
 // Re-exports for public API.
 pub use conversion::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti};
@@ -42,6 +41,7 @@ pub use error::{LuaError, LuaResult, RuntimeError, runtime_error};
 pub use handles::{AnyUserData, Function, Table, Thread};
 pub use stdlib::StdLib;
 pub use vm::closure::RustFn;
+pub use vm::proto::ProtoRef;
 pub use vm::state::ThreadStatus;
 pub use vm::value::Val;
 
@@ -106,6 +106,22 @@ pub(crate) fn check_interrupted() -> bool {
 pub struct Lua {
     state: LuaState,
 }
+
+// SAFETY: With the `send` feature enabled, all fields of `LuaState` are
+// `Send`-safe:
+// - `ProtoRef` is `Arc<Proto>` (Send + Sync)
+// - `UserDataBox` is `Box<dyn Any + Send>` (Send)
+// - `GcRef<T>` is two `u32` indices + PhantomData (Send)
+// - `Gc` contains `Arena<T>` (Vec of owned data) and `StringTable` (HashMap)
+// - `IoFile` has `unsafe impl Send` (FILE* can be transferred between threads)
+// - All other fields are primitives, `Vec<Val>`, `Vec<CallInfo>`, etc.
+//
+// `Lua` requires `&mut self` for all operations, preventing concurrent access.
+// This impl enables embedding rilua in frameworks (e.g., bevy_mod_scripting)
+// that store script contexts behind a Mutex.
+#[cfg(feature = "send")]
+#[allow(unsafe_code)]
+unsafe impl Send for Lua {}
 
 impl Lua {
     /// Creates a new Lua state with all standard libraries loaded.
@@ -188,9 +204,9 @@ impl Lua {
     /// Compiles Lua source bytes (or loads a binary chunk) and returns a function handle.
     pub fn load_bytes(&mut self, source: &[u8], name: &str) -> LuaResult<Function> {
         let proto = compile_or_undump(source, name)?;
-        let mut proto = Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+        let mut proto = ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
         patch_string_constants(&mut proto, &mut self.state.gc);
-        let proto = Rc::new(proto);
+        let proto = ProtoRef::new(proto);
 
         let num_upvalues = proto.num_upvalues as usize;
         let mut lua_cl = LuaClosure::new(proto, self.state.global);
@@ -241,7 +257,21 @@ impl Lua {
     /// The returned `AnyUserData` handle can be passed to Lua code or
     /// stored as a global. Use [`AnyUserData::set_metatable`] to attach
     /// methods.
+    ///
+    /// With the `send` feature enabled, `T` must also implement `Send`.
+    #[cfg(not(feature = "send"))]
     pub fn create_userdata<T: Any>(&mut self, data: T) -> AnyUserData {
+        let ud = vm::value::Userdata::new(Box::new(data));
+        let r = self.state.gc.alloc_userdata(ud);
+        AnyUserData(r)
+    }
+
+    /// Creates a new userdata containing `data` with no metatable.
+    ///
+    /// With the `send` feature, `T` must implement `Send` so the `Lua`
+    /// instance remains thread-safe.
+    #[cfg(feature = "send")]
+    pub fn create_userdata<T: Any + Send>(&mut self, data: T) -> AnyUserData {
         let ud = vm::value::Userdata::new(Box::new(data));
         let r = self.state.gc.alloc_userdata(ud);
         AnyUserData(r)
@@ -253,7 +283,22 @@ impl Lua {
     /// metatable for that name already exists, it is reused. This is the
     /// same pattern used by PUC-Rio's `luaL_newmetatable` for C userdata
     /// types.
+    #[cfg(not(feature = "send"))]
     pub fn create_typed_userdata<T: Any>(
+        &mut self,
+        data: T,
+        type_name: &str,
+    ) -> LuaResult<AnyUserData> {
+        let mt = stdlib::new_metatable(&mut self.state, type_name)?;
+        let ud = vm::value::Userdata::with_metatable(Box::new(data), mt);
+        let r = self.state.gc.alloc_userdata(ud);
+        Ok(AnyUserData(r))
+    }
+
+    /// Creates a new userdata with a named, registry-cached metatable
+    /// (thread-safe variant).
+    #[cfg(feature = "send")]
+    pub fn create_typed_userdata<T: Any + Send>(
         &mut self,
         data: T,
         type_name: &str,
@@ -550,10 +595,10 @@ impl Lua {
     // -----------------------------------------------------------------------
 
     /// Patches string constants, creates a main closure, and executes it.
-    fn run_proto(&mut self, proto: Rc<Proto>) -> LuaResult<()> {
-        let mut proto = Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+    fn run_proto(&mut self, proto: ProtoRef) -> LuaResult<()> {
+        let mut proto = ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
         patch_string_constants(&mut proto, &mut self.state.gc);
-        let proto = Rc::new(proto);
+        let proto = ProtoRef::new(proto);
 
         let num_upvalues = proto.num_upvalues as usize;
         let mut lua_cl = LuaClosure::new(proto, self.state.global);
@@ -641,7 +686,7 @@ pub fn exec_with_name(source: &[u8], name: &str) -> LuaResult<()> {
 /// Detects the `\x1bLua` signature and dispatches to `undump` for binary
 /// chunks or `compile` for source text. Both return an unpatched Proto
 /// (strings in `string_pool`, `Val::Nil` placeholders).
-pub(crate) fn compile_or_undump(source: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
+pub(crate) fn compile_or_undump(source: &[u8], name: &str) -> LuaResult<ProtoRef> {
     // Skip shebang line before checking for binary signature.
     // PUC-Rio's luaL_loadfile reads past the leading '#' line, then
     // checks if the remaining content starts with LUA_SIGNATURE.
@@ -672,7 +717,7 @@ pub(crate) fn patch_string_constants(proto: &mut Proto, gc: &mut Gc) {
         proto.constants[idx as usize] = Val::Str(str_ref);
     }
     for child in &mut proto.protos {
-        patch_string_constants(Rc::make_mut(child), gc);
+        patch_string_constants(ProtoRef::make_mut(child), gc);
     }
 }
 
@@ -968,5 +1013,14 @@ mod tests {
         set_interrupted();
         clear_interrupted();
         assert!(!check_interrupted(), "flag should be false after clear");
+    }
+
+    /// Compile-time assertion that `Lua` is `Send` when the `send`
+    /// feature is enabled.
+    #[cfg(feature = "send")]
+    #[test]
+    fn lua_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Lua>();
     }
 }

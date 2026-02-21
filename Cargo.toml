@@ -14,6 +14,7 @@ keywords = ["lua", "interpreter", "scripting", "wow", "vm"]
 [features]
 default = []
 dynmod = []
+send = []
 
 [[bin]]
 name = "rilua"

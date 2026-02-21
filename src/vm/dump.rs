@@ -380,7 +380,7 @@ mod tests {
         inner.line_info.push(0);
 
         let mut outer = Proto::new("=test");
-        outer.protos.push(std::rc::Rc::new(inner));
+        outer.protos.push(crate::vm::proto::ProtoRef::new(inner));
         outer
             .code
             .push(Instruction::abc(OpCode::Return, 0, 1, 0).raw());
@@ -429,7 +429,7 @@ mod tests {
         inner.line_info.push(0);
 
         let mut outer = Proto::new("=test");
-        outer.protos.push(std::rc::Rc::new(inner));
+        outer.protos.push(crate::vm::proto::ProtoRef::new(inner));
         outer
             .code
             .push(Instruction::abc(OpCode::Return, 0, 1, 0).raw());

@@ -55,6 +55,13 @@ struct IoFile {
     is_std_handle: bool,
 }
 
+// IoFile contains a raw pointer which is !Send by default. The FILE*
+// pointer can be safely transferred between threads (only concurrent
+// access is unsafe, which is prevented by &mut Lua).
+#[cfg(feature = "send")]
+#[allow(unsafe_code)]
+unsafe impl Send for IoFile {}
+
 // ---------------------------------------------------------------------------
 // Argument helpers (same pattern as other stdlib modules)
 // ---------------------------------------------------------------------------
