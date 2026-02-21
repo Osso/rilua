@@ -127,6 +127,27 @@ src/
 | Metatables | PUC-Rio 5.1.1 dispatch semantics | 17 metamethods, type coercion rules |
 | Coroutines | Threads with shared GC heap | Independent stacks, cooperative multithreading |
 | Testing strategy | Spec-driven, multi-layer | Correctness assurance ([testing.md](testing.md)) |
+| Platform abstraction | Centralized FFI with WASM stubs | Cross-platform without conditional code in consumers ([wasm.md](wasm.md)) |
+
+## Platform Support
+
+All C FFI declarations are centralized in `src/platform.rs`. Consumer
+modules import from `platform` rather than declaring their own `extern`
+blocks. This keeps `#[cfg]` gates in one place.
+
+On `wasm32-unknown-unknown`, a `wasm_stubs` module provides pure-Rust
+replacements for every C function. The VM, compiler, and core libraries
+compile without changes. I/O and OS functions return error values since
+there is no filesystem.
+
+Supported targets:
+
+| Target | Status | Notes |
+|--------|--------|-------|
+| `x86_64-unknown-linux-gnu` | Full | Primary development platform |
+| `x86_64-apple-darwin` / `aarch64-apple-darwin` | Full | macOS (Intel + Apple Silicon) |
+| `x86_64-pc-windows-msvc` | Full | MSVC toolchain, links ucrt |
+| `wasm32-unknown-unknown` | Core | No I/O/OS; see [wasm.md](wasm.md) |
 
 ## Reference Implementations
 

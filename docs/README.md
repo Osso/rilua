@@ -25,6 +25,8 @@ in Rust.
    notes
 2. [stdlib.md](stdlib.md) -- All 9 standard libraries, function lists,
    implementation notes
+3. [wasm.md](wasm.md) -- WebAssembly target: library availability,
+   platform stubs, building for the browser
 
 ## Quality
 

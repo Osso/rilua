@@ -14,6 +14,17 @@ and this project adheres to
   inline task definitions, add profiling tools (flamegraph, inferno) and
   coverage tool (cargo-llvm-cov), organize sections with comments
 
+### Documentation
+
+- Add `docs/wasm.md`: WebAssembly target documentation covering library
+  availability, platform stubs, building for browser, and limitations
+- Add platform support section to `docs/architecture.md` with target
+  matrix and platform abstraction design
+- Add platform support section to `README.md`
+- Update docs index (`docs/README.md`) with WASM documentation link
+- Fix Read the Docs mdbook build (use `--root` for predictable
+  install path with asdf-managed Rust)
+
 ### Other
 
 - Track `examples/wasm-demo/Cargo.lock` for reproducible builds

@@ -183,6 +183,17 @@ Arena-based incremental mark-sweep with generational indices:
   feature, `package.loadlib` loads rilua-native Rust modules.
   Lua file loading via `require` works in all configurations.
 
+### Platform Support
+
+rilua compiles for Linux, macOS, Windows, and `wasm32-unknown-unknown`.
+All C FFI is centralized in `src/platform.rs` with pure-Rust stubs on
+WASM. Core VM, compiler, and computational libraries (base, string,
+table, math, coroutine, debug) work on all platforms. I/O and OS
+libraries require a filesystem and return errors on WASM.
+
+See `docs/wasm.md` for building WASM targets and `examples/wasm-demo/`
+for a browser demo.
+
 ### Platform Notes
 
 - **SIGINT handling**: Ctrl+C interrupts running code on Unix and Windows.
