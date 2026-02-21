@@ -16,4 +16,5 @@ build:
       - cargo install mdbook mdbook-mermaid --root $HOME/.local
     build:
       html:
-        - $HOME/.local/bin/mdbook build docs --dest-dir $READTHEDOCS_OUTPUT/html
+        # Prepend install dir to PATH so mdbook can find mdbook-mermaid
+        - PATH=$HOME/.local/bin:$PATH mdbook build docs --dest-dir $READTHEDOCS_OUTPUT/html
