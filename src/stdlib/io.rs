@@ -10,9 +10,9 @@ use crate::vm::table::Table;
 use crate::vm::value::{Userdata, Val};
 
 use crate::platform::{
-    self, LibcFile, c_pclose, c_popen, c_stderr, c_stdin, c_stdout, clearerr, fclose, ferror,
-    fflush, fgets, fopen, fprintf, fread, fscanf, fseek, ftell, fwrite, getc, setvbuf, strlen,
-    tmpfile, ungetc,
+    self, LibcFile, c_fprintf_number, c_fscanf_number, c_pclose, c_popen, c_stderr, c_stdin,
+    c_stdout, clearerr, fclose, ferror, fflush, fgets, fopen, fread, fseek, ftell, fwrite, getc,
+    setvbuf, strlen, tmpfile, ungetc,
 };
 
 /// fseek whence constants (POSIX).
@@ -458,8 +458,7 @@ fn g_write(state: &mut LuaState, fp: *mut LibcFile, first_arg: usize) -> LuaResu
         match val {
             Val::Num(d) => {
                 // fprintf(f, LUA_NUMBER_FMT, d) where LUA_NUMBER_FMT is "%.14g"
-                let fmt = b"%.14g\0";
-                let ok = unsafe { fprintf(fp, fmt.as_ptr(), d) } > 0;
+                let ok = c_fprintf_number(fp, d) > 0;
                 status = status && ok;
             }
             Val::Str(r) => {
@@ -524,12 +523,8 @@ pub fn f_flush(state: &mut LuaState) -> LuaResult<u32> {
 ///
 /// Returns `true` on success (pushes number), `false` on failure (pushes nothing).
 /// Matches PUC-Rio's `read_number` in `liolib.c`.
-#[allow(unsafe_code)]
 fn read_number(state: &mut LuaState, fp: *mut LibcFile) -> bool {
-    let mut d: f64 = 0.0;
-    let fmt = b"%lf\0";
-    let result = unsafe { fscanf(fp, fmt.as_ptr(), &raw mut d) };
-    if result == 1 {
+    if let Some(d) = c_fscanf_number(fp) {
         state.push(Val::Num(d));
         true
     } else {

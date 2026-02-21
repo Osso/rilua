@@ -11,8 +11,12 @@
 //! - `mkstemp`/`tmpnam` -> `c_tmpname()` via `File::create_new()`
 //! - `isatty` -> `std::io::IsTerminal` (in `rilua.rs` binary)
 //!
-//! Remaining FFI (locale, broken-down time, FILE* streams) has no Rust
-//! std equivalent and must stay as C bindings.
+//! On WASM (`target_arch = "wasm32"`), all C FFI is replaced with
+//! pure-Rust stubs. Core VM functions (`strtod`, `localeconv`, `strcoll`)
+//! use ASCII-only equivalents. Stdlib I/O and OS functions return errors.
+//!
+//! Remaining FFI on native targets (locale, broken-down time, FILE*
+//! streams) has no Rust std equivalent and must stay as C bindings.
 //!
 //! Reference: PUC-Rio's `luaconf.h` for the equivalent C approach.
 
@@ -24,12 +28,13 @@
 pub(crate) enum LibcFile {}
 
 // ---------------------------------------------------------------------------
-// Portable C functions (identical on all platforms)
+// Portable C functions (identical on all native platforms)
 // ---------------------------------------------------------------------------
 
 // On MSVC, `fprintf`/`fscanf` are inline functions in headers since VS2015.
 // The non-inline definitions live in `legacy_stdio_definitions.lib`.
 // All other C runtime functions are in `ucrt.lib`.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(unsafe_code)]
 #[cfg_attr(target_env = "msvc", link(name = "ucrt"))]
 #[cfg_attr(target_env = "msvc", link(name = "legacy_stdio_definitions"))]
@@ -66,6 +71,357 @@ unsafe extern "C" {
     pub(crate) fn mktime(tm: *mut Tm) -> TimeT;
     pub(crate) fn strftime(s: *mut u8, max: usize, format: *const u8, tm: *const Tm) -> usize;
     pub(crate) fn setlocale(category: i32, locale: *const u8) -> *const u8;
+
+    // Character classification and case conversion (ctype.h).
+    // Used by string.lower, string.upper, and pattern matching.
+    pub(crate) fn isalpha(c: i32) -> i32;
+    pub(crate) fn iscntrl(c: i32) -> i32;
+    pub(crate) fn isdigit(c: i32) -> i32;
+    pub(crate) fn islower(c: i32) -> i32;
+    pub(crate) fn ispunct(c: i32) -> i32;
+    pub(crate) fn isspace(c: i32) -> i32;
+    pub(crate) fn isupper(c: i32) -> i32;
+    pub(crate) fn isalnum(c: i32) -> i32;
+    pub(crate) fn isxdigit(c: i32) -> i32;
+    pub(crate) fn tolower(c: i32) -> i32;
+    pub(crate) fn toupper(c: i32) -> i32;
+}
+
+// ---------------------------------------------------------------------------
+// WASM stubs -- pure-Rust replacements for all C FFI
+// ---------------------------------------------------------------------------
+
+/// WASM stubs for C functions. FILE* operations return error values.
+/// Core VM functions (`strtod`, `localeconv`, `strcoll`) use pure-Rust
+/// implementations.
+///
+/// All stubs are marked `unsafe` to match the `extern "C"` signatures
+/// they replace, so call sites don't need `#[cfg]`-gated `unsafe` blocks.
+#[cfg(target_arch = "wasm32")]
+#[allow(unsafe_code)]
+pub(crate) mod wasm_stubs {
+    use super::*;
+
+    // -- FILE* stream operations (all return error / null / 0) --
+
+    pub(crate) unsafe fn fopen(_filename: *const u8, _mode: *const u8) -> *mut LibcFile {
+        std::ptr::null_mut()
+    }
+
+    pub(crate) unsafe fn fclose(_file: *mut LibcFile) -> i32 {
+        -1
+    }
+
+    pub(crate) unsafe fn fflush(_file: *mut LibcFile) -> i32 {
+        -1
+    }
+
+    pub(crate) unsafe fn fread(
+        _ptr: *mut u8,
+        _size: usize,
+        _nmemb: usize,
+        _stream: *mut LibcFile,
+    ) -> usize {
+        0
+    }
+
+    pub(crate) unsafe fn fwrite(
+        _ptr: *const u8,
+        _size: usize,
+        _nmemb: usize,
+        _stream: *mut LibcFile,
+    ) -> usize {
+        0
+    }
+
+    pub(crate) unsafe fn fgets(_s: *mut u8, _n: i32, _stream: *mut LibcFile) -> *mut u8 {
+        std::ptr::null_mut()
+    }
+
+    pub(crate) unsafe fn fseek(_stream: *mut LibcFile, _offset: i64, _whence: i32) -> i32 {
+        -1
+    }
+
+    pub(crate) unsafe fn ftell(_stream: *mut LibcFile) -> i64 {
+        -1
+    }
+
+    pub(crate) unsafe fn ferror(_stream: *mut LibcFile) -> i32 {
+        1
+    }
+
+    pub(crate) unsafe fn clearerr(_stream: *mut LibcFile) {}
+
+    #[allow(dead_code)]
+    pub(crate) unsafe fn feof(_stream: *mut LibcFile) -> i32 {
+        1
+    }
+
+    pub(crate) unsafe fn getc(_stream: *mut LibcFile) -> i32 {
+        -1 // EOF
+    }
+
+    pub(crate) unsafe fn ungetc(_c: i32, _stream: *mut LibcFile) -> i32 {
+        -1 // EOF
+    }
+
+    pub(crate) unsafe fn setvbuf(
+        _stream: *mut LibcFile,
+        _buf: *mut u8,
+        _mode: i32,
+        _size: usize,
+    ) -> i32 {
+        -1
+    }
+
+    pub(crate) unsafe fn tmpfile() -> *mut LibcFile {
+        std::ptr::null_mut()
+    }
+
+    pub(crate) unsafe fn strlen(s: *const u8) -> usize {
+        if s.is_null() {
+            return 0;
+        }
+        let mut len = 0;
+        // SAFETY: walks until NUL byte, caller must provide valid C string.
+        unsafe {
+            while *s.add(len) != 0 {
+                len += 1;
+            }
+        }
+        len
+    }
+
+    // -- Core VM: number parsing / locale --
+
+    /// Pure-Rust `strtod` replacement.
+    ///
+    /// Parses a NUL-terminated byte string as a float. Handles decimal
+    /// and leading whitespace. Returns the parsed value and sets `*endptr`
+    /// to point past the consumed bytes.
+    pub(crate) unsafe fn strtod(nptr: *const u8, endptr: *mut *mut u8) -> f64 {
+        // SAFETY: All pointer operations below require that `nptr` points to
+        // a valid NUL-terminated byte string. The caller (luaO_str2d) ensures
+        // this by passing a NUL-terminated buffer.
+        unsafe {
+            if nptr.is_null() {
+                if !endptr.is_null() {
+                    *endptr = nptr.cast_mut();
+                }
+                return 0.0;
+            }
+
+            // Read bytes until NUL.
+            let mut len = 0;
+            while *nptr.add(len) != 0 {
+                len += 1;
+            }
+            let bytes = std::slice::from_raw_parts(nptr, len);
+
+            // Skip leading whitespace.
+            let start = bytes
+                .iter()
+                .position(|b| !b.is_ascii_whitespace())
+                .unwrap_or(len);
+
+            if start >= len {
+                if !endptr.is_null() {
+                    *endptr = nptr.cast_mut();
+                }
+                return 0.0;
+            }
+
+            let rest = &bytes[start..];
+
+            // Try parsing as a Rust float (handles decimal, inf, nan).
+            let Ok(s) = std::str::from_utf8(rest) else {
+                if !endptr.is_null() {
+                    *endptr = nptr.cast_mut();
+                }
+                return 0.0;
+            };
+
+            // Try progressively shorter prefixes to find longest valid parse.
+            let mut best_len = 0;
+            let mut best_val = 0.0;
+            for end in (1..=s.len()).rev() {
+                if let Ok(val) = s[..end].parse::<f64>() {
+                    best_len = end;
+                    best_val = val;
+                    break;
+                }
+            }
+
+            if !endptr.is_null() {
+                *endptr = nptr.add(start + best_len).cast_mut();
+            }
+            best_val
+        }
+    }
+
+    /// Returns a static `LConv` with decimal_point = '.'.
+    static WASM_LCONV: LConv = LConv {
+        decimal_point: c".".as_ptr().cast(),
+    };
+
+    pub(crate) unsafe fn localeconv() -> *const LConv {
+        &raw const WASM_LCONV
+    }
+
+    /// Byte-wise string comparison (no locale awareness).
+    pub(crate) unsafe fn strcoll(s1: *const u8, s2: *const u8) -> i32 {
+        // SAFETY: Caller must provide valid NUL-terminated strings.
+        unsafe {
+            let len1 = strlen(s1);
+            let len2 = strlen(s2);
+            let a = std::slice::from_raw_parts(s1, len1);
+            let b = std::slice::from_raw_parts(s2, len2);
+            match a.cmp(b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            }
+        }
+    }
+
+    // -- Time / locale (return errors or zero) --
+
+    pub(crate) unsafe fn clock() -> ClockT {
+        0
+    }
+
+    pub(crate) unsafe fn mktime(_tm: *mut Tm) -> TimeT {
+        -1
+    }
+
+    pub(crate) unsafe fn strftime(
+        _s: *mut u8,
+        _max: usize,
+        _format: *const u8,
+        _tm: *const Tm,
+    ) -> usize {
+        0
+    }
+
+    pub(crate) unsafe fn setlocale(_category: i32, _locale: *const u8) -> *const u8 {
+        std::ptr::null()
+    }
+
+    // -- Character classification (ASCII-only on WASM) --
+    // The C ctype functions take an `int` (unsigned char promoted).
+    // We truncate to u8 and use Rust's ASCII methods.
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn isalpha(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_alphabetic())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn iscntrl(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_control())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn isdigit(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_digit())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn islower(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_lowercase())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn ispunct(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_punctuation())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn isspace(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_whitespace())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn isupper(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_uppercase())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn isalnum(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_alphanumeric())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn isxdigit(c: i32) -> i32 {
+        i32::from((c as u8).is_ascii_hexdigit())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn tolower(c: i32) -> i32 {
+        i32::from((c as u8).to_ascii_lowercase())
+    }
+
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) unsafe fn toupper(c: i32) -> i32 {
+        i32::from((c as u8).to_ascii_uppercase())
+    }
+}
+
+// Re-export WASM stubs as if they were the extern functions.
+#[cfg(target_arch = "wasm32")]
+pub(crate) use wasm_stubs::{
+    clearerr, clock, fclose, ferror, fflush, fgets, fopen, fread, fseek, ftell, fwrite, getc,
+    isalnum, isalpha, iscntrl, isdigit, islower, ispunct, isspace, isupper, isxdigit, localeconv,
+    mktime, setlocale, setvbuf, strcoll, strftime, strlen, strtod, tmpfile, tolower, toupper,
+    ungetc,
+};
+
+// ---------------------------------------------------------------------------
+// fprintf/fscanf wrappers for number I/O
+// ---------------------------------------------------------------------------
+//
+// fprintf and fscanf are C variadic functions. Rust stable cannot declare
+// variadic fn signatures outside extern "C" blocks. Instead of exposing
+// them directly, we provide purpose-specific wrappers that io.rs calls.
+
+/// Writes a float to `stream` using C's `fprintf(stream, "%.14g", d)`.
+///
+/// Returns the number of bytes written, or a negative value on error.
+/// On WASM, always returns -1 (no I/O).
+#[allow(unsafe_code)]
+pub(crate) fn c_fprintf_number(stream: *mut LibcFile, d: f64) -> i32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (stream, d);
+        -1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let fmt = b"%.14g\0";
+        // SAFETY: fprintf is a C function, stream must be a valid FILE*.
+        unsafe { fprintf(stream, fmt.as_ptr(), d) }
+    }
+}
+
+/// Reads a float from `stream` using C's `fscanf(stream, "%lf", &d)`.
+///
+/// Returns `Some(value)` on success, `None` if no number could be read.
+/// On WASM, always returns `None` (no I/O).
+#[allow(unsafe_code)]
+pub(crate) fn c_fscanf_number(stream: *mut LibcFile) -> Option<f64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = stream;
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut d: f64 = 0.0;
+        let fmt = b"%lf\0";
+        // SAFETY: fscanf is a C function, stream must be a valid FILE*.
+        let result = unsafe { fscanf(stream, fmt.as_ptr(), &raw mut d) };
+        if result == 1 { Some(d) } else { None }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +434,12 @@ pub(crate) struct LConv {
     pub(crate) decimal_point: *const u8,
     // remaining fields omitted
 }
+
+// SAFETY: LConv only contains a raw pointer to a static byte string.
+// The WASM static instance is immutable and lives for the program lifetime.
+#[cfg(target_arch = "wasm32")]
+#[allow(unsafe_code)]
+unsafe impl Sync for LConv {}
 
 // ---------------------------------------------------------------------------
 // Time types
@@ -122,9 +484,9 @@ pub(crate) struct Tm {
     pub(crate) tm_isdst: i32,
     // glibc/BSD extensions (must be present for correct struct size on
     // Linux and macOS):
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
     tm_gmtoff: i64,
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
     tm_zone: *const i8,
 }
 
@@ -143,9 +505,9 @@ impl Default for Tm {
             tm_wday: 0,
             tm_yday: 0,
             tm_isdst: 0,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
             tm_gmtoff: 0,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
             tm_zone: std::ptr::null(),
         }
     }
@@ -158,15 +520,23 @@ impl Default for Tm {
 /// Returns the current time as seconds since the Unix epoch.
 ///
 /// Equivalent to C's `time(NULL)`. Uses `SystemTime` to avoid FFI.
+/// On WASM, `SystemTime::now()` may not be available, so returns 0.
 pub(crate) fn current_time() -> TimeT {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // SystemTime::now() can theoretically be before UNIX_EPOCH on misconfigured
-    // systems; fall back to 0 (same as what time(NULL) would do on error: -1,
-    // but 0 is safer for Lua's os.time()).
-    #[allow(clippy::cast_possible_wrap)]
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as TimeT,
-        Err(_) => 0,
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        // SystemTime::now() can theoretically be before UNIX_EPOCH on misconfigured
+        // systems; fall back to 0 (same as what time(NULL) would do on error: -1,
+        // but 0 is safer for Lua's os.time()).
+        #[allow(clippy::cast_possible_wrap)]
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_secs() as TimeT,
+            Err(_) => 0,
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        0
     }
 }
 
@@ -203,6 +573,11 @@ unsafe extern "C" {
 /// Returns a pointer to C `stdin`.
 #[allow(unsafe_code)]
 pub(crate) fn c_stdin() -> *mut LibcFile {
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::ptr::null_mut()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     unsafe {
         #[cfg(not(target_os = "windows"))]
         {
@@ -218,6 +593,11 @@ pub(crate) fn c_stdin() -> *mut LibcFile {
 /// Returns a pointer to C `stdout`.
 #[allow(unsafe_code)]
 pub(crate) fn c_stdout() -> *mut LibcFile {
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::ptr::null_mut()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     unsafe {
         #[cfg(not(target_os = "windows"))]
         {
@@ -233,6 +613,11 @@ pub(crate) fn c_stdout() -> *mut LibcFile {
 /// Returns a pointer to C `stderr`.
 #[allow(unsafe_code)]
 pub(crate) fn c_stderr() -> *mut LibcFile {
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::ptr::null_mut()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     unsafe {
         #[cfg(not(target_os = "windows"))]
         {
@@ -249,7 +634,7 @@ pub(crate) fn c_stderr() -> *mut LibcFile {
 // popen / pclose
 // ---------------------------------------------------------------------------
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 #[allow(unsafe_code)]
 unsafe extern "C" {
     fn popen(command: *const u8, r#type: *const u8) -> *mut LibcFile;
@@ -269,20 +654,36 @@ unsafe extern "C" {
 /// Opens a pipe to a command (POSIX `popen` / Windows `_popen`).
 #[allow(unsafe_code)]
 pub(crate) fn c_popen(command: *const u8, mode: *const u8) -> *mut LibcFile {
-    unsafe { popen(command, mode) }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (command, mode);
+        std::ptr::null_mut()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    unsafe {
+        popen(command, mode)
+    }
 }
 
 /// Closes a pipe opened with `c_popen`.
 #[allow(unsafe_code)]
 pub(crate) fn c_pclose(stream: *mut LibcFile) -> i32 {
-    unsafe { pclose(stream) }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = stream;
+        -1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    unsafe {
+        pclose(stream)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // localtime / gmtime (thread-safe variants)
 // ---------------------------------------------------------------------------
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 #[allow(unsafe_code)]
 unsafe extern "C" {
     fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm;
@@ -305,6 +706,12 @@ unsafe extern "C" {
 /// Thread-safe `localtime_r` / `localtime_s`. Returns `true` on success.
 #[allow(unsafe_code)]
 pub(crate) fn c_localtime(timep: *const TimeT, result: *mut Tm) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (timep, result);
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     unsafe {
         #[cfg(not(target_os = "windows"))]
         {
@@ -320,6 +727,12 @@ pub(crate) fn c_localtime(timep: *const TimeT, result: *mut Tm) -> bool {
 /// Thread-safe `gmtime_r` / `gmtime_s`. Returns `true` on success.
 #[allow(unsafe_code)]
 pub(crate) fn c_gmtime(timep: *const TimeT, result: *mut Tm) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (timep, result);
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     unsafe {
         #[cfg(not(target_os = "windows"))]
         {
@@ -343,27 +756,35 @@ pub(crate) fn c_gmtime(timep: *const TimeT, result: *mut Tm) -> bool {
 /// names on collision, similar to how mkstemp works.
 ///
 /// Returns the filename bytes on success, or `None` on failure.
+/// On WASM, always returns `None`.
 pub(crate) fn c_tmpname() -> Option<Vec<u8>> {
-    use std::fs::File;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    let tmp_dir = std::env::temp_dir();
-    let pid = std::process::id();
-
-    // Try a few times in case of collision (unlikely but possible).
-    for _ in 0..16 {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let name = format!("lua_{pid}_{n}");
-        let path = tmp_dir.join(&name);
-        if File::create_new(&path).is_ok() {
-            // File created and immediately dropped (closed).
-            // Return the path as bytes.
-            return path.to_str().map(|s| s.as_bytes().to_vec());
-        }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
     }
-    None
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::fs::File;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+        let tmp_dir = std::env::temp_dir();
+        let pid = std::process::id();
+
+        // Try a few times in case of collision (unlikely but possible).
+        for _ in 0..16 {
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = format!("lua_{pid}_{n}");
+            let path = tmp_dir.join(&name);
+            if File::create_new(&path).is_ok() {
+                // File created and immediately dropped (closed).
+                // Return the path as bytes.
+                return path.to_str().map(|s| s.as_bytes().to_vec());
+            }
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +793,8 @@ pub(crate) fn c_tmpname() -> Option<Vec<u8>> {
 
 /// Locale category constants for `setlocale`.
 pub(crate) mod locale {
-    // Linux/macOS (glibc/BSD) values.
+    // Linux/macOS (glibc/BSD) values. Also used for WASM (values are
+    // arbitrary since setlocale is a no-op there).
     #[cfg(not(target_os = "windows"))]
     pub(crate) const LC_ALL: i32 = 6;
     #[cfg(not(target_os = "windows"))]

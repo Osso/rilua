@@ -958,23 +958,14 @@ enum Quantifier {
     None,
 }
 
-// Locale-aware character classification and case conversion via libc.
-// PUC-Rio uses isalpha(), isupper(), tolower(), toupper(), etc. which
-// respect the current C locale (set via os.setlocale).
-#[allow(unsafe_code)]
-unsafe extern "C" {
-    fn isalpha(c: i32) -> i32;
-    fn iscntrl(c: i32) -> i32;
-    fn isdigit(c: i32) -> i32;
-    fn islower(c: i32) -> i32;
-    fn ispunct(c: i32) -> i32;
-    fn isspace(c: i32) -> i32;
-    fn isupper(c: i32) -> i32;
-    fn isalnum(c: i32) -> i32;
-    fn isxdigit(c: i32) -> i32;
-    fn tolower(c: i32) -> i32;
-    fn toupper(c: i32) -> i32;
-}
+// Locale-aware character classification and case conversion.
+// On native targets, these are libc functions that respect the current
+// C locale (set via os.setlocale). On WASM, ASCII-only stubs are used.
+// All declarations live in platform.rs.
+use crate::platform::{
+    isalnum, isalpha, iscntrl, isdigit, islower, ispunct, isspace, isupper, isxdigit, tolower,
+    toupper,
+};
 
 /// Match a character against a character class letter.
 /// Uses libc functions for locale-aware classification (matching PUC-Rio).
