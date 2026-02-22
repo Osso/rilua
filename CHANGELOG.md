@@ -8,6 +8,21 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.15](https://github.com/wowemulation-dev/rilua/compare/v0.1.14...v0.1.15) - 2026-02-22
+
+### Documentation
+
+- remove duplicate Trace doc comment in LuaString
+- apply KISS and DRY principles across documentation
+- restructure docs/ as mdbook with mermaid support
+- add WASM documentation and sync with recent changes
+
+### Fixed
+
+- add mdbook-mermaid to PATH in RTD build command
+- remove quotes from RTD yaml commands
+- use explicit install path for mdbook on Read the Docs
+
 ### Changed
 
 - Simplify `.mise.toml`: use `"latest"` versions for all dev tools, remove
