@@ -117,10 +117,9 @@ impl fmt::Display for LuaString {
 }
 
 impl Trace for LuaString {
-    /// Strings contain no GC references -- tracing is a no-op.
+    /// No-op: strings contain no GC references.
     fn trace(&self) {}
 
-    /// Strings never need tracing (no internal GC references).
     fn needs_trace(&self) -> bool {
         false
     }
