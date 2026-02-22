@@ -60,18 +60,11 @@ and this project adheres to
 
 ### Fixed
 
-- use correct MSVC symbol names and link libraries for CRT functions
-
-### Fixed
-
+- Use correct MSVC symbol names and link libraries for CRT functions
 - Link `legacy_stdio_definitions` for `fprintf`/`fscanf` on MSVC (inline since VS2015)
 - Use `_gmtime64_s`/`_localtime64_s` symbol names on MSVC (header wrappers don't exist in ucrtbase.dll)
 
 ## [0.1.10](https://github.com/wowemulation-dev/rilua/compare/v0.1.9...v0.1.10) - 2026-02-20
-
-### Fixed
-
-- link ucrt on Windows MSVC for libc FFI symbols
 
 ### Fixed
 
@@ -93,16 +86,6 @@ and this project adheres to
 
 ### Added
 
-- cross-platform signal handling with raw FFI, no libc dependency
-
-### Documentation
-
-- add embedding example and examples README
-- add changelog entry for cross-platform signal handling
-- sync documentation with signal handling changes
-
-### Added
-
 - `dynmod` feature: native module loading via `package.loadlib`. Modules
   are Rust `cdylib` crates compiled against the same rilua/rustc version.
   ABI validation (magic, version, struct sizes) before calling module code.
@@ -115,6 +98,10 @@ and this project adheres to
 - `set_interrupted()` and `clear_interrupted()` public API for embedders
   to integrate custom interrupt sources
 - `examples/run_file.rs` embedding example with `hello.lua` sample script
+
+### Documentation
+
+- add embedding example and examples README
 
 ### Changed
 

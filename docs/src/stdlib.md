@@ -23,7 +23,7 @@ Global functions not in any table.
 | Function | Status | Notes |
 |----------|--------|-------|
 | `assert` | Required | Error with optional message |
-| `collectgarbage` | Required | 7 options, 7 options |
+| `collectgarbage` | Required | 7 options |
 | `dofile` | Required | Load and execute file |
 | `error` | Required | Throw error object at level |
 | `getfenv` | Required | Get function environment |
@@ -109,10 +109,7 @@ metamethod: numbers use `"%.14g"` format, booleans produce
 are discarded). The error handler receives the original error object
 and its return value becomes the error returned by `xpcall`.
 
-### Coroutine Library (registered by `luaopen_base`)
-
-The coroutine library is registered as the `coroutine` table by
-`luaopen_base()`. It provides cooperative multithreading.
+### Coroutine Library (`stdlib/base.rs`)
 
 | Function | Notes |
 |----------|-------|

@@ -9,10 +9,7 @@ compatibility target.**
 
 Current: 1323 tests (607 unit, 431 integration, 277 oracle, 5 proptest, 3 lua51).
 With `dynmod` feature: 1331 tests (609 unit, 6 dynmod, 431 integration,
-277 oracle, 5 proptest, 3 lua51).
-All oracle test cases pass against PUC-Rio 5.1.1. All 5 layers
-are active. PUC-Rio official test suite: all 23 files pass via
-the `all.lua` runner.
+277 oracle, 5 proptest, 3 lua51). All 5 layers are active.
 
 ## Test Layers
 
@@ -177,34 +174,9 @@ Chapter 5 ("Standard Libraries").
 | `stdlib-os.lua` | 5.8 | OS library (clock, date, time, execute, etc.) |
 | `stdlib-debug.lua` | 5.9 | Debug library (getinfo, getlocal, sethook, traceback, etc.) |
 
-```text
-tests/
-  helpers/
-    mod.rs               Shared test utilities
-    oracle.rs            PUC-Rio comparison functions
-  integration.rs         Test runner (calls run_file for each .lua)
-  lua51.rs               PUC-Rio test suite runner
-  lexical.lua            2.1  Lexical conventions
-  types.lua              2.2  Values and types, coercion
-  variables.lua          2.3  Variables
-  statements.lua         2.4  Statements and control flow
-  expressions.lua        2.5  Expressions and operators
-  visibility.lua         2.6  Scoping and closures
-  errors.lua             2.7  Error handling
-  metatables.lua         2.8  Metatables and metamethods
-  environments.lua       2.9  Environments
-  gc.lua                 2.10 Garbage collection
-  coroutines.lua         2.11 Coroutines
-  stdlib-base.lua        5.1  Base library
-  stdlib-package.lua     5.3  Package library
-  stdlib-string.lua      5.4  String library
-  stdlib-table.lua       5.5  Table library
-  stdlib-math.lua        5.6  Math library
-  stdlib-io.lua          5.7  I/O library
-  stdlib-os.lua          5.8  OS library
-  stdlib-debug.lua       5.9  Debug library
-  lua51/                 PUC-Rio official test suite (verbatim)
-```
+Test infrastructure files: `tests/helpers/mod.rs` (shared utilities),
+`tests/helpers/oracle.rs` (PUC-Rio comparison), `tests/integration.rs`
+(runner), `tests/lua51.rs` (PUC-Rio suite runner).
 
 ### Layer 4: PUC-Rio Official Test Suite
 
@@ -283,10 +255,9 @@ for both interpreters. This differs from `all.lua` in that:
   coroutine; `calls.lua` runs without `deep` from `main.lua`).
 - Each test gets a fresh interpreter state.
 
-rilua also passes `all.lua` directly, which requires all individual
-tests to pass plus `main.lua` (CLI subprocess testing), the
-`string.dump` round-trip for all test files, and `debug.sethook`
-for the cleanup hook at the end.
+rilua also passes `all.lua` directly (see
+[What `all.lua` Does](#what-alllua-does) for its additional
+requirements).
 
 #### T Module
 
@@ -358,19 +329,13 @@ end`) are skipped. All four pass with `RILUA_TEST_LIB=1`.
 
 #### Current Status
 
-All 23 files pass (run with `RILUA_TEST_LIB=1`), including the
-`all.lua` runner which executes all tests sequentially with aggressive
-GC settings (stepmul=180, pause=190).
+All 23 files pass: api, attrib, big, calls, checktable, closure, code,
+constructs, db, errors, events, files, gc, literals, locals, main,
+math, nextvar, pm, sort, strings, vararg, verybig.
 
-**Passing** (all 23):
-api, attrib, big, calls, checktable, closure, code, constructs, db,
-errors, events, files, gc, literals, locals, main, math, nextvar, pm,
-sort, strings, vararg, verybig.
-
-The `all.lua` runner wraps big.lua in a coroutine (so yield-from-main
-works) and redefines `dofile` to dump/undump each file (tests bytecode
-serialization). main.lua tests CLI subprocess behavior via
-`os.execute`.
+The `all.lua` runner also passes (see
+[What `all.lua` Does](#what-alllua-does) for its additional
+requirements beyond individual file execution).
 
 **Compatibility flags**: The PUC-Rio test suite was written with
 default compat options enabled (e.g., `LUA_COMPAT_VARARG` enables

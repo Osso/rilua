@@ -52,23 +52,11 @@ as long as `.wasm` files are served with the `application/wasm` MIME type.
 
 ## Available Libraries
 
-The demo loads these standard libraries:
+The demo loads `base`, `string`, `table`, `math`, and `coroutine`.
+Libraries requiring filesystem or process access (`io`, `os`, `package`)
+are excluded. `debug` is also excluded to reduce surface area.
 
-| Library     | Examples                                      |
-|-------------|-----------------------------------------------|
-| `base`      | `print`, `type`, `tostring`, `pcall`, `error` |
-| `string`    | `string.format`, `string.find`, `string.rep`  |
-| `table`     | `table.insert`, `table.sort`, `table.concat`  |
-| `math`      | `math.sin`, `math.random`, `math.pi`          |
-| `coroutine` | `coroutine.create`, `coroutine.resume`         |
-
-The following are excluded because they require filesystem or process
-access not available in `wasm32-unknown-unknown`:
-
-- `io` -- file and stream operations
-- `os` -- time, environment, process control
-- `package` -- `require` and module loading
-- `debug` -- excluded to reduce surface area
+See `docs/src/wasm.md` for the full WASM library availability matrix.
 
 ## How It Works
 

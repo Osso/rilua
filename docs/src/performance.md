@@ -158,15 +158,8 @@ After a confirmed improvement, update the baseline:
 
 ## Comparing Against PUC-Rio Lua
 
-`scripts/compare.sh` runs each test file through both PUC-Rio Lua and
-rilua, producing a markdown compatibility table:
-
-```sh
-# Build PUC-Rio Lua first (see lua-5.1.1/README)
-scripts/compare.sh lua-5.1.1/src/lua target/release/rilua
-```
-
-Output: per-test PASS/FAIL/TIMEOUT comparison with match column.
+See [testing.md](testing.md) for `scripts/compare.sh` usage and
+details on how individual test execution differs from `all.lua`.
 
 ## Remaining Optimization Opportunities
 

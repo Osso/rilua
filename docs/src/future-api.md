@@ -22,8 +22,7 @@ impl Lua {
 
 This requires storing a `Box<dyn Fn>` inside the closure rather than
 a bare function pointer. The current `RustClosure` struct uses upvalue
-slots for state (the same mechanism the standard library uses), which
-works but is less ergonomic for embedders.
+slots for state, which works but is less ergonomic for embedders.
 
 ## Trait-Based Call and Resume
 

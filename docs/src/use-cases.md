@@ -89,9 +89,7 @@ for Rust programs. Use cases include:
 - Game engines (configuration, modding, entity scripting)
 - Command-line tools with user-configurable behavior
 - Applications that need a sandboxed extension language
-
-The zero-dependency constraint means rilua adds no transitive
-dependencies to the host application.
+- No transitive dependencies (see [architecture.md](architecture.md))
 
 ### Lua 5.1.1 conformance reference
 

@@ -5,10 +5,9 @@ in the browser or other WebAssembly runtimes.
 
 ## How It Works
 
-All C FFI in rilua is centralized in `src/platform.rs`. When targeting
-`wasm32`, a parallel set of pure-Rust stubs replaces every `extern "C"`
-function. The VM, compiler, and core standard libraries run unchanged --
-only the platform layer is swapped.
+When targeting `wasm32`, `src/platform.rs` swaps every `extern "C"`
+function for a pure-Rust stub. Only the platform layer changes; the
+VM, compiler, and core standard libraries are unmodified.
 
 ```text
 platform.rs
@@ -150,14 +149,10 @@ captured output after execution.
 
 ## Limitations
 
-- **No filesystem**: `dofile`, `loadfile`, `io.*`, `os.remove`,
-  `os.rename`, `os.tmpname` return errors
-- **No process control**: `os.execute`, `io.popen` return errors
-- **No locale support**: `os.setlocale` is a no-op, `os.date`
-  formatting via `strftime` returns empty strings
-- **No clock**: `os.clock` returns -1
-- **ASCII-only number parsing**: locale-dependent decimal separators
-  (e.g., comma) are not supported
-- **No stdin/stdout/stderr**: `io.stdin`, `io.stdout`, `io.stderr`
-  are null pointers; `print` writes to stdout which goes nowhere
-  unless overridden (as the demo does)
+See the [Standard Library Availability](#standard-library-availability)
+table and [Locale Differences](#locale-differences) section above for
+specifics. In summary: no filesystem, no process control, no locale,
+no clock, ASCII-only number parsing.
+
+`print` writes to stdout, which does not exist in WASM. Override it
+to capture output (as the [browser demo](#browser-demo) does).

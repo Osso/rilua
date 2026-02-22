@@ -10,14 +10,11 @@
 PUC-Rio Lua exposes a stack-based C API where values are pushed and
 popped from a virtual stack. This works well in C but is unergonomic
 in Rust -- it lacks type safety, requires manual stack management,
-and does not leverage Rust's trait system.
+and does not leverage Rust's trait system. rilua uses traits for type
+conversion, methods for common operations, and the type system for
+safety instead.
 
-rilua provides a Rust-idiomatic API using traits for type conversion,
-methods for common operations, and the type system for safety. The
-API is designed for embedding Lua in Rust applications.
-
-See `docs/future-api.md` for planned ergonomic improvements that are
-not yet implemented.
+See [future-api.md](future-api.md) for planned ergonomic improvements.
 
 ## Core Type: Lua
 
@@ -100,9 +97,8 @@ impl Lua {
     pub fn create_string(&mut self, s: &[u8]) -> Val { ... }
 
     /// Register a Rust function as a global Lua function.
-    ///
-    /// `RustFn` is `fn(&mut LuaState) -> LuaResult<u32>` where the
-    /// return value is the number of results pushed onto the stack.
+    /// See [Implementing Native Functions](#implementing-native-functions)
+    /// for the `RustFn` signature and usage.
     pub fn register_function(
         &mut self, name: &str, func: RustFn,
     ) -> LuaResult<()> { ... }
@@ -411,7 +407,8 @@ fn main() -> rilua::LuaResult<()> {
 
 The `RustFn` type is `fn(&mut LuaState) -> LuaResult<u32>`. It takes
 a function pointer, not a closure. For stateful native functions, use
-RustClosure upvalues (the same mechanism the standard library uses).
+RustClosure upvalues (see [future-api.md](future-api.md) for a
+planned closure-based alternative).
 
 ## Internal Stack Model
 
@@ -557,9 +554,3 @@ incremental GC:
 C closure upvalues and table entries both require write barriers when
 mutated through the API.
 
-## Compatibility Note
-
-While the public API is Rust-idiomatic, internal implementation
-uses a lower-level stack-based API for stdlib functions that mirrors
-PUC-Rio's `lua_*` conventions. This is an internal detail, not part
-of the public API.

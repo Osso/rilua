@@ -247,7 +247,7 @@ cargo run -- script.lua
 cargo test
 
 # Run quality gate
-cargo fmt -- --check && cargo clippy --all-targets && cargo test && cargo doc --no-deps
+cargo fmt -- --check && cargo clippy --all-targets && cargo test && cargo deny check && cargo doc --no-deps
 ```
 
 ## Testing
