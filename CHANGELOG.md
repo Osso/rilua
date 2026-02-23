@@ -8,6 +8,22 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.17](https://github.com/wowemulation-dev/rilua/compare/v0.1.16...v0.1.17) - 2026-02-23
+
+### Added
+
+- add per-test benchmark script for PUC-Rio vs rilua comparison
+
+### Documentation
+
+- update benchmarks with bench-all.lua results after dead-key fix
+- update CHANGELOG with dead-key fix and benchmark additions
+- add per-test benchmark results and optimization priorities
+
+### Fixed
+
+- reuse dead hash slots in new_key to prevent chain corruption
+
 ### Fixed
 
 - Fix hash chain corruption when inserting keys into tables with GC-swept
