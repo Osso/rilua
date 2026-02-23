@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "rilua"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "criterion",
  "flamegraph",
