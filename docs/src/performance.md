@@ -29,45 +29,48 @@ requires a coroutine wrapper set by `all.lua`.
 
 | Test | PUC-Rio | rilua | Ratio |
 |------|--------:|------:|------:|
-| gc.lua | 72 | 86 | 1.19x |
-| db.lua | 17 | 30 | 1.76x |
+| gc.lua | 70 | 85 | 1.21x |
+| db.lua | 16 | 30 | 1.88x |
 | calls.lua | 7 | 9 | 1.29x |
-| strings.lua | 2 | 3 | 1.50x |
+| strings.lua | 3 | 3 | 1.00x |
 | literals.lua | 3 | 3 | 1.00x |
-| attrib.lua | 4 | 5 | 1.25x |
-| locals.lua | 5 | 7 | 1.40x |
-| constructs.lua | 251 | 601 | 2.39x |
+| attrib.lua | 4 | 4 | 1.00x |
+| locals.lua | 4 | 6 | 1.50x |
+| constructs.lua | 252 | 583 | 2.31x |
 | code.lua | 2 | 2 | 1.00x |
-| nextvar.lua | 13 | 31 | 2.38x |
-| pm.lua | 10 | 11 | 1.10x |
+| nextvar.lua | 13 | 28 | 2.15x |
+| pm.lua | 11 | 11 | 1.00x |
 | api.lua | 3 | 3 | 1.00x |
-| events.lua | 2 | 3 | 1.50x |
+| events.lua | 3 | 3 | 1.00x |
 | vararg.lua | 2 | 2 | 1.00x |
 | closure.lua | 5 | 8 | 1.60x |
-| errors.lua | 139 | 144 | 1.04x |
+| errors.lua | 135 | 148 | 1.10x |
 | math.lua | 5 | 6 | 1.20x |
-| sort.lua | 51 | 93 | 1.82x |
-| verybig.lua | 124 | 225 | 1.81x |
+| sort.lua | 55 | 98 | 1.78x |
+| verybig.lua | 115 | 217 | 1.89x |
 | files.lua | 12 | 13 | 1.08x |
-| **Sum** | **729** | **1285** | **1.76x** |
+| **Sum** | **720** | **1262** | **1.75x** |
 
 ### Interpretation
 
-rilua is 1.76x slower than PUC-Rio Lua overall. Most tests are within
-1.0-1.5x. Three tests account for the majority of the gap:
+rilua is 1.75x slower than PUC-Rio Lua overall. Most tests are within
+1.0-1.5x. Four tests account for the majority of the gap:
 
-- **constructs.lua** (2.39x, +350ms): heavy control-flow constructs,
+- **constructs.lua** (2.31x, +331ms): heavy control-flow constructs,
   deeply nested loops and conditionals. This test stresses the VM
   dispatch loop.
-- **nextvar.lua** (2.38x, +18ms): table iteration (`next`, `pairs`),
+- **nextvar.lua** (2.15x, +15ms): table iteration (`next`, `pairs`),
   global table manipulation. Stresses table hash traversal.
-- **sort.lua** (1.82x, +42ms): `table.sort` with comparison callbacks.
-  Function call overhead per comparison.
-- **verybig.lua** (1.81x, +101ms): large function compilation and
+- **verybig.lua** (1.89x, +102ms): large function compilation and
   execution with many locals and upvalues.
+- **db.lua** (1.88x, +14ms): debug library operations, `getinfo`,
+  `getlocal`, hook management.
+- **sort.lua** (1.78x, +43ms): `table.sort` with comparison callbacks.
+  Function call overhead per comparison.
 
-Tests at or near parity (1.0-1.1x): `literals.lua`, `code.lua`,
-`api.lua`, `vararg.lua`, `errors.lua`, `pm.lua`, `files.lua`.
+Tests at or near parity (1.0-1.1x): `strings.lua`, `literals.lua`,
+`attrib.lua`, `code.lua`, `pm.lua`, `api.lua`, `events.lua`,
+`vararg.lua`, `files.lua`.
 
 ### Combined Runner
 
@@ -77,13 +80,12 @@ and without the dump/undump `dofile` override).
 
 | Runner | PUC-Rio | rilua | Ratio |
 |--------|--------:|------:|------:|
-| bench-all.lua | 811 | N/A* | - |
+| bench-all.lua | 792 | 1529 | 1.93x |
 
-\* rilua fails `bench-all.lua` due to a GC bug: after running
-`constructs.lua` + `nextvar.lua`, a subsequent GC cycle during
-`pm.lua` incorrectly collects the global `assert` function. Each test
-passes individually; the bug only manifests under accumulated GC
-pressure across multiple `dofile` calls. This is a known regression.
+The combined runner is slower than the sum of individual tests (1.93x
+vs 1.75x). Running all tests in a single interpreter session
+accumulates more live objects across test boundaries, increasing GC
+work per cycle.
 
 ### Reproducing
 
@@ -240,7 +242,7 @@ After a confirmed improvement, update the baseline:
 Based on the per-test benchmarks, these areas offer the largest
 potential gains, ordered by impact:
 
-### 1. VM Dispatch (constructs.lua: 2.39x, +350ms)
+### 1. VM Dispatch (constructs.lua: 2.31x, +331ms)
 
 `constructs.lua` is the heaviest test and the largest absolute gap.
 It exercises the main `execute()` loop with deeply nested control flow.
@@ -252,7 +254,7 @@ It exercises the main `execute()` loop with deeply nested control flow.
 - **FORPREP/FORLOOP specialization**: integer-only fast path for
   numeric `for` loops when bounds are integers.
 
-### 2. Table Operations (nextvar.lua: 2.38x, sort.lua: 1.82x)
+### 2. Table Operations (nextvar.lua: 2.15x, sort.lua: 1.78x)
 
 - **Hash traversal**: `next()` and `pairs()` iteration speed.
   `nextvar.lua` hammers these.
@@ -260,7 +262,7 @@ It exercises the main `execute()` loop with deeply nested control flow.
   function per element pair. Reducing function call setup/teardown cost
   would help.
 
-### 3. Compilation (verybig.lua: 1.81x, +101ms)
+### 3. Compilation (verybig.lua: 1.89x, +102ms)
 
 - **AST allocation**: heap-allocated AST nodes dropped after
   compilation. A pool or arena built from `Vec`-based storage could
@@ -268,11 +270,12 @@ It exercises the main `execute()` loop with deeply nested control flow.
 - **Constant folding**: limited constant folding during compilation
   could reduce VM work for arithmetic-heavy code.
 
-### 4. GC Correctness (bench-all.lua: fails)
+### 4. GC Under Sustained Load (bench-all.lua: 1.93x)
 
-Before further optimization, the GC bug that causes global collection
-under accumulated pressure must be fixed. This blocks the combined
-`bench-all.lua` runner.
+The combined runner is 10% slower relative to PUC-Rio than the sum of
+individual tests (1.93x vs 1.75x). This indicates GC overhead grows
+disproportionately with accumulated state. Incremental GC tuning and
+sweep efficiency under high object counts are the targets here.
 
 ### 5. Lower-Priority Opportunities
 

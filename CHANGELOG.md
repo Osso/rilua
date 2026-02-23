@@ -23,7 +23,8 @@ and this project adheres to
 
 ### Documentation
 
-- Add per-test benchmark results: rilua is 1.76x slower than PUC-Rio overall
+- Update per-test benchmark results with bench-all.lua: rilua is 1.75x
+  slower individual (1.93x combined runner) vs PUC-Rio
 - Add optimization priority analysis and profiling workflow
 
 ## [0.1.15](https://github.com/wowemulation-dev/rilua/compare/v0.1.14...v0.1.15) - 2026-02-22
