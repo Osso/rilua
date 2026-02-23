@@ -1005,6 +1005,24 @@ impl Table {
             return Ok(mp);
         }
 
+        // Check if the occupant is a dead entry: a stale string key
+        // (GC-swept) with nil value. Dead entries can be safely reused
+        // because their key string no longer exists. We keep the node's
+        // `next` pointer intact so hash chain integrity is preserved.
+        //
+        // This handles the case PUC-Rio solves with LUA_TDEADKEY: after
+        // GC sweeps key strings of nil-valued entries, main_position()
+        // on the stale GcRef returns an incorrect bucket (hash defaults
+        // to 0). Without this check, Brent's Case A would use the wrong
+        // chain origin, corrupting hash chains of unrelated entries.
+        if self.nodes[mp as usize].value.is_nil()
+            && let Val::Str(r) = self.nodes[mp as usize].key
+            && strings.get(r).is_none()
+        {
+            self.nodes[mp as usize].key = key;
+            return Ok(mp);
+        }
+
         // Main position is occupied. Find a free slot.
         let Some(free) = self.get_free_pos() else {
             return Err(runtime_error("table overflow"));
@@ -1880,5 +1898,98 @@ mod tests {
         let t = Table::new();
         t.trace(); // should not panic
         assert!(t.needs_trace()); // tables DO need tracing (have GC refs)
+    }
+
+    /// Regression test: inserting a new key into a table with many
+    /// nil-valued entries must not lose existing live entries after rehash.
+    #[test]
+    fn rehash_preserves_live_entries_after_nil_clearing() {
+        let mut arena: Arena<LuaString> = Arena::new();
+        let mut strtable = StringTable::new();
+        let mut table = Table::new();
+
+        let mut keys = Vec::new();
+        for i in 0..60 {
+            let name = format!("global_{i}");
+            let r = intern_str(&mut arena, &mut strtable, name.as_bytes());
+            table.raw_set(Val::Str(r), Val::Bool(true), &arena).ok();
+            keys.push((name, r));
+        }
+
+        let assert_ref = intern_str(&mut arena, &mut strtable, b"assert");
+        table
+            .raw_set(Val::Str(assert_ref), Val::Bool(true), &arena)
+            .ok();
+
+        for (_, r) in &keys {
+            table.raw_set(Val::Str(*r), Val::Nil, &arena).ok();
+        }
+
+        let new_key = intern_str(&mut arena, &mut strtable, b"t");
+        table
+            .raw_set(Val::Str(new_key), Val::Bool(true), &arena)
+            .ok();
+
+        let val = table.get_str(assert_ref, &arena);
+        assert!(!val.is_nil(), "assert lost after rehash");
+    }
+
+    /// Regression test: after GC sweeps key strings of nil-valued entries,
+    /// inserting a new key must not corrupt hash chains. This reproduces
+    /// the bug where `new_key` calls `main_position` on a stale GcRef
+    /// (swept string key), gets hash 0, and Brent's Case A chain
+    /// relocation corrupts unrelated entries.
+    #[test]
+    fn new_key_reuses_dead_occupant_slot() {
+        let mut arena: Arena<LuaString> = Arena::new();
+        let mut strtable = StringTable::new();
+        let mut table = Table::new();
+
+        let assert_ref = intern_str(&mut arena, &mut strtable, b"assert");
+        table
+            .raw_set(Val::Str(assert_ref), Val::Bool(true), &arena)
+            .ok();
+
+        let mut live_refs = Vec::new();
+        for i in 0..10 {
+            let name = format!("live_{i}");
+            let r = intern_str(&mut arena, &mut strtable, name.as_bytes());
+            table
+                .raw_set(Val::Str(r), Val::Num(f64::from(i)), &arena)
+                .ok();
+            live_refs.push((name, r));
+        }
+
+        let mut dead_refs = Vec::new();
+        for i in 0..50 {
+            let name = format!("dead_{i}");
+            let r = intern_str(&mut arena, &mut strtable, name.as_bytes());
+            table.raw_set(Val::Str(r), Val::Bool(true), &arena).ok();
+            dead_refs.push(r);
+        }
+
+        // Set dead entries to nil, then sweep their strings.
+        for &r in &dead_refs {
+            table.raw_set(Val::Str(r), Val::Nil, &arena).ok();
+        }
+        for &r in &dead_refs {
+            arena.free(r);
+        }
+        strtable.sweep_dead(&arena);
+
+        // Insert new keys - exercises new_key with stale occupants.
+        for i in 0..5 {
+            let name = format!("new_{i}");
+            let r = intern_str(&mut arena, &mut strtable, name.as_bytes());
+            table.raw_set(Val::Str(r), Val::Bool(true), &arena).ok();
+        }
+
+        // Verify all live entries are still accessible.
+        let val = table.get_str(assert_ref, &arena);
+        assert!(!val.is_nil(), "assert lost after new_key with stale keys");
+        for (name, r) in &live_refs {
+            let val = table.get_str(*r, &arena);
+            assert!(!val.is_nil(), "live entry '{name}' lost");
+        }
     }
 }

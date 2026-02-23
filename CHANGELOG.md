@@ -8,6 +8,24 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- Fix hash chain corruption when inserting keys into tables with GC-swept
+  nil-valued entries. After GC sweeps key strings, stale GcRefs caused
+  `main_position` to return incorrect buckets, corrupting hash chains via
+  Brent's Case A relocation. Detected as globals (e.g. `assert`) becoming
+  nil when running multiple test files sequentially.
+
+### Added
+
+- Per-test benchmark script (`scripts/benchmark-tests.sh`) for comparing
+  PUC-Rio and rilua performance on each test file individually
+
+### Documentation
+
+- Add per-test benchmark results: rilua is 1.76x slower than PUC-Rio overall
+- Add optimization priority analysis and profiling workflow
+
 ## [0.1.15](https://github.com/wowemulation-dev/rilua/compare/v0.1.14...v0.1.15) - 2026-02-22
 
 ### Documentation
