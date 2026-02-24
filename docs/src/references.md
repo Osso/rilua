@@ -8,7 +8,7 @@ management, and API surface.
 
 ### PUC-Rio Lua 5.1.1 (C)
 
-- **Local path**: `./lua-5.1.1/` (built from official tarball; see `AGENTS.md` for setup)
+- **Source**: `./lua-5.1.1/` (vendored in repo; see `AGENTS.md` for setup)
 - **Role**: The specification. All behavioral questions are answered here.
 - **Architecture**: 17,654 lines. Single-pass recursive descent compiler
   emitting 38 register-based opcodes (u32 packed). CallInfo chain for
@@ -23,7 +23,7 @@ management, and API surface.
 
 ### Luau (C++)
 
-- **Local path**: `~/Repos/github.com/luau-lang/luau`
+- **GitHub**: <https://github.com/luau-lang/luau>
 - **Role**: Architecture reference. Lua 5.1-compatible scripting language.
 - **Architecture**: Lexer -> Parser -> AST -> Compiler -> VM. 83
   register-based opcodes (count evolves with development). Incremental tri-color GC. CallInfo chain.
@@ -39,7 +39,7 @@ management, and API surface.
 
 ### tsuki (Rust, Lua 5.4)
 
-- **Local path**: `~/Repos/github.com/ultimaweapon/tsuki`
+- **GitHub**: <https://github.com/nickmass/tsuki>
 - **Role**: Proves Result-based error handling works for a Lua VM.
 - **Architecture**: c2rust translation of Lua 5.4. PUC-Rio file naming
   (llex.rs, lparser.rs, lcode.rs). 83 opcodes. Incremental GC via raw
@@ -52,7 +52,7 @@ management, and API surface.
 
 ### full-moon (Rust, parser only)
 
-- **Local path**: `~/Repos/github.com/Kampfkarren/full-moon`
+- **GitHub**: <https://github.com/Kampfkarren/full-moon>
 - **Role**: Best Rust patterns for Lua parsing.
 - **Architecture**: Hand-written recursive descent parser. Lossless AST
   preserving whitespace and comments. Error recovery with partial AST.
@@ -65,7 +65,7 @@ management, and API surface.
 
 ### mlua (Rust, FFI wrapper)
 
-- **Local path**: `~/Repos/github.com/mlua-rs/mlua`
+- **GitHub**: <https://github.com/mlua-rs/mlua>
 - **Role**: API design reference for embedding Lua in Rust.
 - **Architecture**: FFI wrapper around C Lua. Memory-safe Rust API over
   unsafe C bindings. Trait-based type conversions (`IntoLua`, `FromLua`).
@@ -76,11 +76,35 @@ management, and API surface.
 - **Not applicable**: FFI wrapping (we implement from scratch), C Lua
   compilation, vendored builds.
 
+### lua-rs / CppCXY (Rust, Lua 5.5)
+
+- **GitHub**: <https://github.com/CppCXY/lua-rs>
+- **Role**: Architecture comparison. Full Lua 5.5 port to Rust with
+  pointer-based VM design.
+- **Architecture**: 64k lines across workspace (luars, luars-derive,
+  luars_interpreter, luars_wasm). Faithful port of C Lua's architecture:
+  pointer-based VM dispatch, 86 Lua 5.5 opcodes, tri-color incremental +
+  generational GC, 16-byte TValue (union + type tag), Brent's collision
+  tables, interned strings, pointer-based upvalues. 399 unsafe blocks.
+  Multi-crate workspace with proc-macro derive crate. 28/30 official Lua
+  5.5 tests pass. External dependencies: ahash, rand, chrono, itoa,
+  smol_str, syn/quote (macros).
+- **What we can study**: Async/await coroutine bridging (novel feature),
+  proc-macro derive for UserData, generational GC implementation,
+  Lua 5.5 opcode set, lightweight 1-byte error enum with message stored
+  in VM, platform abstraction layer design, WASM support approach.
+- **Key differences from rilua**: Targets Lua 5.5 (not 5.1.1), uses raw
+  pointers and union types (C-style, 399 unsafe blocks vs rilua's
+  arena-based zero-unsafe GC), has external dependencies (ahash, rand,
+  chrono, smol_str vs rilua's zero-dependency policy), pointer-based
+  upvalues (vs rilua's arena indices), larger scope (64k LOC vs rilua's
+  ~17k), proc-macro crate for ergonomic API.
+
 ## Tier 3 — Limited Relevance
 
 ### lua-in-rust (Rust, Lua 5.1.1)
 
-- **Local path**: `~/Repos/github.com/cjneidhart/lua-in-rust`
+- **GitHub**: <https://github.com/cjneidhart/lua-in-rust>
 - **Role**: Previous base for rilua. Studied for lessons learned.
 - **Architecture**: Single-pass compiler, stack-based VM (~40 custom
   opcodes), stop-the-world mark-sweep GC with raw pointers, string
@@ -90,9 +114,9 @@ management, and API surface.
   hard to test and extend. Raw pointer GC works but is fragile.
   String interning with pointer equality is the right approach.
 
-### lua-rs (Rust, compiler only)
+### lua-rs / lonng (Rust, compiler only)
 
-- **Local path**: `~/Repos/github.com/lonng/lua-rs`
+- **GitHub**: <https://github.com/lonng/lua-rs>
 - **Role**: Shows AST-to-bytecode compilation for Lua 5.1.
 - **Architecture**: Multi-pass with explicit AST. Scanner -> Parser ->
   AST -> Compiler -> FunctionProto. No VM. Broken build. Zero unsafe.
@@ -101,7 +125,7 @@ management, and API surface.
 
 ### coppermoon (Rust, mlua wrapper)
 
-- **Local path**: `~/Repos/github.com/coppermoondev/coppermoon`
+- **GitHub**: <https://github.com/coppermoondev/coppermoon>
 - **Role**: None for VM/compiler work.
 - **Architecture**: Node.js-like runtime wrapping mlua (C Lua 5.4 FFI).
   Not a from-scratch implementation. Provides batteries-included stdlib
@@ -110,7 +134,6 @@ management, and API surface.
 
 ### hematita (Rust, Lua 5.3)
 
-- **Local path**: `~/Repos/github.com/danii/hematita`
 - **GitHub**: <https://github.com/danii/hematita>
 - **Role**: Reference for hardened Lua interpreter patterns in Rust.
 - **Architecture**: From-scratch Lua interpreter in Rust targeting 5.3.
