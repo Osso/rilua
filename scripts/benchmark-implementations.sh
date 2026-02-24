@@ -10,7 +10,6 @@
 #   rilua      - rilua (pure Rust, Lua 5.1.1)
 #   mlua       - mlua with vendored Lua 5.1 (Rust FFI to C)
 #   lua-in-rust - lua-in-rust by cjneidhart (pure Rust, Lua 5.1, incomplete)
-#   hematita   - hematita by danii (pure Rust, Lua 5.4, incomplete)
 
 set -euo pipefail
 
@@ -26,8 +25,6 @@ RILUA_BIN="$ROOT/target/release/rilua"
 MLUA_BIN="$ROOT/scripts/mlua-runner/target/release/mlua-runner"
 LIR_ROOT="/home/danielsreichenbach/Repos/github.com/cjneidhart/lua-in-rust"
 LIR_BIN="$LIR_ROOT/target/release/lua"
-HEM_ROOT="/home/danielsreichenbach/Repos/github.com/danii/hematita"
-HEM_BIN="$HEM_ROOT/target/release/hematita_cli"
 
 # PUC-Rio test suite files (standalone, from all.lua)
 SUITE_TESTS=(
@@ -46,7 +43,6 @@ declare -A IMPL_LABELS=(
     [rilua]="rilua"
     [mlua]="mlua"
     [lua_in_rust]="lua-in-rust"
-    [hematita]="hematita"
 )
 
 # ---- Utility functions ----
@@ -120,16 +116,15 @@ impl_bin() {
         rilua)       echo "$RILUA_BIN" ;;
         mlua)        echo "$MLUA_BIN" ;;
         lua_in_rust) echo "$LIR_BIN" ;;
-        hematita)    echo "$HEM_BIN" ;;
     esac
 }
 
-# Get env vars for an implementation
+# Get env vars for an implementation.
+# Note: RILUA_TEST_LIB is NOT set here. Enabling it makes rilua run
+# additional test paths (T module) that PUC-Rio skips unless compiled
+# with -DLUA_USER_H, creating an unfair comparison.
 impl_env() {
-    case "$1" in
-        rilua)  echo "RILUA_TEST_LIB=1" ;;
-        *)      echo "" ;;
-    esac
+    echo ""
 }
 
 # ---- Phase 1: Build all implementations ----
@@ -185,19 +180,6 @@ if [ -d "$LIR_ROOT" ]; then
     fi
 else
     echo "[lua-in-rust] Source not found at $LIR_ROOT"
-fi
-
-# hematita
-if [ -d "$HEM_ROOT" ]; then
-    echo "[hematita]    Building..."
-    if cargo build --release -p hematita_cli --manifest-path "$HEM_ROOT/Cargo.toml" 2>/dev/null; then
-        echo "[hematita]    Built"
-        build_ok+=(hematita)
-    else
-        echo "[hematita]    BUILD FAILED"
-    fi
-else
-    echo "[hematita]    Source not found at $HEM_ROOT"
 fi
 
 echo ""
