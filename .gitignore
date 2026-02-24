@@ -26,6 +26,7 @@ luac.out
 /lua-5.1.1.tar.gz
 /lua-5.1-tests/
 /lua5.1-tests/
+/lua5.1-tests.tar.gz
 /lua-5.1-tests.tar.gz
 
 # Flamegraph output

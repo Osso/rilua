@@ -76,20 +76,25 @@ string interpolation, compound assignments, and `continue`.
 | Implementation | vs PUC-Rio 5.1 (interpreted) | Notes |
 |---|---|---|
 | **PUC-Rio Lua 5.1** | 1.0x (baseline) | C, `-O2` |
-| **rilua** | ~1.75x slower | Pure Rust, `--release` |
+| **rilua** | ~1.7x slower | Pure Rust, `--release` |
 | **mlua** | ~1.0x (wraps PUC-Rio) | FFI overhead at boundaries only |
 | **Luau (interpreted)** | Faster than PUC-Rio | Optimized dispatch, inline caching |
 | **Luau (native codegen)** | 1.5-2.5x faster than Luau interpreted | x64/ARM64 only |
 
-rilua's 1.75x overhead comes from four areas: VM dispatch loop
-overhead (`constructs.lua` 2.31x), table hash traversal
-(`nextvar.lua` 2.15x), compilation cost (`verybig.lua` 1.89x), and
-function call overhead in sorting callbacks (`sort.lua` 1.78x). Tests
-that do not stress these paths run at parity (1.0x).
+Measured on AMD Ryzen 7 8840U, release builds, median of 10 runs.
+Sum of 20 individual PUC-Rio test files: PUC-Rio 696ms, rilua
+1167ms, mlua 211ms (8 tests that passed).
+
+rilua's overhead comes from four areas: VM dispatch loop
+(`constructs.lua` 2.26x), table hash traversal (`nextvar.lua` 2.0x),
+compilation cost (`verybig.lua` 1.87x), and function call overhead
+in sorting callbacks (`sort.lua` 1.76x). Tests that do not stress
+these paths run at or near parity.
 
 mlua adds minimal overhead because execution happens in PUC-Rio's C
 VM. The FFI crossing cost exists at every Rust<->Lua boundary call
-but is small relative to VM execution time.
+but is small relative to VM execution time. Micro-benchmarks confirm
+mlua matches PUC-Rio within noise (1.0-1.2x).
 
 Luau's interpreter is faster than PUC-Rio through instruction-level
 optimizations, inline caching, and tuned memory allocation. With
@@ -105,7 +110,23 @@ iteration, and deep function call chains.
 
 For embedding scenarios where Lua execution is a small fraction of
 total runtime (e.g., configuration evaluation, scripting hooks), the
-1.75x factor is unlikely to be noticeable.
+1.7x factor is unlikely to be noticeable.
+
+### Micro-Benchmarks (All Implementations)
+
+Minimal Lua scripts that run on incomplete implementations too:
+
+| Test | PUC-Rio | rilua | mlua | lua-in-rust |
+|---|---:|---:|---:|---:|
+| fib.lua (recursive fib(35)) | 647ms | 1629ms (2.52x) | 652ms (1.01x) | 3784ms (5.85x) |
+| loop.lua (1M iterations) | 6ms | 14ms (2.33x) | 7ms (1.17x) | 22ms (3.67x) |
+| tables.lua (100K insert+read) | 5ms | 7ms (1.40x) | 5ms (1.00x) | 23ms (4.60x) |
+| closures.lua (500K calls) | 13ms | 38ms (2.92x) | 13ms (1.00x) | --- |
+| nested_loops.lua (1Mx1K) | 9ms | 24ms (2.67x) | 11ms (1.22x) | 34ms (3.78x) |
+
+Ratios are vs PUC-Rio. lua-in-rust could not run closures.lua
+(runtime crash on upvalue access). Benchmark script and runner:
+`scripts/benchmark-implementations.sh`.
 
 ## Rust API
 
