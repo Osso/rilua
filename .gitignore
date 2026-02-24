@@ -36,6 +36,10 @@ luac.out
 /fuzz/corpus/
 /fuzz/artifacts/
 
+# Benchmark tooling
+/scripts/mlua-runner/target/
+/benchmark-results.csv
+
 # mdbook build output
 /docs/book/
 
