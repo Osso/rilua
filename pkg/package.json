@@ -1,0 +1,15 @@
+{
+  "name": "rilua-wasm-demo",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "rilua_wasm_demo_bg.wasm",
+    "rilua_wasm_demo.js",
+    "rilua_wasm_demo.d.ts"
+  ],
+  "main": "rilua_wasm_demo.js",
+  "types": "rilua_wasm_demo.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

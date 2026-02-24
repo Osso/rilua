@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rilua WASM Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    padding: 2rem;
+    max-width: 800px;
+    margin: 0 auto;
+  }
+  h1 { margin-bottom: 0.5rem; color: #f0f0f0; font-size: 1.5rem; }
+  p.subtitle { margin-bottom: 1.5rem; color: #888; font-size: 0.9rem; }
+  label { display: block; margin-bottom: 0.25rem; font-weight: 600; }
+  textarea {
+    width: 100%;
+    height: 200px;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    font-size: 14px;
+    background: #16213e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 0.75rem;
+    resize: vertical;
+    tab-size: 2;
+  }
+  textarea:focus { outline: 2px solid #4a6fa5; border-color: transparent; }
+  button {
+    margin-top: 0.75rem;
+    padding: 0.5rem 1.5rem;
+    font-size: 14px;
+    font-weight: 600;
+    background: #4a6fa5;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  button:hover { background: #5a7fb5; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #output-label { margin-top: 1.5rem; }
+  #output {
+    width: 100%;
+    min-height: 120px;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    font-size: 14px;
+    background: #0f0f23;
+    color: #ccc;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 0.75rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-top: 0.25rem;
+  }
+  #status { margin-top: 0.5rem; font-size: 0.8rem; color: #666; }
+</style>
+</head>
+<body>
+
+<h1>rilua WASM Demo</h1>
+<p class="subtitle">Lua 5.1 running in your browser via rilua compiled to WebAssembly.</p>
+
+<label for="code">Lua Code</label>
+<textarea id="code">-- Try some Lua!
+print("Hello from rilua!")
+
+for i = 1, 5 do
+  print("  i = " .. i)
+end
+
+print("pi = " .. math.pi)
+print(string.rep("-", 30))
+print(string.format("2^10 = %d", 2^10))
+</textarea>
+
+<button id="run" disabled>Loading WASM...</button>
+
+<label id="output-label" for="output">Output</label>
+<div id="output"></div>
+<div id="status"></div>
+
+<script type="module">
+  import init, { eval_lua } from "./pkg/rilua_wasm_demo.js";
+
+  const codeEl = document.getElementById("code");
+  const runBtn = document.getElementById("run");
+  const outputEl = document.getElementById("output");
+  const statusEl = document.getElementById("status");
+
+  await init();
+  runBtn.textContent = "Run";
+  runBtn.disabled = false;
+
+  function run() {
+    const code = codeEl.value;
+    const t0 = performance.now();
+    const result = eval_lua(code);
+    const ms = (performance.now() - t0).toFixed(1);
+    outputEl.textContent = result || "(no output)";
+    statusEl.textContent = `Executed in ${ms} ms`;
+  }
+
+  runBtn.addEventListener("click", run);
+
+  // Ctrl+Enter / Cmd+Enter to run
+  codeEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      run();
+    }
+  });
+</script>
+
+</body>
+</html>
