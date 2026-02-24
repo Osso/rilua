@@ -2,6 +2,8 @@
 
 A Rust implementation of [Lua 5.1.1](https://lua.org/manual/5.1/).
 
+[**Try rilua in your browser**](https://wowemulation-dev.github.io/rilua/) -- no install required.
+
 <div align="center">
 
 [![Discord](https://img.shields.io/discord/1394228766414471219?logo=discord&style=flat-square)](https://discord.gg/Jj4uWy3DGP)
@@ -192,7 +194,7 @@ table, math, coroutine, debug) work on all platforms. I/O and OS
 libraries require a filesystem and return errors on WASM.
 
 See `docs/src/wasm.md` for building WASM targets and `examples/wasm-demo/`
-for a browser demo.
+for the browser demo source.
 
 ### Platform Notes
 
