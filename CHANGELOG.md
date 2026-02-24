@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.19](https://github.com/wowemulation-dev/rilua/compare/v0.1.18...v0.1.19) - 2026-02-24
+
+### Documentation
+
+- add WASM demo link to README
+
 ## [0.1.18](https://github.com/wowemulation-dev/rilua/compare/v0.1.17...v0.1.18) - 2026-02-24
 
 ### Documentation
