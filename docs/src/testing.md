@@ -7,8 +7,8 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Current: 1323 tests (607 unit, 431 integration, 277 oracle, 5 proptest, 3 lua51).
-With `dynmod` feature: 1331 tests (609 unit, 6 dynmod, 431 integration,
+Current: 1325 tests (609 unit, 431 integration, 277 oracle, 5 proptest, 3 lua51).
+With `dynmod` feature: 1333 tests (611 unit, 6 dynmod, 431 integration,
 277 oracle, 5 proptest, 3 lua51). All 5 layers are active.
 
 ## Test Layers
