@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.20](https://github.com/wowemulation-dev/rilua/compare/v0.1.19...v0.1.20) - 2026-02-25
+
+### Documentation
+
+- add CppCXY/lua-rs reference, replace local paths with GitHub URLs
+
 ## [0.1.19](https://github.com/wowemulation-dev/rilua/compare/v0.1.18...v0.1.19) - 2026-02-24
 
 ### Documentation
