@@ -25,3 +25,4 @@
 
 - [Testing](testing.md)
 - [Performance](performance.md)
+- [Comparison](comparison.md)

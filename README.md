@@ -45,6 +45,65 @@ It also serves as an embeddable Lua 5.1.1 interpreter for Rust applications
 and as a readable reference implementation for studying Lua internals.
 See `docs/src/use-cases.md` for details.
 
+### Why rilua
+
+rilua differs from binding-based approaches like
+[mlua](https://github.com/mlua-rs/mlua) (which wraps PUC-Rio's C
+implementation via FFI) in several ways that matter for embedding:
+
+**No C toolchain required.** rilua has zero external dependencies. Adding
+it to a project is `rilua = "0.1"` in Cargo.toml -- no C compiler, no
+system libraries, no `pkg-config`, no vendored C source. mlua pulls in
+7+ runtime crates plus the C Lua source.
+
+**No unsafe in the core.** The VM, garbage collector, compiler, and all
+standard libraries contain zero `unsafe` blocks. All FFI is isolated in
+`platform.rs`. The arena-based GC uses generational indices (`GcRef<T>` =
+two `u32`s) with validation on every access -- stale references return
+errors, not corrupted memory. mlua acknowledges containing "a huge amount
+of unsafe code" to bridge C's `longjmp` and Rust's ownership model.
+
+**Errors preserve the call stack.** PUC-Rio uses `setjmp`/`longjmp` for
+error handling, which unwinds the C stack before any handler runs. rilua
+propagates errors as `Result<T, LuaError>`. The CallInfo chain remains
+intact after an error, so tracebacks are generated from the live stack.
+RAII destructors fire normally -- no leaked resources in embeddings.
+
+**Structured error types.** Rust code gets `LuaError::Syntax` with
+separate `.source`, `.line`, `.message` fields, or `LuaError::Runtime`
+with `.traceback: Vec<TraceEntry>`. Pattern-match on error variants
+instead of parsing `"stdin:3: ')' expected"` out of a string.
+
+**Native WASM support.** rilua compiles to `wasm32-unknown-unknown`
+directly. mlua only supports `wasm32-unknown-emscripten` (requires the
+Emscripten toolchain) because it links C source that depends on libc.
+
+**Rust-native modules instead of C modules.** With the `dynmod` feature,
+`package.loadlib` loads Rust `cdylib` crates compiled against rilua's
+ABI. Module authors write Rust, not C. The host validates a
+`RiluaModuleInfo` struct for version compatibility and wraps entry point
+calls in `catch_unwind` to convert panics to Lua errors. No raw pointer
+juggling, no manual stack discipline.
+
+**Send without mutex overhead.** rilua's `send` feature makes `Lua: Send`
+by observing that `GcRef` values are `u32` indices -- trivially `Send`.
+mlua's `send` feature wraps the entire VM in a reentrant mutex, adding
+per-operation lock overhead even in single-threaded use.
+
+**GcRef handles are Copy with no lifetimes.** Store them in structs,
+put them in HashMaps, pass them freely. Validity is checked at access
+time via generation counter. mlua handles carry a `'lua` lifetime and
+can't outlive the borrow of the Lua state.
+
+**Performance.** rilua is ~1.7x slower than PUC-Rio on the official test
+suite (measured on AMD Ryzen 7 8840U, release mode, median of 10 runs).
+For workloads where Lua execution is a fraction of total runtime
+(configuration, scripting hooks, game logic), this overhead is not
+noticeable.
+
+See `docs/src/comparison.md` for detailed benchmarks against PUC-Rio,
+mlua, and other implementations.
+
 ### Why Lua 5.1.1
 
 World of Warcraft's addon system uses Lua 5.1.1. Key 5.1-specific traits:

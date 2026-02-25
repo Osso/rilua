@@ -26,6 +26,7 @@ luac.out
 /lua-5.1.1.tar.gz
 /lua-5.1-tests/
 /lua5.1-tests/
+/lua5.1-tests.tar.gz
 /lua-5.1-tests.tar.gz
 
 # Flamegraph output
@@ -35,6 +36,10 @@ luac.out
 /fuzz/target/
 /fuzz/corpus/
 /fuzz/artifacts/
+
+# Benchmark tooling
+/scripts/mlua-runner/target/
+/benchmark-results.csv
 
 # mdbook build output
 /docs/book/

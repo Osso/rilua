@@ -123,6 +123,22 @@ management, and API surface.
 - **Useful for**: AST node design, constant folding patterns, debug
   info tracking. Not useful for VM or runtime design.
 
+### lua-rs (Rust, full interpreter, CppCXY)
+
+- **Local path**: `~/Repos/github.com/CppCXY/lua-rs`
+- **GitHub**: <https://github.com/CppCXY/lua-rs>
+- **Role**: Performance comparison target. One-to-one C Lua 5.5 port.
+- **Architecture**: Direct port of PUC-Rio's C source to Rust. Same
+  pipeline (Lexer -> Parser -> Code Generator -> Bytecode -> VM), 86
+  opcodes, tri-color incremental/generational GC, string interning.
+  ~60K lines, ~400 unsafe blocks for GC pointer ops. 5 runtime deps
+  (ahash, rand, chrono, itoa, smol_str). Requires nightly Rust.
+- **Useful for**: Benchmarking (runs ~1.2x PUC-Rio on micro-benchmarks),
+  comparing pure-Rust Lua implementation approaches and the
+  safety-vs-performance trade-off.
+- **Differences**: Targets Lua 5.5 (not 5.1.1), uses `unsafe`
+  extensively, requires nightly. See `docs/src/comparison.md`.
+
 ### coppermoon (Rust, mlua wrapper)
 
 - **GitHub**: <https://github.com/coppermoondev/coppermoon>
