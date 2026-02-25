@@ -9,6 +9,7 @@
 #   pucrio     - PUC-Rio Lua 5.1.1 (C reference)
 #   rilua      - rilua (pure Rust, Lua 5.1.1)
 #   mlua       - mlua with vendored Lua 5.1 (Rust FFI to C)
+#   lua_rs     - lua-rs by CppCXY (pure Rust, Lua 5.5, nightly)
 #   lua-in-rust - lua-in-rust by cjneidhart (pure Rust, Lua 5.1, incomplete)
 
 set -euo pipefail
@@ -23,6 +24,8 @@ CSVFILE="$ROOT/benchmark-results.csv"
 PUCRIO_BIN="$ROOT/lua-5.1.1/src/lua"
 RILUA_BIN="$ROOT/target/release/rilua"
 MLUA_BIN="$ROOT/scripts/mlua-runner/target/release/mlua-runner"
+LUARS_ROOT="/home/danielsreichenbach/Repos/github.com/CppCXY/lua-rs"
+LUARS_BIN="$LUARS_ROOT/target/release/lua"
 LIR_ROOT="/home/danielsreichenbach/Repos/github.com/cjneidhart/lua-in-rust"
 LIR_BIN="$LIR_ROOT/target/release/lua"
 
@@ -42,6 +45,7 @@ declare -A IMPL_LABELS=(
     [pucrio]="PUC-Rio"
     [rilua]="rilua"
     [mlua]="mlua"
+    [lua_rs]="lua-rs"
     [lua_in_rust]="lua-in-rust"
 )
 
@@ -115,6 +119,7 @@ impl_bin() {
         pucrio)      echo "$PUCRIO_BIN" ;;
         rilua)       echo "$RILUA_BIN" ;;
         mlua)        echo "$MLUA_BIN" ;;
+        lua_rs)      echo "$LUARS_BIN" ;;
         lua_in_rust) echo "$LIR_BIN" ;;
     esac
 }
@@ -167,6 +172,19 @@ if cargo build --release --manifest-path "$ROOT/scripts/mlua-runner/Cargo.toml" 
     build_ok+=(mlua)
 else
     echo "[mlua]        BUILD FAILED"
+fi
+
+# lua-rs (requires nightly)
+if [ -d "$LUARS_ROOT" ]; then
+    echo "[lua-rs]      Building (nightly)..."
+    if rustup run nightly cargo build --release --manifest-path "$LUARS_ROOT/Cargo.toml" -p luars_interpreter 2>/dev/null; then
+        echo "[lua-rs]      Built"
+        build_ok+=(lua_rs)
+    else
+        echo "[lua-rs]      BUILD FAILED (requires nightly Rust)"
+    fi
+else
+    echo "[lua-rs]      Source not found at $LUARS_ROOT"
 fi
 
 # lua-in-rust

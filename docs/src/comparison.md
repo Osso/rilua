@@ -1,19 +1,21 @@
 # Comparison with Other Implementations
 
-How rilua compares to PUC-Rio Lua, mlua, and Luau in architecture,
+How rilua compares to PUC-Rio Lua, mlua, Luau, and
+[lua-rs](https://github.com/CppCXY/lua-rs) in architecture,
 performance, API design, and trade-offs.
 
 ## Overview
 
-| | rilua | PUC-Rio Lua | mlua | Luau |
-|---|---|---|---|---|
-| **Language** | Rust | C | Rust (FFI to C) | C++ |
-| **Lua Version** | 5.1.1 | 5.1 - 5.5 | 5.1 - 5.5, Luau | 5.1 derivative |
-| **Type** | Native interpreter | Reference impl | Binding layer | Native interpreter |
-| **License** | MIT | MIT | MIT | MIT |
-| **Dependencies** | 0 | 0 (libc) | 7+ runtime | 0 (C++ stdlib) |
-| **WASM** | `wasm32-unknown-unknown` | No | `wasm32-unknown-emscripten` | No |
-| **Unsafe Code** | 0 in core VM/GC | N/A (C) | Extensive (FFI) | N/A (C++) |
+| | rilua | PUC-Rio Lua | mlua | Luau | lua-rs |
+|---|---|---|---|---|---|
+| **Language** | Rust | C | Rust (FFI to C) | C++ | Rust |
+| **Lua Version** | 5.1.1 | 5.1 - 5.5 | 5.1 - 5.5, Luau | 5.1 derivative | 5.5 |
+| **Type** | Native interpreter | Reference impl | Binding layer | Native interpreter | Native interpreter |
+| **License** | MIT | MIT | MIT | MIT | MIT |
+| **Dependencies** | 0 | 0 (libc) | 7+ runtime | 0 (C++ stdlib) | 5 runtime |
+| **WASM** | `wasm32-unknown-unknown` | No | `wasm32-unknown-emscripten` | No | `wasm32-unknown-unknown` |
+| **Unsafe Code** | 0 in core VM/GC | N/A (C) | Extensive (FFI) | N/A (C++) | ~400 blocks |
+| **Nightly Rust** | No | N/A | No | N/A | Yes |
 
 ## Architecture
 
@@ -69,6 +71,32 @@ Luau removes several Lua 5.1 features for sandboxing: `string.dump`,
 It adds `buffer` (typed byte arrays), `table.freeze`, `table.clone`,
 string interpolation, compound assignments, and `continue`.
 
+### lua-rs
+
+[CppCXY/lua-rs](https://github.com/CppCXY/lua-rs) is an almost
+one-to-one port of PUC-Rio's C Lua 5.5 source to Rust. The module
+structure mirrors the C codebase directly: `lparser.c` becomes
+`compiler/parser`, `lgc.c` becomes `gc/`, `ltable.c` becomes
+`lua_value/lua_table/`, and so on.
+
+Pipeline: Lexer -> Parser -> Code Generator -> Bytecode -> VM (same
+as C Lua, no intermediate AST).
+
+86 opcodes matching Lua 5.5's instruction set with multiple formats
+(iABC, iABx, iAsBx, iAx, isJ). Tri-color incremental and
+generational GC ported from `lgc.c`, including object aging
+(NEW/SURVIVAL/OLD), ephemeron cleanup, and `__gc` finalizers. String
+interning with short/long string distinction (threshold: 40 bytes).
+
+The project uses `unsafe` extensively (~400 blocks) for GC object
+pointer manipulation, upvalue handling, and table internals -- the
+same operations that are pointer-based in C. No external C FFI; all
+`unsafe` is internal Rust. Requires nightly Rust for
+`unchecked_shifts` and other unstable features.
+
+Runtime dependencies: `ahash`, `rand`, `chrono`, `itoa`, `smol_str`.
+Optional: `serde`/`serde_json` for JSON support.
+
 ## Performance
 
 ### Relative Speed
@@ -76,7 +104,8 @@ string interpolation, compound assignments, and `continue`.
 | Implementation | vs PUC-Rio 5.1 (interpreted) | Notes |
 |---|---|---|
 | **PUC-Rio Lua 5.1** | 1.0x (baseline) | C, `-O2` |
-| **rilua** | ~1.7x slower | Pure Rust, `--release` |
+| **rilua** | ~1.7x slower | Pure Rust, `--release`, 0 unsafe |
+| **lua-rs** | ~1.2x slower | Rust, `--release`, nightly, ~400 unsafe |
 | **mlua** | ~1.0x (wraps PUC-Rio) | FFI overhead at boundaries only |
 | **Luau (interpreted)** | Faster than PUC-Rio | Optimized dispatch, inline caching |
 | **Luau (native codegen)** | 1.5-2.5x faster than Luau interpreted | x64/ARM64 only |
@@ -90,6 +119,14 @@ rilua's overhead comes from four areas: VM dispatch loop
 compilation cost (`verybig.lua` 1.87x), and function call overhead
 in sorting callbacks (`sort.lua` 1.76x). Tests that do not stress
 these paths run at or near parity.
+
+lua-rs's closer-to-C performance reflects its one-to-one port
+approach: the same pointer-based GC object layout, string interning
+with flat bucket arrays, and unchecked bit shifts in the instruction
+decoder. The `unsafe` blocks map to operations that are pointer
+arithmetic in the original C. This preserves C Lua's performance
+characteristics at the cost of Rust's safety guarantees in those
+paths.
 
 mlua adds minimal overhead because execution happens in PUC-Rio's C
 VM. The FFI crossing cost exists at every Rust<->Lua boundary call
@@ -116,17 +153,17 @@ total runtime (e.g., configuration evaluation, scripting hooks), the
 
 Minimal Lua scripts that run on incomplete implementations too:
 
-| Test | PUC-Rio | rilua | mlua | lua-in-rust |
-|---|---:|---:|---:|---:|
-| fib.lua (recursive fib(35)) | 647ms | 1629ms (2.52x) | 652ms (1.01x) | 3784ms (5.85x) |
-| loop.lua (1M iterations) | 6ms | 14ms (2.33x) | 7ms (1.17x) | 22ms (3.67x) |
-| tables.lua (100K insert+read) | 5ms | 7ms (1.40x) | 5ms (1.00x) | 23ms (4.60x) |
-| closures.lua (500K calls) | 13ms | 38ms (2.92x) | 13ms (1.00x) | --- |
-| nested_loops.lua (1Mx1K) | 9ms | 24ms (2.67x) | 11ms (1.22x) | 34ms (3.78x) |
+| Test | PUC-Rio | rilua | lua-rs | mlua | lua-in-rust |
+|---|---:|---:|---:|---:|---:|
+| fib.lua (recursive fib(35)) | 670ms | 1751ms (2.61x) | 900ms (1.34x) | 652ms (1.01x) | 3784ms (5.85x) |
+| loop.lua (1M iterations) | 6ms | 15ms (2.50x) | 7ms (1.17x) | 7ms (1.17x) | 22ms (3.67x) |
+| tables.lua (100K insert+read) | 5ms | 9ms (1.80x) | 6ms (1.20x) | 5ms (1.00x) | 23ms (4.60x) |
+| closures.lua (500K calls) | 14ms | 45ms (3.21x) | 19ms (1.36x) | 13ms (1.00x) | --- |
+| nested_loops.lua (1Mx1K) | 11ms | 28ms (2.55x) | 9ms (0.82x) | 11ms (1.22x) | 34ms (3.78x) |
 
 Ratios are vs PUC-Rio. lua-in-rust could not run closures.lua
-(runtime crash on upvalue access). Benchmark script and runner:
-`scripts/benchmark-implementations.sh`.
+(runtime crash on upvalue access). lua-rs requires nightly Rust.
+Benchmark script and runner: `scripts/benchmark-implementations.sh`.
 
 ## Rust API
 
@@ -197,43 +234,102 @@ Key characteristics:
 - `RegistryKey` for persistent references across calls
 - Module authoring (`#[mlua::lua_module]` proc macro)
 
+### lua-rs
+
+Feature-rich API closer to mlua's level, with closures, async, derive
+macros, and table builders:
+
+```rust
+use luars::{LuaVM, Stdlib, LuaValue, TableBuilder};
+use luars::lua_vm::SafeOption;
+
+let mut vm = LuaVM::new(SafeOption::default());
+vm.open_stdlib(Stdlib::All)?;
+
+// Execute and get results
+let results = vm.execute("return 1 + 2")?;
+
+// Register a Rust function
+vm.register_function("add", |state| {
+    let a = state.get_arg(1).unwrap();
+    let b = state.get_arg(2).unwrap();
+    // ...
+    Ok(1)
+})?;
+
+// UserData via derive macro
+#[derive(LuaUserData)]
+struct Point { x: f64, y: f64 }
+vm.register_type_of::<Point>("Point")?;
+
+// Async support
+vm.register_async("fetch", |args| async move {
+    Ok(vec![AsyncReturnValue::string("result".into())])
+})?;
+```
+
+Key characteristics:
+- `LuaVM` as the main state object
+- `LuaValue` enum for Lua values
+- `TableBuilder` for fluent table construction
+- `register_type_of` / `register_enum` for exposing Rust types
+- `register_async` with coroutine-based bridging
+- `LuaError` (1-byte enum) with optional `LuaFullError` (rich messages)
+- Optional Serde support for JSON conversion
+- Requires nightly Rust
+
 ### API Comparison
 
-| Feature | rilua | mlua |
-|---|---|---|
-| Function registration | `fn` pointers | Closures (captures) |
-| UserData | `create_typed_userdata` | `UserData` trait + derive |
-| Async | No | Yes (`async` feature) |
-| Serde | No | Yes (`serde` feature) |
-| Scoped borrows | No | Yes (`Scope`) |
-| Module authoring | No | Yes (proc macro) |
-| Handle model | Copy indices | Reference-counted |
-| Error type | `LuaError` enum | `mlua::Error` enum |
-| Dependencies | 0 | 7+ |
-| C compiler needed | No | Yes (vendored) or system Lua |
+| Feature | rilua | mlua | lua-rs |
+|---|---|---|---|
+| Function registration | `fn` pointers | Closures (captures) | Closures (captures) |
+| UserData | `create_typed_userdata` | `UserData` trait + derive | `LuaUserData` derive |
+| Async | No | Yes (`async` feature) | Yes (coroutine bridging) |
+| Serde | No | Yes (`serde` feature) | Yes (`serde` feature) |
+| Scoped borrows | No | Yes (`Scope`) | No |
+| Module authoring | No | Yes (proc macro) | No |
+| Handle model | Copy indices | Reference-counted | Value-based |
+| Error type | `LuaError` enum | `mlua::Error` enum | `LuaError` / `LuaFullError` |
+| Dependencies | 0 | 7+ | 5 |
+| C compiler needed | No | Yes (vendored) or system Lua | No |
+| Nightly Rust | No | No | Yes |
 
 rilua's API is intentionally smaller. It covers the embedding use case
 (create state, load code, call functions, exchange data) without the
-framework features mlua provides. The trade-off is fewer capabilities
-but zero external dependencies and no C toolchain requirement.
+framework features mlua and lua-rs provide. The trade-off is fewer
+capabilities but zero external dependencies and no C toolchain
+requirement.
+
+lua-rs sits between rilua and mlua in API richness: it offers closures,
+async, derive macros, and Serde -- features rilua lacks -- but without
+mlua's scoped borrows or module authoring support. Unlike mlua, it
+requires no C compiler but does require nightly Rust.
 
 ## Safety
 
 ### Memory Safety
 
-| | rilua | mlua | Luau |
-|---|---|---|---|
-| **Unsafe in core** | None | Extensive (FFI) | N/A (C++) |
-| **User-facing unsafe** | None | None (normal usage) | N/A |
-| **Error model** | `Result<T>` | `Result<T>` (wraps longjmp) | longjmp (C++) |
-| **GC safety** | Generational indices | C GC + prevent-collection guards | C++ GC |
-| **Use-after-free** | Impossible (index validation) | Possible if guards misused | Possible (C++) |
+| | rilua | mlua | lua-rs | Luau |
+|---|---|---|---|---|
+| **Unsafe in core** | None | Extensive (FFI) | ~400 blocks | N/A (C++) |
+| **User-facing unsafe** | None | None (normal usage) | None | N/A |
+| **Error model** | `Result<T>` | `Result<T>` (wraps longjmp) | `Result<T>` | longjmp (C++) |
+| **GC safety** | Generational indices | C GC + prevent-collection guards | GC object pointers (unsafe) | C++ GC |
+| **Use-after-free** | Impossible (index validation) | Possible if guards misused | Possible (unsafe internals) | Possible (C++) |
 
 rilua's arena-based GC uses generational indices: each arena slot has
 a generation counter incremented on free. A `GcRef` stores both the
 slot index and the generation it was created with. Accessing a freed
 slot returns an error rather than corrupted data. This provides
 use-after-free protection without `unsafe` code.
+
+lua-rs's GC is a direct port of C Lua's `lgc.c`. GC objects are
+heap-allocated and managed through raw pointers, mirroring the C
+implementation's `GCObject*` linked lists. The ~400 `unsafe` blocks
+are concentrated in GC traversal, object dereferencing, string
+interning, and table internals. No external C FFI is involved -- all
+`unsafe` is internal pointer manipulation for performance parity
+with C. The user-facing API does not expose `unsafe`.
 
 mlua wraps every error-capable C API call in `lua_pcall` to catch
 `longjmp`. This prevents Rust stack unwinding but adds overhead and
@@ -255,13 +351,13 @@ than Luau.
 
 ## Send/Sync (Thread Safety)
 
-| | rilua | mlua |
-|---|---|---|
-| **Default** | `!Send`, `!Sync` | `!Send`, `!Sync` |
-| **With feature** | `Send` (feature = `send`) | `Send + Sync` (feature = `send`) |
-| **Mechanism** | GcRef is u32 (trivially Send) | Reentrant mutex around VM |
-| **Overhead** | None (index-based handles) | Lock acquisition on every access |
-| **Constraint** | `UserData: Send` required | `UserData: Send` required |
+| | rilua | mlua | lua-rs |
+|---|---|---|---|
+| **Default** | `!Send`, `!Sync` | `!Send`, `!Sync` | `!Send`, `!Sync` |
+| **With feature** | `Send` (feature = `send`) | `Send + Sync` (feature = `send`) | No `Send` support |
+| **Mechanism** | GcRef is u32 (trivially Send) | Reentrant mutex around VM | N/A |
+| **Overhead** | None (index-based handles) | Lock acquisition on every access | N/A |
+| **Constraint** | `UserData: Send` required | `UserData: Send` required | N/A |
 
 rilua's `send` feature works because `GcRef<T>` values are plain
 `u32` indices -- they contain no pointers and are trivially `Send`.
@@ -272,34 +368,48 @@ mlua's `send` feature wraps the Lua VM in a `parking_lot` reentrant
 mutex, making it `Send + Sync`. Every VM access acquires the lock.
 This is correct but adds per-operation overhead.
 
-Neither approach makes concurrent access safe without external
+lua-rs does not provide a `Send` feature. Its GC uses raw pointers
+internally, which would require additional safety analysis to make
+`Send`-compatible.
+
+Neither rilua nor mlua makes concurrent access safe without external
 synchronization. Both assume single-threaded access to the `Lua`
 state and use `Send` to allow moving the state between threads.
 
 ## Feature Differences
 
-### What rilua Has That mlua Does Not
+### What rilua Has That Others Do Not
 
 - **Zero dependencies**: no C compiler, no system libraries, no
-  `pkg-config`
-- **`wasm32-unknown-unknown` support**: compiles without Emscripten
-- **Behavioral equivalence with PUC-Rio 5.1**: bytecode-compatible,
-  same 38 opcodes, same GC states, same stdlib edge cases
+  `pkg-config`, no nightly Rust
 - **No unsafe in core**: the VM, GC, compiler, and stdlib contain
   zero `unsafe` blocks
+- **Behavioral equivalence with PUC-Rio 5.1**: bytecode-compatible,
+  same 38 opcodes, same GC states, same stdlib edge cases
+- **`Send` support**: feature-gated `Send` for multi-threaded
+  embedding (no overhead, no mutex)
 
-### What mlua Has That rilua Does Not
+### What lua-rs Has That rilua Does Not
+
+- **Lua 5.5**: latest language features (generational GC modes,
+  bitwise ops, integers, `goto`, UTF-8 library)
+- **Closer-to-C performance**: ~1.2x PUC-Rio vs rilua's ~1.7x
+- **Closure-based function creation**: captures arbitrary state
+- **Async support**: coroutine-based async Rust function bridging
+- **Serde integration**: Lua to/from JSON
+- **UserData derive macro**: `#[derive(LuaUserData)]` with
+  `#[lua_methods]`
+- **Published crate**: available on crates.io
+
+### What mlua Has That rilua and lua-rs Do Not
 
 - **Multiple Lua versions**: 5.1 through 5.5, LuaJIT, Luau
-- **Closure-based function creation**: captures arbitrary state
-- **Async support**: `create_async_function`, `AsyncThread`
-- **Serde integration**: serialize/deserialize Lua values
 - **Scoped borrows**: non-`'static` references in callbacks
 - **Module authoring**: build `.so`/`.dll` loadable by Lua
-- **`UserData` derive macro**: declarative method registration
 - **PUC-Rio C performance**: execution at native C speed
+- **`Send + Sync`**: mutex-based thread safety (with overhead)
 
-### What Luau Has That Both Lack
+### What Luau Has That the Rest Lack
 
 - **Gradual type system**: optional type annotations with inference
 - **Native code generation**: AOT compilation for x64/ARM64
@@ -320,8 +430,18 @@ state and use `Send` to allow moving the state between threads.
 - You are targeting `wasm32-unknown-unknown`
 - Memory safety guarantees in the interpreter matter (no unsafe in
   core)
+- You need `Send` support for multi-threaded embedding
 - The embedding scenario has modest performance requirements (scripting
   hooks, configuration, game logic at moderate scale)
+
+### Use lua-rs When
+
+- You want Lua 5.5 features in a pure-Rust interpreter
+- Performance close to C Lua matters and you accept internal `unsafe`
+- You want async Rust function support and Serde integration
+- You want derive macros for UserData
+- Your build environment supports nightly Rust
+- You do not need `Send`/`Sync` thread safety
 
 ### Use mlua When
 
