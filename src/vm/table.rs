@@ -634,6 +634,7 @@ impl Table {
     /// This is the fast path for integer-keyed access. Uses the unsigned
     /// trick `(key - 1) as u64 < array_len` to simultaneously check
     /// `key >= 1` and `key <= array_len`.
+    #[inline]
     pub fn get_int(&self, key: i64) -> Val {
         // Unsigned trick: negative keys and 0 wrap to large values.
         let idx = (key as u64).wrapping_sub(1);
@@ -669,6 +670,7 @@ impl Table {
     ///
     /// Uses the string's cached hash for bucket lookup, then compares
     /// by `GcRef` identity (interning guarantees unique refs).
+    #[inline]
     pub fn get_str(&self, key: GcRef<LuaString>, strings: &Arena<LuaString>) -> Val {
         if self.nodes.is_empty() {
             return Val::Nil;
@@ -695,6 +697,7 @@ impl Table {
     ///
     /// For number keys, tries integer fast path first. For string keys,
     /// uses pointer-identity comparison. For nil, returns nil immediately.
+    #[inline]
     pub fn get(&self, key: Val, strings: &Arena<LuaString>) -> Val {
         match key {
             Val::Nil => Val::Nil,
@@ -711,6 +714,7 @@ impl Table {
     }
 
     /// Walk the hash chain for a generic key.
+    #[inline]
     fn get_hash(&self, key: Val, strings: &Arena<LuaString>) -> Val {
         if self.nodes.is_empty() {
             return Val::Nil;
@@ -826,6 +830,7 @@ impl Table {
     ///
     /// Returns `Err` if the key is not found in the table (the table was
     /// modified during iteration in a way that invalidated the key).
+    #[inline]
     pub fn next(&self, key: Val, strings: &Arena<LuaString>) -> LuaResult<Option<(Val, Val)>> {
         let idx = self.find_index(key, strings)?;
 
