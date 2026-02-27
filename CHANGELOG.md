@@ -8,6 +8,23 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.1.21](https://github.com/wowemulation-dev/rilua/compare/v0.1.20...v0.1.21) - 2026-02-27
+
+### Added
+
+- add multi-implementation benchmark script
+
+### Documentation
+
+- add lua-rs (CppCXY) to implementation comparison
+- update comparison with measured benchmark data
+- add "Why rilua" section to README
+- add comparison with PUC-Rio, mlua, and Luau
+
+### Performance
+
+- add #[inline] to table lookup hot paths
+
 ## [0.1.20](https://github.com/wowemulation-dev/rilua/compare/v0.1.19...v0.1.20) - 2026-02-25
 
 ### Documentation
