@@ -13,7 +13,7 @@
 //! # Usage
 //!
 //! ```rust
-//! use rilua::Lua;
+//! use rilua::{Lua, LuaApiMut};
 //!
 //! let mut lua = Lua::new().unwrap();
 //! lua.exec("print(1 + 2)").unwrap();
@@ -23,6 +23,7 @@
 //! assert_eq!(x, 42.0);
 //! ```
 
+pub mod api;
 pub mod compiler;
 pub mod conversion;
 #[cfg(feature = "dynmod")]
@@ -33,10 +34,10 @@ pub(crate) mod platform;
 pub mod stdlib;
 pub mod vm;
 
-use std::any::Any;
 use std::rc::Rc;
 
 // Re-exports for public API.
+pub use api::{LuaApi, LuaApiMut};
 pub use conversion::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti};
 pub use error::{LuaError, LuaResult, RuntimeError, runtime_error};
 pub use handles::{AnyUserData, Function, Table, Thread};
@@ -105,6 +106,18 @@ pub(crate) fn check_interrupted() -> bool {
 /// struct.
 pub struct Lua {
     state: LuaState,
+}
+
+impl LuaApi for Lua {
+    fn state(&self) -> &LuaState {
+        &self.state
+    }
+}
+
+impl LuaApiMut for Lua {
+    fn state_mut(&mut self) -> &mut LuaState {
+        &mut self.state
+    }
 }
 
 impl Lua {
@@ -177,163 +190,9 @@ impl Lua {
         self.exec_bytes(&source, &name)
     }
 
-    /// Compiles a Lua source string and returns a function handle.
-    ///
-    /// The returned `Function` can be stored and called later. The
-    /// chunk name is set to `"=(string)"`.
-    pub fn load(&mut self, source: &str) -> LuaResult<Function> {
-        self.load_bytes(source.as_bytes(), "=(string)")
-    }
 
-    /// Compiles Lua source bytes (or loads a binary chunk) and returns a function handle.
-    pub fn load_bytes(&mut self, source: &[u8], name: &str) -> LuaResult<Function> {
-        let proto = compile_or_undump(source, name)?;
-        let mut proto = Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-        patch_string_constants(&mut proto, &mut self.state.gc);
-        let proto = Rc::new(proto);
 
-        let num_upvalues = proto.num_upvalues as usize;
-        let mut lua_cl = LuaClosure::new(proto, self.state.global);
-        for _ in 0..num_upvalues {
-            let uv = vm::closure::Upvalue::new_closed(Val::Nil);
-            let uv_ref = self.state.gc.alloc_upvalue(uv);
-            lua_cl.upvalues.push(uv_ref);
-        }
-        let closure_ref = self.state.gc.alloc_closure(Closure::Lua(lua_cl));
-        Ok(Function(closure_ref))
-    }
 
-    // -----------------------------------------------------------------------
-    // Globals
-    // -----------------------------------------------------------------------
-
-    /// Gets a global variable, converting it to the requested Rust type.
-    ///
-    /// Takes `&mut self` because looking up a string key may need to
-    /// intern the name (idempotent if it already exists).
-    pub fn global<V: FromLua>(&mut self, name: &str) -> LuaResult<V> {
-        let val = self.get_global_val(name);
-        V::from_lua(val, self)
-    }
-
-    /// Sets a global variable from a Rust value.
-    pub fn set_global<V: IntoLua>(&mut self, name: &str, value: V) -> LuaResult<()> {
-        let val = value.into_lua(self)?;
-        self.set_global_val(name, val)
-    }
-
-    // -----------------------------------------------------------------------
-    // Table creation
-    // -----------------------------------------------------------------------
-
-    /// Allocates a new empty table and returns a handle.
-    pub fn create_table(&mut self) -> Table {
-        let r = self.state.gc.alloc_table(vm::table::Table::new());
-        Table(r)
-    }
-
-    // -----------------------------------------------------------------------
-    // Userdata creation
-    // -----------------------------------------------------------------------
-
-    /// Creates a new userdata containing `data` with no metatable.
-    ///
-    /// The returned `AnyUserData` handle can be passed to Lua code or
-    /// stored as a global. Use [`AnyUserData::set_metatable`] to attach
-    /// methods.
-    pub fn create_userdata<T: Any>(&mut self, data: T) -> AnyUserData {
-        let ud = vm::value::Userdata::new(Box::new(data));
-        let r = self.state.gc.alloc_userdata(ud);
-        AnyUserData(r)
-    }
-
-    /// Creates a new userdata with a named, registry-cached metatable.
-    ///
-    /// The metatable is stored in the registry under `type_name`. If a
-    /// metatable for that name already exists, it is reused. This is the
-    /// same pattern used by PUC-Rio's `luaL_newmetatable` for C userdata
-    /// types.
-    pub fn create_typed_userdata<T: Any>(
-        &mut self,
-        data: T,
-        type_name: &str,
-    ) -> LuaResult<AnyUserData> {
-        let mt = stdlib::new_metatable(&mut self.state, type_name)?;
-        let ud = vm::value::Userdata::with_metatable(Box::new(data), mt);
-        let r = self.state.gc.alloc_userdata(ud);
-        Ok(AnyUserData(r))
-    }
-
-    /// Creates or retrieves a named metatable for a userdata type.
-    ///
-    /// The metatable is cached in the registry by `type_name`. Methods
-    /// can be registered on the returned `Table` handle.
-    pub fn create_userdata_metatable(&mut self, type_name: &str) -> LuaResult<Table> {
-        let mt = stdlib::new_metatable(&mut self.state, type_name)?;
-        Ok(Table(mt))
-    }
-
-    // -----------------------------------------------------------------------
-    // Function registration
-    // -----------------------------------------------------------------------
-
-    /// Registers a Rust function as a global Lua function.
-    pub fn register_function(&mut self, name: &str, func: RustFn) -> LuaResult<()> {
-        let closure = Closure::Rust(RustClosure::new(func, name));
-        let closure_ref = self.state.gc.alloc_closure(closure);
-        self.set_global_val(name, Val::Function(closure_ref))
-    }
-
-    // -----------------------------------------------------------------------
-    // GC control
-    // -----------------------------------------------------------------------
-
-    /// Runs a full garbage collection cycle.
-    pub fn gc_collect(&mut self) -> LuaResult<()> {
-        self.state.full_gc()
-    }
-
-    /// Returns the total memory in use by Lua (in bytes).
-    pub fn gc_count(&self) -> usize {
-        self.state.gc.gc_state.total_bytes
-    }
-
-    /// Stops the garbage collector.
-    ///
-    /// Sets the threshold to `usize::MAX` so automatic GC never triggers.
-    /// A subsequent `gc_collect()` resets the threshold, re-enabling auto-GC
-    /// (matching PUC-Rio's behavior).
-    pub fn gc_stop(&mut self) {
-        self.state.gc.gc_state.gc_threshold = usize::MAX;
-    }
-
-    /// Restarts the garbage collector.
-    ///
-    /// Sets the threshold to `total_bytes` so the next allocation
-    /// triggers a GC step (matching PUC-Rio's behavior).
-    pub fn gc_restart(&mut self) {
-        self.state.gc.gc_state.gc_threshold = self.state.gc.gc_state.total_bytes;
-    }
-
-    /// Performs an incremental GC step. Returns true if the step
-    /// finished a collection cycle.
-    pub fn gc_step(&mut self, step_size: i64) -> LuaResult<bool> {
-        self.state.gc_step(step_size)
-    }
-
-    /// Sets the GC pause parameter (percentage). Returns the previous value.
-    pub fn gc_set_pause(&mut self, pause: u32) -> u32 {
-        let old = self.state.gc.gc_state.gc_pause;
-        self.state.gc.gc_state.gc_pause = pause;
-        old
-    }
-
-    /// Sets the GC step multiplier. Returns the previous value.
-    pub fn gc_set_step_multiplier(&mut self, stepmul: u32) -> u32 {
-        let old = self.state.gc.gc_state.gc_stepmul;
-        self.state.gc.gc_state.gc_stepmul = stepmul;
-        old
-    }
 
     // -----------------------------------------------------------------------
     // Calling loaded functions
@@ -536,11 +395,13 @@ impl Lua {
     // -----------------------------------------------------------------------
 
     /// Immutable access to the underlying `LuaState`.
+    #[allow(dead_code)]
     pub(crate) fn state(&self) -> &LuaState {
         &self.state
     }
 
     /// Mutable access to the underlying `LuaState`.
+    #[allow(dead_code)]
     pub(crate) fn state_mut(&mut self) -> &mut LuaState {
         &mut self.state
     }
@@ -581,6 +442,7 @@ impl Lua {
     ///
     /// Uses `intern_string` (idempotent) to get the key reference, then
     /// does a direct table lookup.
+    #[allow(dead_code)]
     fn get_global_val(&mut self, name: &str) -> Val {
         let key_ref = self.state.gc.intern_string(name.as_bytes());
         let Some(global_table) = self.state.gc.tables.get(self.state.global) else {
@@ -590,6 +452,7 @@ impl Lua {
     }
 
     /// Sets a value in the global table by name.
+    #[allow(dead_code)]
     fn set_global_val(&mut self, name: &str, val: Val) -> LuaResult<()> {
         let key_ref = self.state.gc.intern_string(name.as_bytes());
         let key = Val::Str(key_ref);

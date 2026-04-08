@@ -5,7 +5,7 @@
 //! conversions. Standard implementations cover Rust primitives,
 //! strings, `Option<T>`, and tuple arities up to 8.
 
-use crate::Lua;
+use crate::api::{LuaApi, LuaApiMut};
 use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::handles::{AnyUserData, Function, Table, Thread};
 use crate::vm::value::Val;
@@ -16,19 +16,19 @@ use crate::vm::value::Val;
 
 /// Converts a Rust value into a Lua `Val`.
 ///
-/// Takes `&mut Lua` because operations like string interning require
+/// Takes `&mut L` where `L: LuaApiMut` because operations like string interning require
 /// mutable access to the GC.
 pub trait IntoLua {
     /// Performs the conversion.
-    fn into_lua(self, lua: &mut Lua) -> LuaResult<Val>;
+    fn into_lua<L: LuaApiMut>(self, lua: &mut L) -> LuaResult<Val>;
 }
 
 /// Extracts a Rust value from a Lua `Val`.
 ///
-/// Takes `&Lua` (immutable) because reading does not mutate state.
+/// Takes `&L` where `L: LuaApi` (immutable) because reading does not mutate state.
 pub trait FromLua: Sized {
     /// Performs the conversion.
-    fn from_lua(val: Val, lua: &Lua) -> LuaResult<Self>;
+    fn from_lua<L: LuaApi>(val: Val, lua: &L) -> LuaResult<Self>;
 }
 
 // ---------------------------------------------------------------------------
@@ -38,13 +38,13 @@ pub trait FromLua: Sized {
 /// Converts a Rust value into multiple Lua values.
 pub trait IntoLuaMulti {
     /// Performs the conversion.
-    fn into_lua_multi(self, lua: &mut Lua) -> LuaResult<Vec<Val>>;
+    fn into_lua_multi<L: LuaApiMut>(self, lua: &mut L) -> LuaResult<Vec<Val>>;
 }
 
 /// Extracts a Rust value from multiple Lua values.
 pub trait FromLuaMulti: Sized {
     /// Performs the conversion.
-    fn from_lua_multi(values: &[Val], lua: &Lua) -> LuaResult<Self>;
+    fn from_lua_multi<L: LuaApi>(values: &[Val], lua: &L) -> LuaResult<Self>;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,13 +52,13 @@ pub trait FromLuaMulti: Sized {
 // ---------------------------------------------------------------------------
 
 impl IntoLua for Val {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(self)
     }
 }
 
 impl FromLua for Val {
-    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
         Ok(val)
     }
 }
@@ -68,13 +68,13 @@ impl FromLua for Val {
 // ---------------------------------------------------------------------------
 
 impl IntoLua for () {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(Val::Nil)
     }
 }
 
 impl FromLua for () {
-    fn from_lua(_val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(_val: Val, _lua: &L) -> LuaResult<Self> {
         Ok(())
     }
 }
@@ -84,13 +84,13 @@ impl FromLua for () {
 // ---------------------------------------------------------------------------
 
 impl IntoLua for bool {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(Val::Bool(self))
     }
 }
 
 impl FromLua for bool {
-    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
         match val {
             Val::Bool(b) => Ok(b),
             Val::Nil => Ok(false),
@@ -104,13 +104,13 @@ impl FromLua for bool {
 // ---------------------------------------------------------------------------
 
 impl IntoLua for f64 {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(Val::Num(self))
     }
 }
 
 impl FromLua for f64 {
-    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
         match val {
             Val::Num(n) => Ok(n),
             _ => Err(conversion_error("number", val.type_name())),
@@ -119,13 +119,13 @@ impl FromLua for f64 {
 }
 
 impl IntoLua for f32 {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(Val::Num(f64::from(self)))
     }
 }
 
 impl FromLua for f32 {
-    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
         match val {
             Val::Num(n) => Ok(n as Self),
             _ => Err(conversion_error("number", val.type_name())),
@@ -142,7 +142,7 @@ macro_rules! impl_integer_into_lua {
         $(
             impl IntoLua for $ty {
                 #[allow(clippy::cast_lossless, trivial_numeric_casts)]
-                fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+                fn into_lua<L: LuaApi>(self, _lua: &mut L) -> LuaResult<Val> {
                     Ok(Val::Num(self as f64))
                 }
             }
@@ -157,7 +157,7 @@ macro_rules! impl_integer_from_lua {
         $(
             impl FromLua for $ty {
                 #[allow(clippy::cast_lossless, trivial_numeric_casts)]
-                fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+                fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
                     match val {
                         Val::Num(n) => {
                             if n.fract() != 0.0 {
@@ -194,28 +194,28 @@ impl_integer_from_lua!(i8, i16, i32, i64, u8, u16, u32, u64, isize, usize);
 // ---------------------------------------------------------------------------
 
 impl IntoLua for String {
-    fn into_lua(self, lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, lua: &mut L) -> LuaResult<Val> {
         let r = lua.state_mut().gc.intern_string(self.as_bytes());
         Ok(Val::Str(r))
     }
 }
 
 impl IntoLua for &str {
-    fn into_lua(self, lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, lua: &mut L) -> LuaResult<Val> {
         let r = lua.state_mut().gc.intern_string(self.as_bytes());
         Ok(Val::Str(r))
     }
 }
 
 impl IntoLua for &[u8] {
-    fn into_lua(self, lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, lua: &mut L) -> LuaResult<Val> {
         let r = lua.state_mut().gc.intern_string(self);
         Ok(Val::Str(r))
     }
 }
 
 impl FromLua for String {
-    fn from_lua(val: Val, lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, lua: &L) -> LuaResult<Self> {
         match val {
             Val::Str(r) => {
                 let s = lua
@@ -232,7 +232,7 @@ impl FromLua for String {
 }
 
 impl FromLua for Vec<u8> {
-    fn from_lua(val: Val, lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, lua: &L) -> LuaResult<Self> {
         match val {
             Val::Str(r) => {
                 let s = lua
@@ -253,7 +253,7 @@ impl FromLua for Vec<u8> {
 // ---------------------------------------------------------------------------
 
 impl<T: IntoLua> IntoLua for Option<T> {
-    fn into_lua(self, lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, lua: &mut L) -> LuaResult<Val> {
         match self {
             Some(v) => v.into_lua(lua),
             None => Ok(Val::Nil),
@@ -262,7 +262,7 @@ impl<T: IntoLua> IntoLua for Option<T> {
 }
 
 impl<T: FromLua> FromLua for Option<T> {
-    fn from_lua(val: Val, lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, lua: &L) -> LuaResult<Self> {
         match val {
             Val::Nil => Ok(None),
             other => Ok(Some(T::from_lua(other, lua)?)),
@@ -275,13 +275,13 @@ impl<T: FromLua> FromLua for Option<T> {
 // ---------------------------------------------------------------------------
 
 impl IntoLua for Table {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(Val::Table(self.gc_ref()))
     }
 }
 
 impl FromLua for Table {
-    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
         match val {
             Val::Table(r) => Ok(Self(r)),
             _ => Err(conversion_error("table", val.type_name())),
@@ -290,13 +290,13 @@ impl FromLua for Table {
 }
 
 impl IntoLua for Function {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(Val::Function(self.gc_ref()))
     }
 }
 
 impl FromLua for Function {
-    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
         match val {
             Val::Function(r) => Ok(Self(r)),
             _ => Err(conversion_error("function", val.type_name())),
@@ -305,13 +305,13 @@ impl FromLua for Function {
 }
 
 impl IntoLua for Thread {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(Val::Thread(self.gc_ref()))
     }
 }
 
 impl FromLua for Thread {
-    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
         match val {
             Val::Thread(r) => Ok(Self(r)),
             _ => Err(conversion_error("thread", val.type_name())),
@@ -320,13 +320,13 @@ impl FromLua for Thread {
 }
 
 impl IntoLua for AnyUserData {
-    fn into_lua(self, _lua: &mut Lua) -> LuaResult<Val> {
+    fn into_lua<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Val> {
         Ok(Val::Userdata(self.gc_ref()))
     }
 }
 
 impl FromLua for AnyUserData {
-    fn from_lua(val: Val, _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua<L: LuaApi>(val: Val, _lua: &L) -> LuaResult<Self> {
         match val {
             Val::Userdata(r) => Ok(Self(r)),
             _ => Err(conversion_error("userdata", val.type_name())),
@@ -339,13 +339,13 @@ impl FromLua for AnyUserData {
 // ---------------------------------------------------------------------------
 
 impl IntoLuaMulti for Vec<Val> {
-    fn into_lua_multi(self, _lua: &mut Lua) -> LuaResult<Vec<Val>> {
+    fn into_lua_multi<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Vec<Val>> {
         Ok(self)
     }
 }
 
 impl FromLuaMulti for Vec<Val> {
-    fn from_lua_multi(values: &[Val], _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua_multi<L: LuaApi>(values: &[Val], _lua: &L) -> LuaResult<Self> {
         Ok(values.to_vec())
     }
 }
@@ -355,13 +355,13 @@ impl FromLuaMulti for Vec<Val> {
 // ---------------------------------------------------------------------------
 
 impl IntoLuaMulti for () {
-    fn into_lua_multi(self, _lua: &mut Lua) -> LuaResult<Vec<Val>> {
+    fn into_lua_multi<L: LuaApiMut>(self, _lua: &mut L) -> LuaResult<Vec<Val>> {
         Ok(vec![])
     }
 }
 
 impl FromLuaMulti for () {
-    fn from_lua_multi(_values: &[Val], _lua: &Lua) -> LuaResult<Self> {
+    fn from_lua_multi<L: LuaApi>(_values: &[Val], _lua: &L) -> LuaResult<Self> {
         Ok(())
     }
 }
@@ -373,7 +373,7 @@ impl FromLuaMulti for () {
 macro_rules! impl_tuple_multi {
     ($($idx:tt : $T:ident),+) => {
         impl<$($T: IntoLua),+> IntoLuaMulti for ($($T,)+) {
-            fn into_lua_multi(self, lua: &mut Lua) -> LuaResult<Vec<Val>> {
+            fn into_lua_multi<L: LuaApiMut>(self, lua: &mut L) -> LuaResult<Vec<Val>> {
                 Ok(vec![
                     $(self.$idx.into_lua(lua)?,)+
                 ])
@@ -381,7 +381,7 @@ macro_rules! impl_tuple_multi {
         }
 
         impl<$($T: FromLua),+> FromLuaMulti for ($($T,)+) {
-            fn from_lua_multi(values: &[Val], lua: &Lua) -> LuaResult<Self> {
+            fn from_lua_multi<L: LuaApi>(values: &[Val], lua: &L) -> LuaResult<Self> {
                 Ok((
                     $(
                         $T::from_lua(
@@ -423,6 +423,7 @@ fn conversion_error(expected: &str, got: &str) -> LuaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Lua;
 
     fn make_lua() -> Lua {
         Lua::new_empty()
