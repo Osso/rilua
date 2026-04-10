@@ -391,22 +391,6 @@ impl Lua {
     }
 
     // -----------------------------------------------------------------------
-    // Internal accessors (pub(crate) for stdlib, conversion, handles)
-    // -----------------------------------------------------------------------
-
-    /// Immutable access to the underlying `LuaState`.
-    #[allow(dead_code)]
-    pub(crate) fn state(&self) -> &LuaState {
-        &self.state
-    }
-
-    /// Mutable access to the underlying `LuaState`.
-    #[allow(dead_code)]
-    pub(crate) fn state_mut(&mut self) -> &mut LuaState {
-        &mut self.state
-    }
-
-    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
