@@ -1082,9 +1082,10 @@ pub fn lua_dofile(state: &mut LuaState) -> LuaResult<u32> {
     let proto = crate::compile_or_undump(&source, &chunk_name)?;
 
     // Patch string constants.
-    let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+    let mut proto =
+        crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
     crate::patch_string_constants(&mut proto, &mut state.gc);
-    let proto = std::rc::Rc::new(proto);
+    let proto = crate::vm::proto::ProtoRef::new(proto);
 
     // Create closure with the current global table as environment.
     let lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
@@ -1227,9 +1228,10 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
 
     match compile_result {
         Ok(proto) => {
-            let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+            let mut proto =
+                crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
             crate::patch_string_constants(&mut proto, &mut state.gc);
-            let proto = std::rc::Rc::new(proto);
+            let proto = crate::vm::proto::ProtoRef::new(proto);
 
             let num_upvalues = proto.num_upvalues as usize;
             let mut lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
@@ -1320,9 +1322,10 @@ fn restore_state(
 fn load_string_impl(state: &mut LuaState, source: &[u8], name: &str) -> LuaResult<u32> {
     match crate::compile_or_undump(source, name) {
         Ok(proto) => {
-            let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+            let mut proto =
+                crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
             crate::patch_string_constants(&mut proto, &mut state.gc);
-            let proto = std::rc::Rc::new(proto);
+            let proto = crate::vm::proto::ProtoRef::new(proto);
 
             let num_upvalues = proto.num_upvalues as usize;
             let mut lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);

@@ -6,7 +6,6 @@
 //! during code generation, and `BlockContext` tracks lexical scopes.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use crate::error::{LuaError, LuaResult, SyntaxError};
 
@@ -18,7 +17,9 @@ use crate::vm::instructions::{
     BITRK, Instruction, LFIELDS_PER_FLUSH, LUAI_MAXUPVALUES, LUAI_MAXVARS, MAXARG_BX, MAXARG_C,
     MAXINDEXRK, MAXSTACK, NO_JUMP, NO_REG, OpCode, is_k,
 };
-use crate::vm::proto::{LocalVar, Proto, VARARG_HASARG, VARARG_ISVARARG, VARARG_NEEDSARG};
+use crate::vm::proto::{
+    LocalVar, Proto, ProtoRef, VARARG_HASARG, VARARG_ISVARARG, VARARG_NEEDSARG,
+};
 use crate::vm::value::Val;
 
 // ---------------------------------------------------------------------------
@@ -1719,7 +1720,7 @@ impl Compiler {
 }
 
 /// Compiles a Lua source string into a Proto (function prototype).
-pub fn compile(source: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
+pub fn compile(source: &[u8], name: &str) -> LuaResult<ProtoRef> {
     let block = parser::parse(source, name)?;
     let mut compiler = Compiler::new(name);
 
@@ -1730,14 +1731,14 @@ pub fn compile(source: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
     compile_block(&mut compiler, &block)?;
 
     let proto = compiler.finish_main();
-    Ok(Rc::new(proto))
+    Ok(ProtoRef::new(proto))
 }
 
 /// Compiles Lua source from a reader-based lexer into a Proto.
 ///
 /// The lexer pulls data on demand from its reader function, matching
 /// PUC-Rio's ZIO model where the lexer drives I/O.
-pub fn compile_with_lexer(lexer: Lexer<'_>, name: &str) -> LuaResult<Rc<Proto>> {
+pub fn compile_with_lexer(lexer: Lexer<'_>, name: &str) -> LuaResult<ProtoRef> {
     let block = parser::parse_with_lexer(lexer)?;
     let mut compiler = Compiler::new(name);
 
@@ -1748,7 +1749,7 @@ pub fn compile_with_lexer(lexer: Lexer<'_>, name: &str) -> LuaResult<Rc<Proto>> 
     compile_block(&mut compiler, &block)?;
 
     let proto = compiler.finish_main();
-    Ok(Rc::new(proto))
+    Ok(ProtoRef::new(proto))
 }
 
 /// Compiles a block of statements inside a new scope.
@@ -2529,7 +2530,7 @@ fn compile_funcbody(
     // Add proto as a child of the current function
     let parent_fs = compiler.fs_mut();
     let proto_idx = parent_fs.proto.protos.len();
-    parent_fs.proto.protos.push(Rc::new(proto));
+    parent_fs.proto.protos.push(ProtoRef::new(proto));
 
     // Emit CLOSURE instruction
     #[allow(clippy::cast_possible_truncation)]

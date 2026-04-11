@@ -9,8 +9,6 @@
 //!
 //! Reference: `lvm.c` `luaV_execute` in PUC-Rio Lua 5.1.1.
 
-use std::rc::Rc;
-
 use crate::error::{LuaError, LuaResult, RuntimeError};
 
 use crate::check_interrupted;
@@ -21,6 +19,7 @@ use super::debug_info;
 use super::gc::arena::GcRef;
 use super::instructions::{Instruction, LFIELDS_PER_FLUSH, OpCode, index_k, is_k};
 use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
+use super::proto::ProtoRef;
 use super::proto::{Proto, VARARG_ISVARARG, VARARG_NEEDSARG};
 use super::state::{
     Gc, LUA_MINSTACK, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET, MAXCALLS, MAXCCALLS,
@@ -505,7 +504,7 @@ impl LuaState {
 
         match closure {
             Closure::Lua(lua_cl) => {
-                let proto = Rc::clone(&lua_cl.proto);
+                let proto = ProtoRef::clone(&lua_cl.proto);
                 let num_params = proto.num_params as usize;
                 let max_stack = proto.max_stack_size as usize;
                 let is_vararg = proto.is_vararg & VARARG_ISVARARG != 0;
@@ -1138,7 +1137,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 .get(closure_ref)
                 .ok_or_else(|| runtime_error_simple("invalid closure"))?;
             match cl {
-                Closure::Lua(lcl) => (Rc::clone(&lcl.proto), lcl.env),
+                Closure::Lua(lcl) => (ProtoRef::clone(&lcl.proto), lcl.env),
                 Closure::Rust(_) => {
                     return Err(runtime_error_simple("expected Lua closure in execute"));
                 }
@@ -1946,7 +1945,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Closure => {
                     state.gc_check()?;
                     let bx = instr.bx() as usize;
-                    let child_proto = Rc::clone(&proto.protos[bx]);
+                    let child_proto = ProtoRef::clone(&proto.protos[bx]);
                     let nups = child_proto.num_upvalues as usize;
 
                     let mut new_cl = LuaClosure::new(child_proto, env);
@@ -2496,7 +2495,7 @@ mod tests {
     /// Helper: create a LuaState with a proto loaded as the current function.
     fn setup_state(proto: Proto) -> LuaState {
         let mut state = LuaState::new();
-        let proto_rc = Rc::new(proto);
+        let proto_rc = ProtoRef::new(proto);
         let env = state.global;
 
         let cl = LuaClosure::new(proto_rc, env);
@@ -2759,7 +2758,7 @@ mod tests {
         ];
         let constants = vec![Val::Str(key_ref), Val::Num(42.0)];
 
-        let proto_rc = Rc::new(make_proto(code, constants));
+        let proto_rc = ProtoRef::new(make_proto(code, constants));
         let env = state.global;
         let cl = LuaClosure::new(proto_rc, env);
         let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
@@ -2787,7 +2786,7 @@ mod tests {
         ];
         let constants = vec![Val::Str(key_ref), Val::Num(99.0)];
 
-        let proto_rc = Rc::new(make_proto(code, constants));
+        let proto_rc = ProtoRef::new(make_proto(code, constants));
         let env = state.global;
         let cl = LuaClosure::new(proto_rc, env);
         let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
@@ -2814,7 +2813,7 @@ mod tests {
         ];
         let constants = vec![Val::Str(s_ref)];
 
-        let proto_rc = Rc::new(make_proto(code, constants));
+        let proto_rc = ProtoRef::new(make_proto(code, constants));
         let env = state.global;
         let cl = LuaClosure::new(proto_rc, env);
         let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));

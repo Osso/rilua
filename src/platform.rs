@@ -859,6 +859,13 @@ pub(crate) mod dynlib {
         path: String,
     }
 
+    // DynLib's handle is a dlopen/LoadLibrary pointer. It can be safely
+    // transferred between threads; only concurrent use is unsafe (prevented
+    // by &mut Lua).
+    #[cfg(feature = "send")]
+    #[allow(unsafe_code)]
+    unsafe impl Send for DynLib {}
+
     impl DynLib {
         /// Opens a shared library at `path`.
         pub(crate) fn open(path: &str) -> Result<Self, String> {

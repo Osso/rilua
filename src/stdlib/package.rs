@@ -372,9 +372,10 @@ fn loader_lua(state: &mut LuaState) -> LuaResult<u32> {
     let chunk_name = format!("@{filename}");
     match crate::compile_or_undump(&source, &chunk_name) {
         Ok(proto) => {
-            let mut proto = std::rc::Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+            let mut proto =
+                crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
             crate::patch_string_constants(&mut proto, &mut state.gc);
-            let proto = std::rc::Rc::new(proto);
+            let proto = crate::vm::proto::ProtoRef::new(proto);
 
             let lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
             let closure_ref = state.gc.alloc_closure(Closure::Lua(lua_cl));

@@ -1978,7 +1978,9 @@ pub fn str_dump(state: &mut LuaState) -> LuaResult<u32> {
             }));
         };
         match closure {
-            crate::vm::closure::Closure::Lua(lua_cl) => std::rc::Rc::clone(&lua_cl.proto),
+            crate::vm::closure::Closure::Lua(lua_cl) => {
+                crate::vm::proto::ProtoRef::clone(&lua_cl.proto)
+            }
             crate::vm::closure::Closure::Rust(_) => {
                 return Err(LuaError::Runtime(RuntimeError {
                     message: "unable to dump given function".into(),

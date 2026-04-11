@@ -8,7 +8,7 @@
 //!
 //! ## Closure Types
 //!
-//! - `LuaClosure`: `Rc<Proto>` + shared `GcRef<Upvalue>` array + env table
+//! - `LuaClosure`: `ProtoRef` + shared `GcRef<Upvalue>` array + env table
 //! - `RustClosure`: function pointer + inline `Vec<Val>` upvalues + name
 //!
 //! ## Upvalue States
@@ -18,11 +18,9 @@
 //!
 //! Reference: `lfunc.h`, `lfunc.c`, `lobject.h` in PUC-Rio Lua 5.1.1.
 
-use std::rc::Rc;
-
 use super::gc::arena::GcRef;
 use super::gc::trace::Trace;
-use super::proto::Proto;
+use super::proto::ProtoRef;
 use super::table::Table;
 use super::value::Val;
 
@@ -167,12 +165,12 @@ pub type RustFn = fn(&mut LuaState) -> LuaResult<u32>;
 
 /// A Lua closure: compiled bytecode + captured upvalues.
 ///
-/// The prototype is shared via `Rc` (immutable, no cycles). Upvalues
-/// are GC-managed and may be shared with other closures.
+/// The prototype is shared via `ProtoRef` (immutable, no cycles).
+/// Upvalues are GC-managed and may be shared with other closures.
 #[derive(Debug)]
 pub struct LuaClosure {
     /// Compiled function prototype (shared, immutable).
-    pub proto: Rc<Proto>,
+    pub proto: ProtoRef,
     /// Captured upvalues (one per `proto.num_upvalues`).
     pub upvalues: Vec<GcRef<Upvalue>>,
     /// Environment table (used for global variable lookups).
@@ -182,7 +180,7 @@ pub struct LuaClosure {
 impl LuaClosure {
     /// Creates a new Lua closure from a prototype and environment.
     #[must_use]
-    pub fn new(proto: Rc<Proto>, env: GcRef<Table>) -> Self {
+    pub fn new(proto: ProtoRef, env: GcRef<Table>) -> Self {
         let num_upvalues = proto.num_upvalues as usize;
         Self {
             proto,
@@ -314,6 +312,7 @@ mod tests {
     use super::*;
     use crate::vm::gc::Color;
     use crate::vm::gc::arena::Arena;
+    use crate::vm::proto::Proto;
     use crate::vm::table::Table;
 
     // Helper: create a dummy RustFn (must match RustFn signature).
@@ -415,7 +414,7 @@ mod tests {
         let env = tables.alloc(Table::new(), Color::White0);
         let mut proto = Proto::new("test");
         proto.num_upvalues = 2;
-        let cl = LuaClosure::new(Rc::new(proto), env);
+        let cl = LuaClosure::new(ProtoRef::new(proto), env);
         assert_eq!(cl.proto.source, "test");
         assert!(cl.upvalues.is_empty()); // capacity only, not filled yet
         assert_eq!(cl.upvalues.capacity(), 2);
@@ -445,7 +444,7 @@ mod tests {
     fn closure_is_lua() {
         let mut tables: Arena<Table> = Arena::new();
         let env = tables.alloc(Table::new(), Color::White0);
-        let cl = Closure::Lua(LuaClosure::new(Rc::new(Proto::new("test")), env));
+        let cl = Closure::Lua(LuaClosure::new(ProtoRef::new(Proto::new("test")), env));
         assert!(cl.is_lua());
         assert!(!cl.is_rust());
         assert!(cl.as_lua().is_some());

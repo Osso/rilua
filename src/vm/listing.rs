@@ -5,10 +5,9 @@
 //! upvalues).
 
 use std::fmt::Write;
-use std::rc::Rc;
 
 use super::instructions::{Instruction, OpArgMask, OpCode, OpMode, index_k, is_k};
-use super::proto::{Proto, VARARG_ISVARARG};
+use super::proto::{Proto, ProtoRef, VARARG_ISVARARG};
 use super::value::Val;
 
 /// Prints a string with Lua-style quoting and escaping.
@@ -281,7 +280,7 @@ fn format_code(proto: &Proto, out: &mut String) {
             }
             OpCode::Closure => {
                 if (bx as usize) < proto.protos.len() {
-                    let child_ptr = Rc::as_ptr(&proto.protos[bx as usize]) as usize;
+                    let child_ptr = ProtoRef::as_ptr(&proto.protos[bx as usize]) as usize;
                     let _ = write!(out, "\t; {child_ptr:#x}");
                 }
             }
