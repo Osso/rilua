@@ -9,7 +9,7 @@ use std::env;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
-use rilua::{Function, Lua, LuaError, StdLib, Val};
+use rilua::{Function, Lua, LuaApiMut, LuaError, StdLib, Val};
 
 // ---------------------------------------------------------------------------
 // SIGINT handling — raw FFI, no libc crate
