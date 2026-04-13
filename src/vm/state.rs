@@ -509,7 +509,6 @@ pub struct LuaState {
     pub saved_threads: Vec<LuaThread>,
 }
 
-
 impl LuaApi for LuaState {
     fn state(&self) -> &LuaState {
         self
@@ -1644,16 +1643,18 @@ mod tests {
         #[allow(unused_mut)]
         let mut state_mut = &mut lua.state;
         let t = state_mut.create_table();
-        state_mut.table_raw_set(&t, Val::Num(1.0), Val::Num(100.0)).ok();
-        
+        state_mut
+            .table_raw_set(&t, Val::Num(1.0), Val::Num(100.0))
+            .ok();
+
         // Test immutable operations with &LuaState
         let state_ref = &lua.state;
         let count = state_ref.gc_count();
         assert!(count > 0);
-        
+
         let v = state_ref.table_raw_get(&t, Val::Num(1.0));
         assert_eq!(v.ok(), Some(Val::Num(100.0)));
-        
+
         let len = state_ref.table_raw_len(&t);
         assert_eq!(len, 1);
     }
@@ -1662,7 +1663,7 @@ mod tests {
     fn lua_api_with_mut_state_global() {
         let mut lua = Lua::new_empty();
         let state = &mut lua.state;
-        
+
         state.set_global("test_var", 42.0f64).ok();
         let val: LuaResult<f64> = state.global("test_var");
         assert_eq!(val.ok(), Some(42.0));
@@ -1672,7 +1673,7 @@ mod tests {
     fn lua_api_with_mut_state_create_table() {
         let mut lua = Lua::new_empty();
         let state = &mut lua.state;
-        
+
         let t = state.create_table();
         state.table_raw_set(&t, Val::Num(1.0), Val::Num(100.0)).ok();
         let v = state.table_raw_get(&t, Val::Num(1.0));
@@ -1683,7 +1684,7 @@ mod tests {
     fn lua_api_with_mut_state_create_string() {
         let mut lua = Lua::new_empty();
         let state = &mut lua.state;
-        
+
         let val = state.create_string(b"test");
         assert!(matches!(val, Val::Str(_)));
     }
@@ -1692,28 +1693,31 @@ mod tests {
     fn lua_api_with_mut_state_gc_operations() {
         let mut lua = Lua::new_empty();
         let state = &mut lua.state;
-        
+
         let count = state.gc_count();
         assert!(count > 0);
-        
+
         state.gc_stop();
         assert_eq!(state.gc.gc_state.gc_threshold, usize::MAX);
-        
+
         state.gc_restart();
-        assert_eq!(state.gc.gc_state.gc_threshold, state.gc.gc_state.total_bytes);
+        assert_eq!(
+            state.gc.gc_state.gc_threshold,
+            state.gc.gc_state.total_bytes
+        );
     }
 
     #[test]
     fn lua_api_with_mut_state_register_function() {
         let mut lua = Lua::new_empty();
         let state = &mut lua.state;
-        
+
         let result = state.register_function("test_fn", |s| {
             s.push(Val::Num(123.0));
             Ok(1)
         });
         assert!(result.is_ok());
-        
+
         let val: LuaResult<Val> = state.global("test_fn");
         assert!(matches!(val.ok(), Some(Val::Function(_))));
     }
@@ -1722,7 +1726,7 @@ mod tests {
     fn lua_api_with_mut_state_create_userdata() {
         let mut lua = Lua::new_empty();
         let state = &mut lua.state;
-        
+
         let ud = state.create_userdata(999i64);
         let borrowed = ud.borrow::<i64>(state);
         assert_eq!(borrowed, Some(&999i64));
@@ -1732,7 +1736,7 @@ mod tests {
     fn lua_api_with_mut_state_load_and_compile() {
         let mut lua = Lua::new_empty();
         let state = &mut lua.state;
-        
+
         let func = state.load("return 1 + 2");
         assert!(func.is_ok());
         assert!(matches!(func.ok(), Some(Function(_))));
@@ -1743,16 +1747,16 @@ mod tests {
         fn set_value<L: LuaApiMut>(lua: &mut L, name: &str, value: f64) -> LuaResult<()> {
             lua.set_global(name, value)
         }
-        
+
         fn get_value<L: LuaApiMut>(lua: &mut L, name: &str) -> LuaResult<f64> {
             lua.global(name)
         }
-        
+
         let mut lua = Lua::new_empty();
         set_value(&mut lua, "x", 99.0).ok();
         let val = get_value(&mut lua, "x");
         assert_eq!(val.ok(), Some(99.0));
-        
+
         let state = &mut lua.state;
         set_value(state, "y", 88.0).ok();
         let val = get_value(state, "y");

@@ -16,7 +16,8 @@
 use rilua::vm::state::LuaState;
 use rilua::vm::value::Userdata;
 use rilua::{
-    FromLua, Function, Lua, LuaApi, LuaApiMut, LuaError, LuaResult, RuntimeError, StdLib, Table, Thread, Val, runtime_error
+    FromLua, Function, Lua, LuaApi, LuaApiMut, LuaError, LuaResult, RuntimeError, StdLib, Table,
+    Thread, Val, runtime_error,
 };
 
 // ---------------------------------------------------------------------------
