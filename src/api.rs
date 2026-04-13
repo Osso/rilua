@@ -3,12 +3,12 @@
 //! Provides `LuaApi` for immutable operations and `LuaApiMut` for mutable operations.
 
 use std::any::Any;
-use std::rc::Rc;
 
 use crate::conversion::{FromLua, IntoLua};
 use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::handles::{AnyUserData, Function, Table};
 use crate::vm::closure::{Closure, LuaClosure, RustClosure, RustFn};
+use crate::vm::proto::ProtoRef;
 use crate::vm::state::LuaState;
 use crate::vm::value::Val;
 
@@ -106,6 +106,9 @@ pub trait LuaApiMut: LuaApi {
     // -----------------------------------------------------------------------
 
     /// Creates a new userdata containing `data` with no metatable.
+    ///
+    /// With the `send` feature enabled, `T` must also implement `Send`.
+    #[cfg(not(feature = "send"))]
     fn create_userdata<T: Any>(&mut self, data: T) -> AnyUserData {
         let state = self.state_mut();
         let ud = crate::vm::value::Userdata::new(Box::new(data));
@@ -113,8 +116,36 @@ pub trait LuaApiMut: LuaApi {
         AnyUserData(r)
     }
 
+    /// Creates a new userdata containing `data` with no metatable.
+    ///
+    /// With the `send` feature, `T` must implement `Send` so the `Lua`
+    /// instance remains thread-safe.
+    #[cfg(feature = "send")]
+    fn create_userdata<T: Any + Send>(&mut self, data: T) -> AnyUserData {
+        let state = self.state_mut();
+        let ud = crate::vm::value::Userdata::new(Box::new(data));
+        let r = state.gc.alloc_userdata(ud);
+        AnyUserData(r)
+    }
+
     /// Creates a new userdata with a named, registry-cached metatable.
+    #[cfg(not(feature = "send"))]
     fn create_typed_userdata<T: Any>(
+        &mut self,
+        data: T,
+        type_name: &str,
+    ) -> LuaResult<AnyUserData> {
+        let state = self.state_mut();
+        let mt = crate::stdlib::new_metatable(state, type_name)?;
+        let ud = crate::vm::value::Userdata::with_metatable(Box::new(data), mt);
+        let r = state.gc.alloc_userdata(ud);
+        Ok(AnyUserData(r))
+    }
+
+    /// Creates a new userdata with a named, registry-cached metatable
+    /// (thread-safe variant).
+    #[cfg(feature = "send")]
+    fn create_typed_userdata<T: Any + Send>(
         &mut self,
         data: T,
         type_name: &str,
@@ -222,10 +253,10 @@ pub trait LuaApiMut: LuaApi {
     /// Compiles Lua source bytes (or loads a binary chunk) and returns a function handle.
     fn load_bytes(&mut self, source: &[u8], name: &str) -> LuaResult<Function> {
         let proto = crate::compile_or_undump(source, name)?;
-        let mut proto = Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+        let mut proto = ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
         let state = self.state_mut();
         crate::patch_string_constants(&mut proto, &mut state.gc);
-        let proto = Rc::new(proto);
+        let proto = ProtoRef::new(proto);
 
         let num_upvalues = proto.num_upvalues as usize;
         let mut lua_cl = LuaClosure::new(proto, state.global);

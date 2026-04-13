@@ -499,7 +499,7 @@ impl Gc {
     /// Traverses a gray closure: marks env, upvalues, and proto constants.
     ///
     /// Avoids Vec allocations by:
-    /// - Cloning the Rc<Proto> (cheap refcount bump) and walking it directly
+    /// - Cloning the ProtoRef (cheap refcount bump) and walking it directly
     /// - Accessing upvalue refs and inline upvals by index
     fn traverse_closure(&mut self, r: GcRef<Closure>) {
         // Extract what we need with minimal cloning.
@@ -507,7 +507,7 @@ impl Gc {
             Lua {
                 env: GcRef<Table>,
                 upvalue_count: usize,
-                proto: std::rc::Rc<Proto>,
+                proto: crate::vm::proto::ProtoRef,
             },
             Rust {
                 env: Option<GcRef<Table>>,
@@ -523,7 +523,7 @@ impl Gc {
                 Closure::Lua(lc) => ClosureData::Lua {
                     env: lc.env,
                     upvalue_count: lc.upvalues.len(),
-                    proto: std::rc::Rc::clone(&lc.proto),
+                    proto: crate::vm::proto::ProtoRef::clone(&lc.proto),
                 },
                 Closure::Rust(rc) => ClosureData::Rust {
                     env: rc.env,

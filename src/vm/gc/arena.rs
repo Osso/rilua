@@ -69,6 +69,14 @@ pub struct GcRef<T> {
 }
 
 // Manual trait impls because derive would add bounds on T.
+// GcRef is just two u32 indices -- it does not contain or reference T data
+// directly, so it is safe to Send/Sync regardless of T's bounds.
+#[cfg(feature = "send")]
+#[allow(unsafe_code)]
+unsafe impl<T> Send for GcRef<T> {}
+#[cfg(feature = "send")]
+#[allow(unsafe_code)]
+unsafe impl<T> Sync for GcRef<T> {}
 
 impl<T> Clone for GcRef<T> {
     fn clone(&self) -> Self {

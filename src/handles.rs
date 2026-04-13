@@ -17,6 +17,15 @@ use crate::vm::value::{Userdata, Val};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Table(pub(crate) GcRef<crate::vm::table::Table>);
 
+impl Table {
+    /// Creates a `Table` handle from a raw `GcRef<Table>`.
+    ///
+    /// Used when converting `Val::Table` to a typed handle.
+    pub fn from_gc_ref(r: GcRef<crate::vm::table::Table>) -> Self {
+        Self(r)
+    }
+}
+
 /// Handle to a Lua function (closure) in the GC arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Function(pub(crate) GcRef<Closure>);
@@ -32,6 +41,15 @@ pub struct Thread(pub(crate) GcRef<LuaThread>);
 /// recover the concrete Rust type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnyUserData(pub(crate) GcRef<Userdata>);
+
+impl AnyUserData {
+    /// Creates an `AnyUserData` handle from a raw `GcRef<Userdata>`.
+    ///
+    /// Used when converting `Val::Userdata` to a typed handle.
+    pub fn from_gc_ref(r: GcRef<Userdata>) -> Self {
+        Self(r)
+    }
+}
 
 impl Table {
     /// Gets a value by key without metamethod dispatch.
@@ -87,6 +105,13 @@ impl Table {
 }
 
 impl Function {
+    /// Creates a `Function` handle from a raw `GcRef<Closure>`.
+    ///
+    /// Used when converting `Val::Function` to a typed handle.
+    pub fn from_gc_ref(r: GcRef<Closure>) -> Self {
+        Self(r)
+    }
+
     /// Returns the underlying `GcRef` for internal use.
     pub fn gc_ref(self) -> GcRef<Closure> {
         self.0

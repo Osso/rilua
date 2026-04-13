@@ -33,21 +33,37 @@ use super::string::LuaString;
 use super::table::Table;
 
 // ---------------------------------------------------------------------------
+// Userdata data box type alias
+// ---------------------------------------------------------------------------
+
+/// Type-erased storage for userdata values.
+///
+/// Without the `send` feature, any `'static` type can be stored.
+/// With the `send` feature, only `Send` types can be stored, enabling
+/// the `Lua` struct to implement `Send`.
+#[cfg(not(feature = "send"))]
+pub type UserDataBox = Box<dyn Any>;
+
+/// Type-erased storage for userdata values (thread-safe variant).
+#[cfg(feature = "send")]
+pub type UserDataBox = Box<dyn Any + Send>;
+
+// ---------------------------------------------------------------------------
 // Userdata (defined here -- no separate module)
 // ---------------------------------------------------------------------------
 
 /// Full userdata: a GC-managed block of user data with an optional
 /// metatable and environment table.
 ///
-/// Stores an arbitrary Rust value (`Box<dyn Any>`) with optional metatable
-/// and environment. The I/O library stores file handles here; `newproxy()`
-/// stores `()`.
+/// Stores an arbitrary Rust value via [`UserDataBox`] with optional
+/// metatable and environment. The I/O library stores file handles here;
+/// `newproxy()` stores `()`.
 ///
 /// Reference: `Udata` in `lobject.h`, PUC-Rio Lua 5.1.1.
 pub struct Userdata {
     /// The user-owned data. Type-erased; use `downcast_ref`/`downcast_mut`
     /// to recover the concrete type.
-    data: Box<dyn Any>,
+    data: UserDataBox,
     /// Per-instance metatable (same model as Table).
     metatable: Option<GcRef<Table>>,
     /// Per-instance environment table (fenv).
@@ -64,7 +80,7 @@ pub struct Userdata {
 
 impl Userdata {
     /// Creates a new userdata with the given data and no metatable.
-    pub fn new(data: Box<dyn Any>) -> Self {
+    pub fn new(data: UserDataBox) -> Self {
         Self {
             data,
             metatable: None,
@@ -75,7 +91,7 @@ impl Userdata {
     }
 
     /// Creates a new userdata with data and a metatable.
-    pub fn with_metatable(data: Box<dyn Any>, mt: GcRef<Table>) -> Self {
+    pub fn with_metatable(data: UserDataBox, mt: GcRef<Table>) -> Self {
         Self {
             data,
             metatable: Some(mt),

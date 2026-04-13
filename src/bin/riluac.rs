@@ -10,11 +10,10 @@
 use std::env;
 use std::io::Read;
 use std::process;
-use std::rc::Rc;
 
 use rilua::compiler;
 use rilua::vm::listing;
-use rilua::vm::proto::Proto;
+use rilua::vm::proto::{Proto, ProtoRef};
 
 /// Version string matching PUC-Rio format.
 const VERSION: &str = "Lua 5.1.1  Copyright (C) 1994-2006 Lua.org, PUC-Rio";
@@ -138,7 +137,7 @@ fn do_args() -> Args {
 }
 
 /// Compile a single source or load a binary chunk, reading from file or stdin.
-fn compile_source(filename: &str) -> Rc<Proto> {
+fn compile_source(filename: &str) -> ProtoRef {
     let (source, name) = if filename.is_empty() {
         // Read from stdin.
         let mut buf = Vec::new();
@@ -172,7 +171,7 @@ fn compile_source(filename: &str) -> Rc<Proto> {
 ///
 /// Matches PUC-Rio's `combine()` from `luac.c`: creates a main function
 /// that calls CLOSURE+CALL for each input file's Proto.
-fn combine(protos: Vec<Rc<Proto>>) -> Rc<Proto> {
+fn combine(protos: Vec<ProtoRef>) -> ProtoRef {
     use rilua::vm::instructions::{Instruction, OpCode};
 
     if protos.len() == 1 {
@@ -204,7 +203,7 @@ fn combine(protos: Vec<Rc<Proto>>) -> Rc<Proto> {
 
     main.protos = protos;
 
-    Rc::new(main)
+    ProtoRef::new(main)
 }
 
 fn main() {
@@ -219,7 +218,7 @@ fn main() {
     };
 
     // Compile all input files.
-    let protos: Vec<Rc<Proto>> = files.iter().map(|f| compile_source(f)).collect();
+    let protos: Vec<ProtoRef> = files.iter().map(|f| compile_source(f)).collect();
 
     // Combine into a single Proto (wraps multiple files).
     let proto = combine(protos);

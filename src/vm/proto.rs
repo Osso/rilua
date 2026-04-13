@@ -4,12 +4,28 @@
 //! the bytecode instructions, constant pool, nested function prototypes,
 //! and debug information (line numbers, local variable names).
 //!
-//! Protos are reference-counted (`Rc<Proto>`) rather than GC-managed because
-//! they are immutable after compilation and cannot participate in cycles.
-
-use std::rc::Rc;
+//! Protos are reference-counted rather than GC-managed because they are
+//! immutable after compilation and cannot participate in cycles.
+//!
+//! The reference type is `Rc<Proto>` by default, or `Arc<Proto>` when
+//! the `send` feature is enabled (for thread-safe embedding).
 
 use super::value::Val;
+
+/// Reference-counted wrapper for `Proto`.
+///
+/// Uses `Rc` by default (cheaper, single-threaded). With the `send`
+/// feature, switches to `Arc` so that `Proto` (and thus `Lua`) can
+/// be sent between threads.
+#[cfg(not(feature = "send"))]
+pub type ProtoRef = std::rc::Rc<Proto>;
+
+/// Reference-counted wrapper for `Proto` (thread-safe variant).
+///
+/// Uses `Arc` when the `send` feature is enabled, allowing `Lua` to
+/// implement `Send`.
+#[cfg(feature = "send")]
+pub type ProtoRef = std::sync::Arc<Proto>;
 
 /// Vararg flag: function uses the implicit `arg` table (5.0 compat).
 pub const VARARG_HASARG: u8 = 1;
@@ -42,7 +58,7 @@ pub struct Proto {
     /// Constant pool (numbers, strings, nil, booleans).
     pub constants: Vec<Val>,
     /// Nested function prototypes.
-    pub protos: Vec<Rc<Self>>,
+    pub protos: Vec<ProtoRef>,
     /// Line number for each instruction (parallel to `code`).
     pub line_info: Vec<u32>,
     /// Local variable debug information.
@@ -161,7 +177,7 @@ mod tests {
 
     #[test]
     fn proto_nested() {
-        let inner = Rc::new(Proto::new("inner"));
+        let inner = ProtoRef::new(Proto::new("inner"));
         let mut outer = Proto::new("outer");
         outer.protos.push(inner);
         assert_eq!(outer.protos.len(), 1);
@@ -169,10 +185,13 @@ mod tests {
     }
 
     #[test]
-    fn proto_rc_sharing() {
-        let p = Rc::new(Proto::new("shared"));
-        let p2 = Rc::clone(&p);
-        assert_eq!(Rc::strong_count(&p), 2);
+    fn proto_ref_sharing() {
+        let p = ProtoRef::new(Proto::new("shared"));
+        let p2 = ProtoRef::clone(&p);
+        #[cfg(not(feature = "send"))]
+        assert_eq!(std::rc::Rc::strong_count(&p), 2);
+        #[cfg(feature = "send")]
+        assert_eq!(std::sync::Arc::strong_count(&p), 2);
         assert_eq!(p2.source, "shared");
     }
 }

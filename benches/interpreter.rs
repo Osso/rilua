@@ -6,7 +6,7 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rilua::compiler::codegen;
-use rilua::{Lua, StdLib, Val};
+use rilua::{Lua, LuaApiMut, StdLib, Val};
 
 // ---------------------------------------------------------------------------
 // State creation

@@ -34,8 +34,6 @@ pub(crate) mod platform;
 pub mod stdlib;
 pub mod vm;
 
-use std::rc::Rc;
-
 // Re-exports for public API.
 pub use api::{LuaApi, LuaApiMut};
 pub use conversion::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti};
@@ -43,11 +41,12 @@ pub use error::{LuaError, LuaResult, RuntimeError, runtime_error};
 pub use handles::{AnyUserData, Function, Table, Thread};
 pub use stdlib::StdLib;
 pub use vm::closure::RustFn;
+pub use vm::proto::ProtoRef;
 pub use vm::state::ThreadStatus;
 pub use vm::value::Val;
 
 use vm::callinfo::LUA_MULTRET;
-use vm::closure::{Closure, LuaClosure, RustClosure};
+use vm::closure::{Closure, LuaClosure};
 use vm::execute::{CallResult, execute};
 use vm::proto::Proto;
 use vm::state::{Gc, LuaState};
@@ -120,6 +119,22 @@ impl LuaApiMut for Lua {
     }
 }
 
+// SAFETY: With the `send` feature enabled, all fields of `LuaState` are
+// `Send`-safe:
+// - `ProtoRef` is `Arc<Proto>` (Send + Sync)
+// - `UserDataBox` is `Box<dyn Any + Send>` (Send)
+// - `GcRef<T>` is two `u32` indices + PhantomData (Send)
+// - `Gc` contains `Arena<T>` (Vec of owned data) and `StringTable` (HashMap)
+// - `IoFile` has `unsafe impl Send` (FILE* can be transferred between threads)
+// - All other fields are primitives, `Vec<Val>`, `Vec<CallInfo>`, etc.
+//
+// `Lua` requires `&mut self` for all operations, preventing concurrent access.
+// This impl enables embedding rilua in frameworks (e.g., bevy_mod_scripting)
+// that store script contexts behind a Mutex.
+#[cfg(feature = "send")]
+#[allow(unsafe_code)]
+unsafe impl Send for Lua {}
+
 impl Lua {
     /// Creates a new Lua state with all standard libraries loaded.
     pub fn new() -> LuaResult<Self> {
@@ -189,10 +204,6 @@ impl Lua {
         let name = format!("@{path}");
         self.exec_bytes(&source, &name)
     }
-
-
-
-
 
     // -----------------------------------------------------------------------
     // Calling loaded functions
@@ -308,19 +319,6 @@ impl Lua {
     }
 
     // -----------------------------------------------------------------------
-    // String creation
-    // -----------------------------------------------------------------------
-
-    /// Interns a byte string via the GC string table, returning `Val::Str`.
-    ///
-    /// The string is deduplicated: if an identical byte sequence was
-    /// already interned, the existing reference is returned.
-    pub fn create_string(&mut self, s: &[u8]) -> Val {
-        let str_ref = self.state.gc.intern_string(s);
-        Val::Str(str_ref)
-    }
-
-    // -----------------------------------------------------------------------
     // File loading
     // -----------------------------------------------------------------------
 
@@ -356,38 +354,39 @@ impl Lua {
         self.load_bytes(&source, &name)
     }
 
-    // -----------------------------------------------------------------------
-    // Table operations
-    // -----------------------------------------------------------------------
-
-    /// Raw set on a table handle via the public API.
+    /// Returns the next key-value pair after `key` in the table.
     ///
-    /// Sets `table[key] = value` without metamethod dispatch.
-    pub fn table_raw_set(&mut self, table: &Table, key: Val, value: Val) -> LuaResult<()> {
-        table.raw_set(&mut self.state, key, value)
+    /// Pass `Val::Nil` to start iteration. Returns `None` when the
+    /// table is exhausted. This mirrors PUC-Rio's `lua_next`.
+    pub fn table_next(&self, table: &Table, key: Val) -> LuaResult<Option<(Val, Val)>> {
+        let t = self.state.gc.tables.get(table.0).ok_or_else(|| {
+            LuaError::Runtime(RuntimeError {
+                message: "table has been collected".into(),
+                level: 0,
+                traceback: vec![],
+            })
+        })?;
+        t.next(key, &self.state.gc.string_arena)
     }
 
-    /// Raw get on a table handle via the public API.
+    /// Returns the byte content of a `Val::Str`.
     ///
-    /// Returns `table[key]` without metamethod dispatch.
-    pub fn table_raw_get(&self, table: &Table, key: Val) -> LuaResult<Val> {
-        table.raw_get(&self.state, key)
+    /// Returns `None` if the value is not a string or the string has
+    /// been collected.
+    pub fn val_as_bytes(&self, val: Val) -> Option<&[u8]> {
+        if let Val::Str(str_ref) = val {
+            self.state.gc.string_arena.get(str_ref).map(|s| s.data())
+        } else {
+            None
+        }
     }
 
-    /// Returns the raw length of a table (no `__len` metamethod).
-    pub fn table_raw_len(&self, table: &Table) -> i64 {
-        table.raw_len(&self.state)
-    }
-
-    /// Sets a named Rust function on a table.
+    /// Borrows a typed value from a userdata handle.
     ///
-    /// Creates a closure wrapping `func` and stores it as `table[name]`.
-    /// Useful for building method tables and metatables.
-    pub fn table_set_function(&mut self, table: &Table, name: &str, func: RustFn) -> LuaResult<()> {
-        let key = Val::Str(self.state.gc.intern_string(name.as_bytes()));
-        let closure = Closure::Rust(RustClosure::new(func, name));
-        let closure_ref = self.state.gc.alloc_closure(closure);
-        table.raw_set(&mut self.state, key, Val::Function(closure_ref))
+    /// Returns `None` if the stored type is not `T` or the userdata has
+    /// been collected.
+    pub fn borrow_userdata<T: std::any::Any>(&self, ud: &AnyUserData) -> Option<&T> {
+        ud.borrow::<T>(&self.state)
     }
 
     // -----------------------------------------------------------------------
@@ -395,10 +394,10 @@ impl Lua {
     // -----------------------------------------------------------------------
 
     /// Patches string constants, creates a main closure, and executes it.
-    fn run_proto(&mut self, proto: Rc<Proto>) -> LuaResult<()> {
-        let mut proto = Rc::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+    fn run_proto(&mut self, proto: ProtoRef) -> LuaResult<()> {
+        let mut proto = ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
         patch_string_constants(&mut proto, &mut self.state.gc);
-        let proto = Rc::new(proto);
+        let proto = ProtoRef::new(proto);
 
         let num_upvalues = proto.num_upvalues as usize;
         let mut lua_cl = LuaClosure::new(proto, self.state.global);
@@ -488,7 +487,7 @@ pub fn exec_with_name(source: &[u8], name: &str) -> LuaResult<()> {
 /// Detects the `\x1bLua` signature and dispatches to `undump` for binary
 /// chunks or `compile` for source text. Both return an unpatched Proto
 /// (strings in `string_pool`, `Val::Nil` placeholders).
-pub(crate) fn compile_or_undump(source: &[u8], name: &str) -> LuaResult<Rc<Proto>> {
+pub(crate) fn compile_or_undump(source: &[u8], name: &str) -> LuaResult<ProtoRef> {
     // Skip shebang line before checking for binary signature.
     // PUC-Rio's luaL_loadfile reads past the leading '#' line, then
     // checks if the remaining content starts with LUA_SIGNATURE.
@@ -519,7 +518,7 @@ pub(crate) fn patch_string_constants(proto: &mut Proto, gc: &mut Gc) {
         proto.constants[idx as usize] = Val::Str(str_ref);
     }
     for child in &mut proto.protos {
-        patch_string_constants(Rc::make_mut(child), gc);
+        patch_string_constants(ProtoRef::make_mut(child), gc);
     }
 }
 
@@ -815,5 +814,14 @@ mod tests {
         set_interrupted();
         clear_interrupted();
         assert!(!check_interrupted(), "flag should be false after clear");
+    }
+
+    /// Compile-time assertion that `Lua` is `Send` when the `send`
+    /// feature is enabled.
+    #[cfg(feature = "send")]
+    #[test]
+    fn lua_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Lua>();
     }
 }
