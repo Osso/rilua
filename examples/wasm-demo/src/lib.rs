@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::fmt::Write as _;
 
-use rilua::{Lua, LuaResult, StdLib, Val};
+use rilua::{Lua, LuaApiMut, LuaResult, StdLib, Val};
 use rilua::vm::state::LuaState;
 use wasm_bindgen::prelude::*;
 

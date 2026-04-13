@@ -1724,7 +1724,7 @@ mod tests {
         let state = &mut lua.state;
         
         let ud = state.create_userdata(999i64);
-        let borrowed = ud.borrow::<i64>(&state);
+        let borrowed = ud.borrow::<i64>(state);
         assert_eq!(borrowed, Some(&999i64));
     }
 

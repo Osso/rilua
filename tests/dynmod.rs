@@ -11,6 +11,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use rilua::LuaApiMut;
+
 /// Builds the example native module and returns the path to the shared library.
 fn build_example_module() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

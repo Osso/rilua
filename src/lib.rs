@@ -375,7 +375,7 @@ impl Lua {
     /// been collected.
     pub fn val_as_bytes(&self, val: Val) -> Option<&[u8]> {
         if let Val::Str(str_ref) = val {
-            self.state.gc.string_arena.get(str_ref).map(|s| s.data())
+            self.state.gc.string_arena.get(str_ref).map(vm::string::LuaString::data)
         } else {
             None
         }
