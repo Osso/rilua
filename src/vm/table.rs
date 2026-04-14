@@ -162,6 +162,28 @@ pub struct Table {
     /// Does not affect Lua table semantics: rawget/rawset/pairs/type all
     /// work normally on both the array and hash parts.
     backing: Option<(u32, u32)>,
+
+    /// Per-key taint metadata for WoW's security system.
+    ///
+    /// Maps table keys to the addon name that last wrote them. Only populated
+    /// when the host enables taint tracking (`taint_mode`). Keys not present
+    /// in this map are "secure" (written by Blizzard code with nil taint).
+    ///
+    /// Queried by `issecurevariable(table, key)` and set automatically by
+    /// `__newindex`/`rawset` when the current call frame is tainted.
+    /// Uses a separate map instead of per-Node storage to avoid bloating
+    /// the hot path — most tables never have any tainted keys.
+    slot_taint: Option<Box<std::collections::HashMap<TaintKey, String>>>,
+}
+
+/// Key type for the per-slot taint map.
+///
+/// Covers the key types that WoW's taint system tracks: string keys
+/// (the common case) and integer keys (array indices).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TaintKey {
+    Str(Vec<u8>),
+    Int(i64),
 }
 
 impl Table {
@@ -175,6 +197,7 @@ impl Table {
             metatable: None,
             flags: 0,
             backing: None,
+            slot_taint: None,
         }
     }
 
@@ -194,6 +217,7 @@ impl Table {
                 metatable: None,
                 flags: 0,
                 backing: None,
+                slot_taint: None,
             }
         } else {
             let log2 = ceil_log2(hash_size);
@@ -259,6 +283,43 @@ impl Table {
     /// Sets the backing store identifier.
     pub fn set_backing(&mut self, backing: Option<(u32, u32)>) {
         self.backing = backing;
+    }
+
+    /// Get the taint tag for a string key, if any.
+    pub fn get_slot_taint_str(&self, key: &[u8]) -> Option<&str> {
+        self.slot_taint
+            .as_ref()?
+            .get(&TaintKey::Str(key.to_vec()))
+            .map(|s| s.as_str())
+    }
+
+    /// Get the taint tag for an integer key, if any.
+    pub fn get_slot_taint_int(&self, key: i64) -> Option<&str> {
+        self.slot_taint
+            .as_ref()?
+            .get(&TaintKey::Int(key))
+            .map(|s| s.as_str())
+    }
+
+    /// Set the taint tag for a string key.
+    pub fn set_slot_taint_str(&mut self, key: &[u8], taint: &str) {
+        self.slot_taint
+            .get_or_insert_with(|| Box::new(std::collections::HashMap::new()))
+            .insert(TaintKey::Str(key.to_vec()), taint.to_string());
+    }
+
+    /// Set the taint tag for an integer key.
+    pub fn set_slot_taint_int(&mut self, key: i64, taint: &str) {
+        self.slot_taint
+            .get_or_insert_with(|| Box::new(std::collections::HashMap::new()))
+            .insert(TaintKey::Int(key), taint.to_string());
+    }
+
+    /// Clear the taint tag for a string key (mark as secure).
+    pub fn clear_slot_taint_str(&mut self, key: &[u8]) {
+        if let Some(map) = self.slot_taint.as_mut() {
+            map.remove(&TaintKey::Str(key.to_vec()));
+        }
     }
 
     /// Returns a slice of the array part for GC traversal.
