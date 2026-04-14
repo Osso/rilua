@@ -132,6 +132,9 @@ pub fn open_libs_selective(state: &mut LuaState, libs: StdLib) -> LuaResult<()> 
     if libs.contains(StdLib::DEBUG) {
         open_debug_lib(state)?;
     }
+    if libs.contains(StdLib::BASE) || libs.contains(StdLib::DEBUG) {
+        taint::register_taint_api(state)?;
+    }
     // Package must be last: populates package.loaded with other libs.
     if libs.contains(StdLib::PACKAGE) {
         package::open_package_lib(state)?;
