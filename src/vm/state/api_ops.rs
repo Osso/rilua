@@ -158,41 +158,62 @@ impl LuaState {
         let result_pos = self.top - count;
 
         while total > 1 {
-            let top = result_pos + total;
-            let lhs = self.stack_get(top - 2);
-            let rhs = self.stack_get(top - 1);
-
-            if !self.is_string_or_number(lhs) || !self.is_string_or_number(rhs) {
-                let tm =
-                    lookup_tm(self, lhs, TMS::Concat).or_else(|| lookup_tm(self, rhs, TMS::Concat));
-                let Some(tm_val) = tm else {
-                    return Err(concat_error(lhs, rhs, self));
-                };
-
-                let result = self.call_tm_two_args(tm_val, lhs, rhs)?;
-                self.stack_set(top - 2, result);
-                self.top = top - 1;
-                total -= 1;
-                continue;
-            }
-
-            let mut run_len = 2;
-            while run_len < total && self.is_string_or_number(self.stack_get(top - run_len - 1)) {
-                run_len += 1;
-            }
-
-            let mut buffer = Vec::new();
-            for i in (0..run_len).rev() {
-                let value = self.stack_get(top - 1 - i);
-                self.val_to_string_bytes(value, &mut buffer);
-            }
-            let string_ref = self.gc.intern_string(&buffer);
-            self.stack_set(top - run_len, Val::Str(string_ref));
-            total -= run_len - 1;
+            total = self.concat_step(result_pos, total)?;
         }
 
         self.top = result_pos + 1;
         Ok(())
+    }
+
+    fn concat_step(&mut self, result_pos: usize, total: usize) -> LuaResult<usize> {
+        let top = result_pos + total;
+        let lhs = self.stack_get(top - 2);
+        let rhs = self.stack_get(top - 1);
+
+        if self.needs_concat_metamethod(lhs, rhs) {
+            return self
+                .concat_via_metamethod(top, lhs, rhs)
+                .map(|()| total - 1);
+        }
+
+        let run_len = self.count_concat_run(top, total);
+        self.concat_string_run(top, run_len);
+        Ok(total - (run_len - 1))
+    }
+
+    fn needs_concat_metamethod(&self, lhs: Val, rhs: Val) -> bool {
+        !self.is_string_or_number(lhs) || !self.is_string_or_number(rhs)
+    }
+
+    fn concat_via_metamethod(&mut self, top: usize, lhs: Val, rhs: Val) -> LuaResult<()> {
+        let Some(tm_val) =
+            lookup_tm(self, lhs, TMS::Concat).or_else(|| lookup_tm(self, rhs, TMS::Concat))
+        else {
+            return Err(concat_error(lhs, rhs, self));
+        };
+
+        let result = self.call_tm_two_args(tm_val, lhs, rhs)?;
+        self.stack_set(top - 2, result);
+        self.top = top - 1;
+        Ok(())
+    }
+
+    fn count_concat_run(&self, top: usize, total: usize) -> usize {
+        let mut run_len = 2;
+        while run_len < total && self.is_string_or_number(self.stack_get(top - run_len - 1)) {
+            run_len += 1;
+        }
+        run_len
+    }
+
+    fn concat_string_run(&mut self, top: usize, run_len: usize) {
+        let mut buffer = Vec::new();
+        for i in (0..run_len).rev() {
+            let value = self.stack_get(top - 1 - i);
+            self.val_to_string_bytes(value, &mut buffer);
+        }
+        let string_ref = self.gc.intern_string(&buffer);
+        self.stack_set(top - run_len, Val::Str(string_ref));
     }
 
     fn raw_set_api_table(
