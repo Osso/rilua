@@ -192,6 +192,159 @@ perf record -g --call-graph dwarf target/release/rilua lua-5.1-tests/constructs.
 perf report
 ```
 
+### Current Perf Snapshot (2026-04-14)
+
+Before changing runtime code, the current hot cases were profiled with
+`perf` against an unstripped release build:
+
+```sh
+CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --release
+```
+
+Perf data was captured into `target/perf/*.sym.data` for:
+`constructs.lua`, `nextvar.lua`, `sort.lua`, `db.lua`, and `verybig.lua`.
+
+#### `constructs.lua`
+
+The profile is split between runtime dispatch and front-end work. The
+largest named entries were:
+
+- `rilua::vm::execute::execute`
+- `rilua::compiler::codegen::compile_expr`
+- `rilua::compiler::parser::Parser::parse_suffixed_expr`
+- `rilua::compiler::lexer::Lexer::scan`
+- `rilua::compiler::parser::Parser::advance`
+- `rilua::vm::string::StringTable::intern`
+- `alloc::raw_vec::RawVecInner<A>::finish_grow`
+
+Read: the official `constructs.lua` timing is not a pure VM-dispatch
+benchmark. It still spends meaningful time in lex/parse/codegen and
+vector growth on the compile path.
+
+Candidate fixes from this stack:
+
+- Keep VM-dispatch work aimed at `execute()`, but do not expect it alone
+  to close the full `constructs.lua` gap.
+- Pre-size parser/codegen vectors used by nested block and expression
+  construction to reduce `RawVec` growth churn.
+- Reduce compile-path string/hash traffic in large nested sources before
+  doing deeper readability refactors in the compiler.
+
+#### `nextvar.lua`
+
+Top entries were much more specific:
+
+- `rilua::vm::execute::execute` (`17.58%`)
+- `rilua::vm::gc::collector::<impl rilua::vm::state::Gc>::traverse_table` (`7.94%`)
+- `rilua::vm::gc::collector::<impl rilua::vm::state::LuaState>::gc_singlestep` (`7.87%`)
+- `core::num::flt2dec::strategy::dragon::format_exact` (`6.36%` and `3.61%`)
+- `rilua::vm::gc::collector::<impl rilua::vm::state::Gc>::mark_value` (`5.46%`)
+- `rilua::vm::table::Table::get` (`4.94%`)
+- `rilua::vm::execute::<impl rilua::vm::state::LuaState>::precall` (`5.51%`)
+- `rilua::vm::execute::<impl rilua::vm::state::LuaState>::poscall` (`4.56%`)
+
+Read: table iteration is paying for GC traversal and mark work in the
+middle of the test, and number formatting is also visible in the hot
+path instead of being background noise.
+
+Candidate fixes from this stack:
+
+- Audit GC debt/step pacing around iteration-heavy workloads before
+  changing table layout again; this profile says collector work is part
+  of the `nextvar.lua` gap right now.
+- Investigate where numeric formatting enters this path and remove
+  redundant `tostring`/formatting work if it is avoidable.
+- Only after that, revisit `Table::get` / iteration helpers.
+
+#### `sort.lua`
+
+The hot stack is dominated by comparator call overhead:
+
+- `rilua::vm::execute::execute` (`33.86%`)
+- `rilua::stdlib::table::sort_comp` (`9.09%`)
+- `rilua::vm::execute::<impl rilua::vm::state::LuaState>::precall` (`8.67%`)
+- `rilua::vm::execute::<impl rilua::vm::state::LuaState>::poscall` (`4.52%`)
+- `rilua::vm::execute::vm_gettable` (`4.16%`)
+- `rilua::vm::table::Table::get` (`4.05%`)
+- `rilua::stdlib::table::auxsort` (`2.46%`)
+- `rilua::vm::state::LuaState::push_ci` (`1.95%`)
+
+Read: `sort.lua` is mostly a Lua callback trampoline benchmark. The
+sort algorithm itself (`auxsort`) is visible, but the heavier cost is
+`sort_comp -> call_function -> precall/execute/poscall`.
+
+Candidate fixes from this stack:
+
+- Optimize the Lua-to-Lua comparator path first: cheaper `precall`,
+  `push_ci`, and `poscall` matter more here than changing quicksort.
+- Reduce repeated table access and swap overhead inside `auxsort` only
+  after the call-frame path is cheaper.
+- Keep the default-comparator fast path separate from callback work so
+  future optimizations do not penalize the common no-callback case.
+
+#### `db.lua`
+
+This case is dominated by debug table construction:
+
+- `rilua::vm::table::Table::raw_set_impl` (`20.54%`)
+- `rilua::vm::table::Table::new_key` (`9.68%`)
+- `rilua::vm::table::Table::rehash` / `resize` under `raw_set_impl`
+- `rilua::stdlib::debug::set_table_str` on the `new_key` path
+- `rilua::vm::execute::execute` (`7.91%`)
+
+Read: the debug library is spending a large share of time allocating and
+rehashing small result tables rather than in stack inspection itself.
+
+Candidate fixes from this stack:
+
+- Pre-size the tables returned by `debug.getinfo`, `debug.gethook`, and
+  similar helpers so repeated `raw_set_impl -> rehash -> resize` work
+  disappears.
+- Avoid repeated `set_table_str` insertion churn when the result shape is
+  fixed and known up front.
+- Treat debug metadata lookup itself as secondary until table-building
+  overhead is reduced.
+
+#### `verybig.lua`
+
+This case mixes execution, hashing, and front-end work:
+
+- `rilua::vm::execute::execute` (`16.34%`)
+- `<std::hash::random::DefaultHasher as core::hash::Hasher>::write` (`5.00%`)
+- `core::hash::BuildHasher::hash_one` (`4.31%`)
+- `rilua::vm::table::Table::get` (`4.97%`)
+- `rilua::vm::string::StringTable::intern` (`3.54%`)
+- `rilua::vm::execute::vm_gettable` (`3.21%`)
+- `rilua::vm::table::Table::raw_set_impl` (`2.74%`)
+- `rilua::compiler::lexer::Lexer::scan` (`1.80%`)
+- `rilua::compiler::codegen::compile_expr` (`1.70%`)
+- `rilua::compiler::codegen::compile_table_ctor` (`1.30%`)
+
+Read: large-source pressure is not just dispatch. Hashing, interning,
+and compiler work are materially present in the hot path.
+
+Candidate fixes from this stack:
+
+- Reduce hashing and interning pressure in the compiler/string table
+  path before attempting another broad VM rewrite.
+- Pre-size compiler-owned tables/vectors for large constructors and
+  large source files.
+- Revisit `Table::get` / `vm_gettable` after compile-path churn is
+  lower, because both compile and execute work are contributing here.
+
+### Prioritized Runtime Work From Actual Stacks
+
+If the next optimization pass is limited to one hotspot at a time, the
+profiles point to this order:
+
+1. `sort.lua`: comparator call-frame overhead (`sort_comp`, `precall`,
+   `poscall`, `push_ci`)
+2. `db.lua`: debug result-table construction and rehashing
+3. `nextvar.lua`: GC pacing during dense iteration, then unexpected
+   number-formatting work
+4. `verybig.lua`: hashing/interning plus compiler allocation churn
+5. `constructs.lua`: mixed compile + dispatch work, not dispatch alone
+
 ## Benchmarks
 
 ### Criterion Microbenchmarks
