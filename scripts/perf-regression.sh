@@ -7,6 +7,10 @@
 #   gate                      Run the full all.lua wall-clock gate against
 #                             .perf-baseline.
 #   all                       Run smoke then gate.
+#   diagnose-criterion-baseline
+#                             Save a fresh temporary Criterion baseline for one
+#                             smoke benchmark, compare against it, and report
+#                             whether the saved baseline looks stale.
 #   refresh-criterion-baseline
 #                             Refresh the named Criterion smoke baseline.
 #   show-config               Print the active thresholds, tests, and benchmarks.
@@ -186,6 +190,87 @@ compare_criterion_smoke() {
     done
 }
 
+sanitize_baseline_name() {
+    printf '%s' "$1" | tr -cs '[:alnum:]._' '-'
+}
+
+diagnose_criterion_baseline() {
+    local bench_name="${1:-}"
+    local temp_baseline
+    local saved_file
+    local temp_file
+    local new_file
+    local saved_estimate
+    local temp_estimate
+    local new_estimate
+
+    if [ -z "$bench_name" ]; then
+        echo "Error: diagnose-criterion-baseline requires a benchmark name." >&2
+        echo "Example: ./scripts/perf-regression.sh diagnose-criterion-baseline control_flow_dispatch" >&2
+        exit 1
+    fi
+
+    saved_file="$(find_criterion_estimates "$bench_name" "$CRITERION_BASELINE_NAME")"
+    temp_baseline="${CRITERION_BASELINE_NAME}-recheck-$(sanitize_baseline_name "$bench_name")"
+
+    echo "==> Saving temporary Criterion baseline for ${bench_name}: ${temp_baseline}"
+    cargo bench --bench interpreter -- --noplot --save-baseline "$temp_baseline" "$bench_name"
+
+    echo "==> Comparing ${bench_name} against temporary baseline ${temp_baseline}"
+    cargo bench --bench interpreter -- --noplot --baseline "$temp_baseline" "$bench_name"
+
+    temp_file="$(find_criterion_estimates "$bench_name" "$temp_baseline")"
+    new_file="$(find_criterion_estimates "$bench_name" new)"
+    saved_estimate="$(read_point_estimate "$saved_file")"
+    temp_estimate="$(read_point_estimate "$temp_file")"
+    new_estimate="$(read_point_estimate "$new_file")"
+
+    python3 - "$bench_name" "$CRITERION_BASELINE_NAME" "$temp_baseline" \
+        "$saved_estimate" "$temp_estimate" "$new_estimate" "$CRITERION_THRESHOLD_PCT" <<'PY'
+import sys
+
+bench_name = sys.argv[1]
+saved_name = sys.argv[2]
+temp_name = sys.argv[3]
+saved = float(sys.argv[4])
+temp = float(sys.argv[5])
+new = float(sys.argv[6])
+threshold = float(sys.argv[7])
+
+saved_to_temp = ((temp - saved) * 100.0) / saved
+temp_to_new = ((new - temp) * 100.0) / temp
+saved_to_new = ((new - saved) * 100.0) / saved
+
+print(
+    f"Saved baseline ({saved_name}): {saved:.2f}\n"
+    f"Fresh baseline ({temp_name}): {temp:.2f}\n"
+    f"Fresh compare (new): {new:.2f}\n"
+    f"Delta saved->fresh: {saved_to_temp:+.2f}%\n"
+    f"Delta fresh->new:   {temp_to_new:+.2f}%\n"
+    f"Delta saved->new:   {saved_to_new:+.2f}%"
+)
+
+if abs(saved_to_temp) > threshold and abs(temp_to_new) <= threshold:
+    print(
+        f"LIKELY STALE BASELINE: {bench_name} differs from the saved baseline by more than "
+        f"{threshold:.2f}% while a fresh same-tree rerun stays within threshold."
+    )
+    raise SystemExit(0)
+
+if abs(temp_to_new) > threshold:
+    print(
+        f"UNSTABLE OR REAL REGRESSION: same-tree reruns for {bench_name} still move by more than "
+        f"{threshold:.2f}%."
+    )
+    raise SystemExit(1)
+
+print(
+    f"REPRESENTATIVE BASELINE: {bench_name} stayed within {threshold:.2f}% on both the saved "
+    f"baseline and the fresh same-tree rerun."
+)
+PY
+}
+
 run_full_gate() {
     local baseline
     local current
@@ -212,13 +297,17 @@ run_full_gate() {
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/perf-regression.sh [smoke|gate|all|refresh-criterion-baseline|show-config]
+Usage: ./scripts/perf-regression.sh [smoke|gate|all|diagnose-criterion-baseline|refresh-criterion-baseline|show-config] [bench-name]
 
 Modes:
   smoke                      Build release, run the PUC-Rio smoke subset, and compare
                              the Criterion smoke subset against a saved baseline.
   gate                       Build release and run the full all.lua wall-clock gate.
   all                        Run smoke and gate in sequence.
+  diagnose-criterion-baseline
+                             Save a fresh temporary Criterion baseline for one benchmark,
+                             compare against it, and report whether the saved baseline
+                             still looks representative.
   refresh-criterion-baseline Refresh the named Criterion smoke baseline.
   show-config                Print the active thresholds, tests, and benchmarks.
 EOF
@@ -239,6 +328,9 @@ case "$MODE" in
         run_puc_smoke_subset
         compare_criterion_smoke
         run_full_gate
+        ;;
+    diagnose-criterion-baseline)
+        diagnose_criterion_baseline "${2:-}"
         ;;
     refresh-criterion-baseline)
         refresh_criterion_baseline

@@ -472,7 +472,7 @@ Output: min, median, and max times. Prints median to stdout.
 The repo now has a single entrypoint for routine perf checks:
 
 ```sh
-./scripts/perf-regression.sh [smoke|gate|all|refresh-criterion-baseline|show-config]
+./scripts/perf-regression.sh [smoke|gate|all|diagnose-criterion-baseline|refresh-criterion-baseline|show-config]
 ```
 
 Near-term policy: keep perf regression checks manual-only until noise is
@@ -531,6 +531,29 @@ This saves the smoke baseline under `target/criterion/**/perf-smoke/`
 and reads Criterion's `base/new` estimate files to enforce the numeric
 threshold.
 
+If one saved local Criterion baseline suddenly looks much worse than the
+rest of the current tree, diagnose it before treating it as a real code
+regression:
+
+```sh
+./scripts/perf-regression.sh diagnose-criterion-baseline control_flow_dispatch
+```
+
+This saves a fresh temporary baseline for one benchmark, reruns the same
+tree against it, and prints three numbers:
+
+- the saved `perf-smoke` baseline
+- the fresh temporary baseline
+- the fresh compare run
+
+Read it this way:
+
+- If the saved baseline is far away but the fresh same-tree rerun stays
+  within the current threshold, the saved local baseline is stale.
+- If the fresh same-tree rerun also blows the threshold, treat the
+  result as unresolved noise or a real regression and do not refresh any
+  baselines yet.
+
 After a confirmed full-suite improvement, refresh `.perf-baseline`:
 
 ```sh
@@ -543,6 +566,15 @@ Latest check on `2026-04-14`: do not refresh `.perf-baseline` yet.
   `control_flow_dispatch` regressed by `+24.30%` against the saved
   `perf-smoke` Criterion baseline, which exceeds the current `+20%`
   smoke threshold.
+- `./scripts/perf-regression.sh diagnose-criterion-baseline control_flow_dispatch`
+  showed that the saved local Criterion baseline is stale on this
+  machine:
+  - saved `perf-smoke`: about `380.08 µs`
+  - fresh same-tree temporary baseline: about `499.08 µs`
+  - immediate fresh compare: about `580.50 µs`
+  - saved-to-fresh gap: about `+31.31%`
+  - fresh-to-new gap: about `+16.31%`, which stays within the current
+    `+20%` threshold
 - `./scripts/perf-regression.sh gate` still passed the full-suite wall-clock
   guard at `2700 ms`, but that is worse than the current `.perf-baseline`
   value of `2630 ms`.
