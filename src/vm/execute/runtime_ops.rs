@@ -442,63 +442,91 @@ pub(super) fn vm_gettable(
     let mut current = t;
     for _ in 0..MAXTAGLOOP {
         if let Val::Table(table_ref) = current {
-            let table = state
-                .gc
-                .tables
-                .get(table_ref)
-                .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-            let result = table.get(key, &state.gc.string_arena);
-
-            if !result.is_nil() {
-                state.stack_set(result_reg, result);
-                return Ok(());
+            match handle_table_gettable(state, current, table_ref, key, result_reg)? {
+                GettableStep::Done => return Ok(()),
+                GettableStep::Continue(next) => current = next,
             }
+            continue;
+        }
 
-            let tm = {
-                let mt = table.metatable();
-                match mt {
-                    Some(mt_ref) => get_tm_for_table(&state.gc, mt_ref, TMS::Index),
-                    None => None,
-                }
-            };
-
-            match tm {
-                None => {
-                    state.stack_set(result_reg, Val::Nil);
-                    return Ok(());
-                }
-                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
-                    call_tm_res(state, tm_val, current, key, result_reg)?;
-                    return Ok(());
-                }
-                Some(tm_val) => {
-                    current = tm_val;
-                }
-            }
-        } else {
-            let tm = get_tm_for_val(&state.gc, current, TMS::Index);
-            match tm {
-                None => {
-                    if let Some(reg) = obj_reg {
-                        return Err(type_error(state, proto, pc, base, reg, "index"));
-                    }
-                    return Err(runtime_error(
-                        proto,
-                        pc,
-                        &format!("attempt to index a {} value", current.type_name()),
-                    ));
-                }
-                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
-                    call_tm_res(state, tm_val, current, key, result_reg)?;
-                    return Ok(());
-                }
-                Some(tm_val) => {
-                    current = tm_val;
-                }
-            }
+        match handle_non_table_gettable(state, current, key, result_reg, proto, pc, base, obj_reg)?
+        {
+            GettableStep::Done => return Ok(()),
+            GettableStep::Continue(next) => current = next,
         }
     }
     Err(runtime_error_simple("loop in gettable"))
+}
+
+enum GettableStep {
+    Done,
+    Continue(Val),
+}
+
+fn handle_table_gettable(
+    state: &mut LuaState,
+    current: Val,
+    table_ref: GcRef<Table>,
+    key: Val,
+    result_reg: usize,
+) -> LuaResult<GettableStep> {
+    let table = state
+        .gc
+        .tables
+        .get(table_ref)
+        .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+    let result = table.get(key, &state.gc.string_arena);
+
+    if !result.is_nil() {
+        state.stack_set(result_reg, result);
+        return Ok(GettableStep::Done);
+    }
+
+    let tm = table
+        .metatable()
+        .and_then(|mt_ref| get_tm_for_table(&state.gc, mt_ref, TMS::Index));
+    match tm {
+        None => {
+            state.stack_set(result_reg, Val::Nil);
+            Ok(GettableStep::Done)
+        }
+        Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+            call_tm_res(state, tm_val, current, key, result_reg)?;
+            Ok(GettableStep::Done)
+        }
+        Some(tm_val) => Ok(GettableStep::Continue(tm_val)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_non_table_gettable(
+    state: &mut LuaState,
+    current: Val,
+    key: Val,
+    result_reg: usize,
+    proto: &Proto,
+    pc: usize,
+    base: usize,
+    obj_reg: Option<usize>,
+) -> LuaResult<GettableStep> {
+    let tm = get_tm_for_val(&state.gc, current, TMS::Index);
+    match tm {
+        None => {
+            if let Some(reg) = obj_reg {
+                return Err(type_error(state, proto, pc, base, reg, "index"));
+            }
+            Err(runtime_error(
+                proto,
+                pc,
+                &format!("attempt to index a {} value", current.type_name()),
+            ))
+        }
+        Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
+            call_tm_res(state, tm_val, current, key, result_reg)?;
+            Ok(GettableStep::Done)
+        }
+        Some(tm_val) => Ok(GettableStep::Continue(tm_val)),
+    }
 }
 
 /// Lua table set with `__newindex` metamethod support.
