@@ -4,9 +4,304 @@
 
 #![allow(clippy::expect_used)]
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::fmt::Write as _;
+
+use criterion::measurement::WallTime;
+use criterion::{BenchmarkGroup, Criterion, black_box, criterion_group, criterion_main};
 use rilua::compiler::codegen;
-use rilua::{Lua, LuaApiMut, StdLib, Val};
+use rilua::{Function, Lua, LuaApiMut, StdLib, Val};
+
+fn load_returned_function(lua: &mut Lua, source: &str, name: &str) -> Function {
+    let chunk = lua
+        .load_bytes(source.as_bytes(), name)
+        .expect("load failed");
+    let results = lua
+        .call_function(&chunk, &[])
+        .expect("bootstrap call failed");
+    match results.as_slice() {
+        [Val::Function(func)] => Function::from_gc_ref(*func),
+        other => panic!("expected returned function, got {other:?}"),
+    }
+}
+
+fn append_large_compile_worker(source: &mut String, func_idx: usize) {
+    writeln!(source, "local function worker_{func_idx}(seed)").expect("write failed");
+    for local_idx in 0..24 {
+        let value = func_idx * 100 + local_idx;
+        writeln!(source, "  local v_{func_idx}_{local_idx} = seed + {value}")
+            .expect("write failed");
+    }
+    source.push_str("  local sum = 0\n");
+    source.push_str("  for i = 1, 40 do\n");
+    for local_idx in 0..24 {
+        writeln!(source, "    sum = sum + v_{func_idx}_{local_idx} + i").expect("write failed");
+    }
+    source.push_str("  end\n");
+    source.push_str("  return sum\n");
+    source.push_str("end\n");
+    writeln!(
+        source,
+        "total = total + worker_{func_idx}({})",
+        func_idx + 1
+    )
+    .expect("write failed");
+}
+
+fn build_large_compile_chunk() -> String {
+    let mut source = String::from("local total = 0\n");
+
+    for func_idx in 0..80 {
+        append_large_compile_worker(&mut source, func_idx);
+    }
+
+    source.push_str("return total\n");
+    source
+}
+
+fn build_large_execution_chunk() -> String {
+    let mut source = String::from("return function()\n");
+    source.push_str("  local total = 0\n");
+
+    for local_idx in 0..96 {
+        writeln!(&mut source, "  local slot_{local_idx} = {}", local_idx + 1)
+            .expect("write failed");
+    }
+
+    source.push_str("  for outer = 1, 160 do\n");
+    source.push_str("    local row = outer\n");
+    for local_idx in 0..96 {
+        writeln!(
+            &mut source,
+            "    row = row + slot_{local_idx} + ((outer + {}) % 7)",
+            local_idx + 1
+        )
+        .expect("write failed");
+    }
+    source.push_str("    total = total + row\n");
+    source.push_str("  end\n");
+    source.push_str("  return total\n");
+    source.push_str("end\n");
+    source
+}
+
+fn register_compile_verybig_chunk(group: &mut BenchmarkGroup<'_, WallTime>) {
+    let large_src = build_large_compile_chunk();
+    group.bench_function("compile_verybig_chunk", |b| {
+        b.iter(|| {
+            let proto = codegen::compile(black_box(large_src.as_bytes()), "bench");
+            black_box(proto).expect("compile failed");
+        });
+    });
+}
+
+fn register_control_flow_dispatch(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("control_flow_dispatch", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r#"
+            return function()
+                local acc = 0
+                for outer = 1, 80 do
+                    local inner = 60
+                    while inner > 0 do
+                        if inner % 15 == 0 then
+                            acc = acc + outer - inner
+                        elseif inner % 5 == 0 then
+                            acc = acc + inner
+                        elseif inner % 3 == 0 then
+                            acc = acc + outer
+                        else
+                            acc = acc + outer + inner
+                        end
+                        inner = inner - 1
+                    end
+                end
+
+                local tail = 1
+                repeat
+                    acc = acc + tail
+                    tail = tail + 1
+                until tail > 120
+
+                return acc
+            end
+            "#,
+            "control_flow_dispatch",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("control-flow bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_verybig_loaded_chunk(group: &mut BenchmarkGroup<'_, WallTime>) {
+    let large_execution_src = build_large_execution_chunk();
+    group.bench_function("verybig_loaded_chunk", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE).expect("new failed");
+        let bench = load_returned_function(&mut lua, &large_execution_src, "verybig_loaded_chunk");
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("large execution bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_debug_metadata_roundtrip(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("metadata_roundtrip_100", |b| {
+        let mut lua =
+            Lua::new_with(StdLib::BASE | StdLib::DEBUG | StdLib::STRING).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r#"
+            local function inspect(seed)
+                local local_seed = seed
+                local bias = seed + 1
+                local function inner(offset)
+                    return local_seed + bias + offset
+                end
+
+                local function probe(delta)
+                    local info = debug.getinfo(inner, "SufLn")
+                    local local_name, local_val = debug.getlocal(1, 1)
+                    local up_name, up_val = debug.getupvalue(inner, 1)
+                    local trace = debug.traceback("", 2)
+                    return info.currentline or 0, local_name, local_val, up_name, up_val, #trace
+                end
+
+                return probe(seed)
+            end
+
+            return function()
+                local total = 0
+                for i = 1, 100 do
+                    local currentline, local_name, local_val, up_name, up_val, trace_len =
+                        inspect(i)
+                    total = total + currentline + local_val + up_val + trace_len
+                    if local_name == "delta" then
+                        total = total + 1
+                    end
+                    if up_name == "local_seed" then
+                        total = total + 1
+                    end
+                end
+                return total
+            end
+            "#,
+            "debug_metadata_roundtrip",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("debug bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_next_pairs_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("next_pairs_mixed_1k", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE | StdLib::TABLE).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r#"
+            local t = {}
+            for i = 1, 1000 do
+                t[i] = i
+                t["k" .. i] = i * 2
+            end
+
+            return function()
+                local total = 0
+                for _ = 1, 8 do
+                    for key, value in pairs(t) do
+                        if type(key) == "number" then
+                            total = total + value
+                        else
+                            total = total + value + #key
+                        end
+                    end
+
+                    local key = nil
+                    while true do
+                        local next_key, value = next(t, key)
+                        if next_key == nil then
+                            break
+                        end
+                        if type(next_key) == "number" then
+                            total = total + value
+                        else
+                            total = total + value + #next_key
+                        end
+                        key = next_key
+                    end
+                end
+                return total
+            end
+            "#,
+            "next_pairs_mixed_1k",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("next/pairs bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_sort_callback(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("sort_callback_1k", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE | StdLib::TABLE).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r#"
+            local template = {}
+            for i = 1, 1000 do
+                template[i] = 1001 - i
+            end
+
+            local values = {}
+
+            local function refill()
+                for i = 1, #template do
+                    values[i] = template[i]
+                end
+            end
+
+            return function()
+                refill()
+                table.sort(values, function(a, b)
+                    local am = a % 10
+                    local bm = b % 10
+                    if am == bm then
+                        return a < b
+                    end
+                    return am < bm
+                end)
+
+                local total = 0
+                for i = 1, #values do
+                    total = total + values[i]
+                end
+                return total
+            end
+            "#,
+            "sort_callback_1k",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("sort bench failed");
+            black_box(results);
+        });
+    });
+}
 
 // ---------------------------------------------------------------------------
 // State creation
@@ -99,6 +394,8 @@ fn bench_compilation(c: &mut Criterion) {
         });
     });
 
+    register_compile_verybig_chunk(&mut group);
+
     group.finish();
 }
 
@@ -187,6 +484,21 @@ fn bench_vm_execution(c: &mut Criterion) {
             .expect("meta failed");
         });
     });
+
+    register_control_flow_dispatch(&mut group);
+    register_verybig_loaded_chunk(&mut group);
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Debug library
+// ---------------------------------------------------------------------------
+
+fn bench_debug_api(c: &mut Criterion) {
+    let mut group = c.benchmark_group("debug_api");
+
+    register_debug_metadata_roundtrip(&mut group);
 
     group.finish();
 }
@@ -331,6 +643,9 @@ fn bench_table_ops(c: &mut Criterion) {
         });
     });
 
+    register_next_pairs_mixed(&mut group);
+    register_sort_callback(&mut group);
+
     group.finish();
 }
 
@@ -394,6 +709,7 @@ criterion_group!(
     bench_state_creation,
     bench_compilation,
     bench_vm_execution,
+    bench_debug_api,
     bench_gc,
     bench_string_interning,
     bench_table_ops,
