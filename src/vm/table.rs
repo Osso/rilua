@@ -173,7 +173,7 @@ pub struct Table {
     /// `__newindex`/`rawset` when the current call frame is tainted.
     /// Uses a separate map instead of per-Node storage to avoid bloating
     /// the hot path — most tables never have any tainted keys.
-    slot_taint: Option<Box<std::collections::HashMap<TaintKey, String>>>,
+    slot_taint: Option<std::collections::HashMap<TaintKey, String>>,
 }
 
 /// Key type for the per-slot taint map.
@@ -291,7 +291,7 @@ impl Table {
         self.slot_taint
             .as_ref()?
             .get(&TaintKey::Str(key.to_vec()))
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
     }
 
     /// Get the taint tag for an integer key, if any.
@@ -299,20 +299,20 @@ impl Table {
         self.slot_taint
             .as_ref()?
             .get(&TaintKey::Int(key))
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
     }
 
     /// Set the taint tag for a string key.
     pub fn set_slot_taint_str(&mut self, key: &[u8], taint: &str) {
         self.slot_taint
-            .get_or_insert_with(|| Box::new(std::collections::HashMap::new()))
+            .get_or_insert_with(std::collections::HashMap::new)
             .insert(TaintKey::Str(key.to_vec()), taint.to_string());
     }
 
     /// Set the taint tag for an integer key.
     pub fn set_slot_taint_int(&mut self, key: i64, taint: &str) {
         self.slot_taint
-            .get_or_insert_with(|| Box::new(std::collections::HashMap::new()))
+            .get_or_insert_with(std::collections::HashMap::new)
             .insert(TaintKey::Int(key), taint.to_string());
     }
 
