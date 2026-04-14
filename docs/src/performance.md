@@ -76,6 +76,33 @@ The exact absolute times are not directly comparable to the 2026-02-23
 snapshot because the machine and OS changed. The ratio against PUC-Rio
 is the durable signal.
 
+### Near-Term Target
+
+The near-term performance target is to focus on the worst individual
+tests first, not to chase a headline overall-ratio goal yet.
+
+Reasoning:
+
+- Reaching `1.5x` overall from the current `1.77x` would require several
+  broad wins across mixed workloads, which is not a realistic next-step
+  target while the current outliers are still concentrated in a few hot
+  paths.
+- Simply beating `1.75x` overall is too weak as a planning target
+  because small measurement noise or a single localized win can move the
+  total without materially fixing the largest gaps.
+- The current profiles already identify concrete outliers with actionable
+  hot stacks: `constructs.lua`, `nextvar.lua`, `calls.lua`,
+  `closure.lua`, and `sort.lua`.
+
+Policy:
+
+- Near-term success is measured by reducing the worst per-test gaps first,
+  especially tests still around or above `2.0x`.
+- The overall suite ratio remains a secondary progress signal and should
+  improve as those hotspots come down.
+- Revisit a stricter overall target such as `1.5x` only after the
+  current outliers are no longer dominating the suite profile.
+
 ### Full-Suite Runner
 
 The repo's regression-gate harness uses the official `all.lua` runner:
