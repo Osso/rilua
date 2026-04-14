@@ -9,6 +9,7 @@ pub mod os;
 pub mod package;
 pub mod string;
 pub mod table;
+pub mod taint;
 pub mod testlib;
 
 use std::ops::{BitOr, BitOrAssign};
