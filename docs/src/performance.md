@@ -431,6 +431,14 @@ The repo now has a single entrypoint for routine perf checks:
 ./scripts/perf-regression.sh [smoke|gate|all|refresh-criterion-baseline|show-config]
 ```
 
+Near-term policy: keep perf regression checks manual-only until noise is
+measured on repeated runs of the current smoke workflow. The stable smoke
+subset is already the intended future CI candidate, but it should only be
+wired into CI after repeated local or CI-like runs show that the current
+thresholds hold without flaky failures. Until then, use the smoke and gate
+commands as required pre-merge local checks when touching runtime hot paths
+or benchmark-sensitive code.
+
 ### Stable Smoke Subset
 
 `./scripts/perf-regression.sh smoke` runs two fast checks:
