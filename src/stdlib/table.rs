@@ -86,6 +86,39 @@ fn set_raw(state: &mut LuaState, tref: GcRef<Table>, idx: i64, val: Val) -> LuaR
     t.raw_set(Val::Num(idx as f64), val, strings)
 }
 
+/// Swap two integer-keyed slots for `table.sort`, using an array fast path when possible.
+fn swap_sort_values(
+    state: &mut LuaState,
+    tref: GcRef<Table>,
+    left_idx: i64,
+    left_val: Val,
+    right_idx: i64,
+    right_val: Val,
+) -> LuaResult<()> {
+    if left_idx == right_idx {
+        return Ok(());
+    }
+
+    {
+        let table = state
+            .gc
+            .tables
+            .get_mut(tref)
+            .ok_or_else(|| simple_error("table not found".into()))?;
+        if table.swap_array_ints(left_idx, right_idx) {
+            return Ok(());
+        }
+        if table.set_int_existing(left_idx, right_val)
+            && table.set_int_existing(right_idx, left_val)
+        {
+            return Ok(());
+        }
+    }
+
+    set_raw(state, tref, left_idx, right_val)?;
+    set_raw(state, tref, right_idx, left_val)
+}
+
 /// Get the length of a table (#t).
 fn table_len(state: &LuaState, tref: GcRef<Table>) -> usize {
     state
@@ -415,8 +448,12 @@ pub fn tab_sort(state: &mut LuaState) -> LuaResult<u32> {
 
     // Optional comparison function (arg 1).
     let comp = match arg(state, 1) {
-        Val::Nil => None,
-        v @ Val::Function(_) => Some(v),
+        Val::Nil => SortComparator::Default,
+        v @ Val::Function(_) => {
+            let call_base = state.top;
+            state.ensure_stack(call_base + 4);
+            SortComparator::Lua { func: v, call_base }
+        }
         _ => return Err(bad_argument("sort", 2, "function expected")),
     };
 
@@ -434,23 +471,27 @@ pub fn tab_sort(state: &mut LuaState) -> LuaResult<u32> {
 ///
 /// If `comp` is `Some(f)`, calls `f(a, b)` and returns the truthiness of the result.
 /// Otherwise, uses default less-than semantics (matching `lua_lessthan`).
-fn sort_comp(state: &mut LuaState, a: Val, b: Val, comp: Option<Val>) -> LuaResult<bool> {
-    if let Some(func_val) = comp {
-        // Call comp(a, b).
-        let call_base = state.top;
-        state.ensure_stack(call_base + 4);
-        state.stack_set(call_base, func_val);
-        state.stack_set(call_base + 1, a);
-        state.stack_set(call_base + 2, b);
-        state.top = call_base + 3;
+#[derive(Clone, Copy)]
+enum SortComparator {
+    Default,
+    Lua { func: Val, call_base: usize },
+}
 
-        state.call_function(call_base, 1)?;
+fn sort_comp(state: &mut LuaState, a: Val, b: Val, comp: SortComparator) -> LuaResult<bool> {
+    match comp {
+        SortComparator::Default => default_less_than(state, a, b),
+        SortComparator::Lua { func, call_base } => {
+            state.stack_set(call_base, func);
+            state.stack_set(call_base + 1, a);
+            state.stack_set(call_base + 2, b);
+            state.top = call_base + 3;
 
-        let result = state.stack_get(call_base);
-        state.top = call_base;
-        Ok(result.is_truthy())
-    } else {
-        default_less_than(state, a, b)
+            state.call_function(call_base, 1)?;
+
+            let result = state.stack_get(call_base);
+            state.top = call_base;
+            Ok(result.is_truthy())
+        }
     }
 }
 
@@ -539,7 +580,7 @@ fn auxsort(
     tref: GcRef<Table>,
     mut l: i64,
     mut u: i64,
-    comp: Option<Val>,
+    comp: SortComparator,
 ) -> LuaResult<()> {
     while l < u {
         // Sort elements a[l], a[u].
@@ -547,8 +588,7 @@ fn auxsort(
         let au = get_raw(state, tref, u);
         if sort_comp(state, au, al, comp)? {
             // a[u] < a[l]: swap
-            set_raw(state, tref, l, au)?;
-            set_raw(state, tref, u, al)?;
+            swap_sort_values(state, tref, l, al, u, au)?;
         }
         if u - l == 1 {
             break; // Only 2 elements.
@@ -560,14 +600,12 @@ fn auxsort(
 
         if sort_comp(state, amid, al, comp)? {
             // a[mid] < a[l]: swap
-            set_raw(state, tref, mid, al)?;
-            set_raw(state, tref, l, amid)?;
+            swap_sort_values(state, tref, mid, amid, l, al)?;
         } else {
             let au = get_raw(state, tref, u);
             if sort_comp(state, au, amid, comp)? {
                 // a[u] < a[mid]: swap
-                set_raw(state, tref, mid, au)?;
-                set_raw(state, tref, u, amid)?;
+                swap_sort_values(state, tref, mid, amid, u, au)?;
             }
         }
         if u - l == 2 {
@@ -577,8 +615,7 @@ fn auxsort(
         // Pivot = a[mid]. Swap pivot with a[u-1].
         let pivot = get_raw(state, tref, mid);
         let au1 = get_raw(state, tref, u - 1);
-        set_raw(state, tref, mid, au1)?;
-        set_raw(state, tref, u - 1, pivot)?;
+        swap_sort_values(state, tref, mid, pivot, u - 1, au1)?;
 
         // Partition: a[l..i] <= pivot <= a[j..u]
         let mut i = l;
@@ -609,15 +646,13 @@ fn auxsort(
             // Swap a[i] and a[j].
             let ai = get_raw(state, tref, i);
             let aj = get_raw(state, tref, j);
-            set_raw(state, tref, i, aj)?;
-            set_raw(state, tref, j, ai)?;
+            swap_sort_values(state, tref, i, ai, j, aj)?;
         }
 
         // Place pivot at position i.
         let au1 = get_raw(state, tref, u - 1);
         let ai = get_raw(state, tref, i);
-        set_raw(state, tref, u - 1, ai)?;
-        set_raw(state, tref, i, au1)?;
+        swap_sort_values(state, tref, u - 1, au1, i, ai)?;
 
         // Recurse on smaller partition, loop on larger (tail recursion).
         if i - l < u - i {

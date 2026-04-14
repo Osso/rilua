@@ -750,6 +750,58 @@ impl Table {
         Val::Nil
     }
 
+    /// Update an existing integer-keyed slot without going through generic key dispatch.
+    ///
+    /// Returns `true` if the slot already existed in either the array or hash part
+    /// and was updated in place. Returns `false` when the integer key is not
+    /// currently present.
+    #[inline]
+    pub(crate) fn set_int_existing(&mut self, key: i64, value: Val) -> bool {
+        let idx = (key as u64).wrapping_sub(1);
+        if idx < self.array.len() as u64 {
+            self.array[idx as usize] = value;
+            return true;
+        }
+
+        if self.nodes.is_empty() {
+            return false;
+        }
+
+        let nk = key as f64;
+        let mp = hash_mod(hash_number(nk), self.hash_size());
+        let mut cur = Some(mp);
+        while let Some(i) = cur {
+            let node = &mut self.nodes[i as usize];
+            #[allow(clippy::float_cmp)]
+            if let Val::Num(n) = node.key
+                && n == nk
+            {
+                node.value = value;
+                return true;
+            }
+            cur = node.next;
+        }
+
+        false
+    }
+
+    /// Swap two existing integer-keyed array entries in place.
+    ///
+    /// Returns `true` when both keys map to the array part, allowing callers to
+    /// avoid two separate writes. Returns `false` when either key falls outside
+    /// the current array range.
+    #[inline]
+    pub(crate) fn swap_array_ints(&mut self, left: i64, right: i64) -> bool {
+        let left_idx = (left as u64).wrapping_sub(1);
+        let right_idx = (right as u64).wrapping_sub(1);
+        if left_idx >= self.array.len() as u64 || right_idx >= self.array.len() as u64 {
+            return false;
+        }
+
+        self.array.swap(left_idx as usize, right_idx as usize);
+        true
+    }
+
     /// Look up a string key by interned reference.
     ///
     /// Uses the string's cached hash for bucket lookup, then compares
@@ -1332,6 +1384,45 @@ mod tests {
             .ok();
         t.raw_set(Val::Num(1.0), Val::Nil, &strings_arena).ok();
         assert_eq!(t.get_int(1), Val::Nil);
+    }
+
+    #[test]
+    fn set_int_existing_updates_array_slot() {
+        let strings_arena = Arena::new();
+        let mut t = Table::with_sizes(4, 0);
+
+        t.raw_set(Val::Num(2.0), Val::Num(20.0), &strings_arena)
+            .ok();
+        assert!(t.set_int_existing(2, Val::Num(99.0)));
+        assert_eq!(t.get_int(2), Val::Num(99.0));
+        assert!(!t.set_int_existing(8, Val::Num(1.0)));
+    }
+
+    #[test]
+    fn set_int_existing_updates_hash_slot() {
+        let strings_arena = Arena::new();
+        let mut t = Table::with_sizes(0, 4);
+
+        t.raw_set(Val::Num(8.0), Val::Num(80.0), &strings_arena)
+            .ok();
+        assert!(t.set_int_existing(8, Val::Num(81.0)));
+        assert_eq!(t.get_int(8), Val::Num(81.0));
+    }
+
+    #[test]
+    fn swap_array_ints_swaps_existing_entries() {
+        let strings_arena = Arena::new();
+        let mut t = Table::with_sizes(4, 0);
+
+        t.raw_set(Val::Num(1.0), Val::Num(10.0), &strings_arena)
+            .ok();
+        t.raw_set(Val::Num(4.0), Val::Num(40.0), &strings_arena)
+            .ok();
+
+        assert!(t.swap_array_ints(1, 4));
+        assert_eq!(t.get_int(1), Val::Num(40.0));
+        assert_eq!(t.get_int(4), Val::Num(10.0));
+        assert!(!t.swap_array_ints(1, 9));
     }
 
     // -- Hash part get/set --
