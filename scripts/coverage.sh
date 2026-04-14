@@ -6,19 +6,22 @@
 # system llvm binaries when LLVM_COV / LLVM_PROFDATA are not already set.
 #
 # Usage:
-#   ./scripts/coverage.sh [summary|html|json|text]
+#   ./scripts/coverage.sh [summary|summary-core|html|html-core|json|text]
 #
 # Outputs:
-#   summary -> target/llvm-cov/summary.json
-#   html    -> target/llvm-cov/html/
-#   json    -> target/llvm-cov/coverage.json
-#   text    -> target/llvm-cov/text/
+#   summary      -> target/llvm-cov/summary.json
+#   summary-core -> target/llvm-cov/summary-core.json
+#   html         -> target/llvm-cov/html/
+#   html-core    -> target/llvm-cov/html-core/
+#   json         -> target/llvm-cov/coverage.json
+#   text         -> target/llvm-cov/text/
 
 set -euo pipefail
 
 MODE="${1:-summary}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="$ROOT/target/llvm-cov"
+CORE_IGNORE_REGEX='(.*/)?src/stdlib/testlib\.rs$'
 
 resolve_tool() {
     local env_var="$1"
@@ -68,9 +71,26 @@ case "$MODE" in
         run_cov --json --summary-only --output-path "$OUT_DIR/summary.json" --no-fail-fast
         echo "Summary report: $OUT_DIR/summary.json"
         ;;
+    summary-core)
+        run_cov \
+            --json \
+            --summary-only \
+            --ignore-filename-regex "$CORE_IGNORE_REGEX" \
+            --output-path "$OUT_DIR/summary-core.json" \
+            --no-fail-fast
+        echo "Core summary report (excluding src/stdlib/testlib.rs): $OUT_DIR/summary-core.json"
+        ;;
     html)
         run_cov --html --output-dir "$OUT_DIR/html" --no-fail-fast
         echo "HTML report: $OUT_DIR/html/index.html"
+        ;;
+    html-core)
+        run_cov \
+            --html \
+            --ignore-filename-regex "$CORE_IGNORE_REGEX" \
+            --output-dir "$OUT_DIR/html-core" \
+            --no-fail-fast
+        echo "Core HTML report (excluding src/stdlib/testlib.rs): $OUT_DIR/html-core/index.html"
         ;;
     json)
         run_cov --json --output-path "$OUT_DIR/coverage.json" --no-fail-fast
@@ -81,7 +101,7 @@ case "$MODE" in
         echo "Text report directory: $OUT_DIR/text"
         ;;
     *)
-        echo "Usage: $0 [summary|html|json|text]" >&2
+        echo "Usage: $0 [summary|summary-core|html|html-core|json|text]" >&2
         exit 1
         ;;
 esac

@@ -106,7 +106,7 @@ src/
     os.rs             OS library
     debug.rs          Debug library
     package.rs        Package/module library
-    testlib.rs        T test module (PUC-Rio ltests.c equivalent)
+    testlib.rs        Internal T test harness (PUC-Rio ltests.c equivalent)
 ```
 
 ## Key Architectural Decisions

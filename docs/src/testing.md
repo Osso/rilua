@@ -14,6 +14,12 @@ coverage.
 With `dynmod` feature: 1343 tests (620 unit, 6 dynmod, 431 integration, 277
 oracle, 5 proptest, 4 doctest). All major layers are active.
 
+Coverage policy decision (2026-04-14): `src/stdlib/testlib.rs` is treated as
+an internal harness, not a first-class near-term product-surface coverage
+target. The default coverage report still includes it for full transparency;
+`./scripts/coverage.sh summary-core` and `./scripts/coverage.sh html-core`
+exclude it when tracking core interpreter and stdlib coverage.
+
 ## Test Layers
 
 ### Layer 1: Unit Tests
@@ -299,6 +305,11 @@ registered:
 | `T.loadlib` | Load standard libraries into remote state |
 | `T.totalmem` | Get/set memory limit (OOM simulation) |
 
+This module lives in `src/stdlib/testlib.rs`. It exists to support the
+PUC-Rio internal test harness and related compatibility checks, not as a
+normal end-user standard library surface. Because of that, its code coverage
+is tracked separately from the core interpreter/stdlib headline.
+
 Four tests (`api.lua`, `checktable.lua`, `closure.lua`, `code.lua`)
 use T extensively. When `T` is nil, guarded sections (`if T then ...
 end`) are skipped. All four pass with `RILUA_TEST_LIB=1`.
@@ -411,8 +422,14 @@ Use the repo script instead of ad hoc `cargo llvm-cov` invocations:
 # Summary JSON with line / function totals
 ./scripts/coverage.sh summary
 
+# Core summary, excluding the internal T harness
+./scripts/coverage.sh summary-core
+
 # HTML report for file-level drill-down
 ./scripts/coverage.sh html
+
+# Core HTML report, excluding the internal T harness
+./scripts/coverage.sh html-core
 ```
 
 Outputs go under `target/llvm-cov/`.
@@ -433,3 +450,5 @@ Test coverage is measured by:
    against PUC-Rio output.
 4. **Code coverage** -- `./scripts/coverage.sh summary` for stable
    `llvm-cov` line and function coverage metrics (informational, not a gate).
+   Use `summary-core` when evaluating the main interpreter/stdlib target
+   without the internal `T` harness in `src/stdlib/testlib.rs`.
