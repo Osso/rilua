@@ -13,12 +13,12 @@ performance floor for a Lua 5.1 implementation.
 
 | Property | Value |
 |----------|-------|
-| CPU | AMD Ryzen 7 8840U w/ Radeon 780M Graphics |
-| OS | Fedora Linux 43 (kernel 6.18) |
-| Rust | Edition 2024, `--release` profile |
+| CPU | AMD Ryzen AI 9 HX PRO 370 w/ Radeon 890M |
+| OS | Arch Linux (kernel 6.19.11-arch1-1) |
+| Rust | `rustc 1.94.1`, edition 2024, `--release` profile |
 | PUC-Rio | Lua 5.1.1, compiled with `gcc -O2 -DLUA_USE_LINUX` |
-| Runs | 10 per test, median reported |
-| Date | 2026-02-23 |
+| Runs | 10 per standalone test, 5 for `all.lua`, Criterion default 100 samples |
+| Date | 2026-04-14 |
 
 ### Per-Test Results (ms, median of 10 runs)
 
@@ -29,63 +29,68 @@ requires a coroutine wrapper set by `all.lua`.
 
 | Test | PUC-Rio | rilua | Ratio |
 |------|--------:|------:|------:|
-| gc.lua | 70 | 85 | 1.21x |
-| db.lua | 16 | 30 | 1.88x |
-| calls.lua | 7 | 9 | 1.29x |
-| strings.lua | 3 | 3 | 1.00x |
-| literals.lua | 3 | 3 | 1.00x |
-| attrib.lua | 4 | 4 | 1.00x |
-| locals.lua | 4 | 6 | 1.50x |
-| constructs.lua | 252 | 583 | 2.31x |
+| gc.lua | 68 | 79 | 1.16x |
+| db.lua | 22 | 32 | 1.45x |
+| calls.lua | 6 | 12 | 2.00x |
+| strings.lua | 2 | 2 | 1.00x |
+| literals.lua | 2 | 2 | 1.00x |
+| attrib.lua | 3 | 4 | 1.33x |
+| locals.lua | 4 | 5 | 1.25x |
+| constructs.lua | 262 | 592 | 2.26x |
 | code.lua | 2 | 2 | 1.00x |
-| nextvar.lua | 13 | 28 | 2.15x |
-| pm.lua | 11 | 11 | 1.00x |
-| api.lua | 3 | 3 | 1.00x |
-| events.lua | 3 | 3 | 1.00x |
-| vararg.lua | 2 | 2 | 1.00x |
-| closure.lua | 5 | 8 | 1.60x |
-| errors.lua | 135 | 148 | 1.10x |
-| math.lua | 5 | 6 | 1.20x |
-| sort.lua | 55 | 98 | 1.78x |
-| verybig.lua | 115 | 217 | 1.89x |
-| files.lua | 12 | 13 | 1.08x |
-| **Sum** | **720** | **1262** | **1.75x** |
+| nextvar.lua | 16 | 33 | 2.06x |
+| pm.lua | 13 | 13 | 1.00x |
+| api.lua | 2 | 3 | 1.50x |
+| events.lua | 2 | 3 | 1.50x |
+| vararg.lua | 1 | 1 | 1.00x |
+| closure.lua | 4 | 8 | 2.00x |
+| errors.lua | 121 | 188 | 1.55x |
+| math.lua | 4 | 5 | 1.25x |
+| sort.lua | 65 | 105 | 1.62x |
+| verybig.lua | 114 | 176 | 1.54x |
+| files.lua | 7 | 7 | 1.00x |
+| **Sum** | **720** | **1272** | **1.77x** |
 
 ### Interpretation
 
-rilua is 1.75x slower than PUC-Rio Lua overall. Most tests are within
-1.0-1.5x. Four tests account for the majority of the gap:
+rilua is 1.77x slower than PUC-Rio Lua overall on the current 2026-04-14
+snapshot. Most tests remain within 1.0-1.6x. The largest current gaps are:
 
-- **constructs.lua** (2.31x, +331ms): heavy control-flow constructs,
+- **constructs.lua** (2.26x, +330ms): heavy control-flow constructs,
   deeply nested loops and conditionals. This test stresses the VM
   dispatch loop.
-- **nextvar.lua** (2.15x, +15ms): table iteration (`next`, `pairs`),
+- **nextvar.lua** (2.06x, +17ms): table iteration (`next`, `pairs`),
   global table manipulation. Stresses table hash traversal.
-- **verybig.lua** (1.89x, +102ms): large function compilation and
-  execution with many locals and upvalues.
-- **db.lua** (1.88x, +14ms): debug library operations, `getinfo`,
-  `getlocal`, hook management.
-- **sort.lua** (1.78x, +43ms): `table.sort` with comparison callbacks.
+- **calls.lua** and **closure.lua** (2.00x each): function/call-frame
+  overhead is still visible in the call-heavy parts of the suite.
+- **sort.lua** (1.62x, +40ms): `table.sort` with comparison callbacks.
   Function call overhead per comparison.
+- **errors.lua** (1.55x, +67ms) and **verybig.lua** (1.54x, +62ms):
+  error-path formatting/traceback work and large compile/execute
+  workloads are still materially slower than PUC-Rio.
 
-Tests at or near parity (1.0-1.1x): `strings.lua`, `literals.lua`,
-`attrib.lua`, `code.lua`, `pm.lua`, `api.lua`, `events.lua`,
-`vararg.lua`, `files.lua`.
+Tests at or near parity (1.0-1.16x): `strings.lua`, `literals.lua`,
+`code.lua`, `pm.lua`, `vararg.lua`, `files.lua`, and `gc.lua`.
 
-### Combined Runner
+The exact absolute times are not directly comparable to the 2026-02-23
+snapshot because the machine and OS changed. The ratio against PUC-Rio
+is the durable signal.
 
-`bench-all.lua` runs all 20 standalone tests sequentially in a single
-interpreter session (like `all.lua` but without `main.lua`/`big.lua`
-and without the dump/undump `dofile` override).
+### Full-Suite Runner
 
-| Runner | PUC-Rio | rilua | Ratio |
-|--------|--------:|------:|------:|
-| bench-all.lua | 792 | 1529 | 1.93x |
+The repo's regression-gate harness uses the official `all.lua` runner:
 
-The combined runner is slower than the sum of individual tests (1.93x
-vs 1.75x). Running all tests in a single interpreter session
-accumulates more live objects across test boundaries, increasing GC
-work per cycle.
+| Runner | rilua |
+|--------|------:|
+| `all.lua` median of 5 runs | 1959 ms |
+| Min / Max | 1892 ms / 2302 ms |
+
+This value comes from `./scripts/bench-puc-rio.sh target/release/rilua 5`
+and is the current baseline used by the wall-clock regression workflow.
+
+The current `lua5.1-tests` corpus downloaded from `lua.org/tests/` does not
+ship a `bench-all.lua` helper, so the 2026-04-14 refresh uses the official
+`all.lua` runner instead of the older combined-runner file.
 
 ### Reproducing
 
@@ -95,11 +100,23 @@ Build both interpreters and run the benchmark script:
 # Build PUC-Rio Lua 5.1.1
 cd lua-5.1.1 && make linux && cd ..
 
+# Build test helper shared libraries for the complete suite
+cd lua-5.1-tests/libs
+gcc -Wall -O2 -I../../lua-5.1.1/src -ansi -shared -o lib1.so lib1.c
+gcc -Wall -O2 -I../../lua-5.1.1/src -ansi -shared -o lib11.so lib11.c
+gcc -Wall -O2 -I../../lua-5.1.1/src -ansi -shared -o lib2.so lib2.c
+gcc -Wall -O2 -I../../lua-5.1.1/src -ansi -shared -o lib21.so lib21.c
+cp lib2.so ./-lib2.so
+cd ../..
+
 # Build rilua
 cargo build --release
 
-# Run benchmarks (default: 10 runs per test)
+# Run standalone per-file benchmarks (default: 10 runs per test)
 ./scripts/benchmark-tests.sh [runs]
+
+# Run the full all.lua wall-clock benchmark (default: 5 runs)
+./scripts/bench-puc-rio.sh [binary] [runs]
 ```
 
 ## Optimization History
@@ -198,6 +215,41 @@ cargo bench
 
 Results go to `target/criterion/`. Use `--save-baseline` and
 `--baseline` flags to compare across changes.
+
+### Current Criterion Snapshot (2026-04-14)
+
+Point estimates below are the middle values from Criterion's reported time
+intervals (`cargo bench --bench interpreter -- --noplot`):
+
+| Benchmark | Estimate |
+|-----------|---------:|
+| `state_creation/new_empty` | 888.81 ns |
+| `state_creation/new_with_base` | 8.4429 us |
+| `state_creation/new_full` | 44.075 us |
+| `compilation/compile_minimal` | 444.12 ns |
+| `compilation/compile_loop` | 2.4741 us |
+| `compilation/compile_functions` | 7.2293 us |
+| `compilation/compile_tables` | 6.8442 us |
+| `vm_execution/loop_sum_1k` | 13.690 us |
+| `vm_execution/fib_20` | 1.3495 ms |
+| `vm_execution/string_concat_100` | 9.8796 us |
+| `vm_execution/table_build_1k` | 53.682 us |
+| `vm_execution/closures_100` | 23.634 us |
+| `vm_execution/metatable_index_1k` | 67.211 us |
+| `gc/collect_10k_tables` | 250.47 us |
+| `gc/churn_alloc_collect` | 556.51 us |
+| `gc/step_incremental` | 253.70 ns |
+| `string_interning/intern_unique_1k` | 60.987 us |
+| `string_interning/intern_dedup_1k` | 1.2659 us |
+| `table_ops/raw_set_int_1k` | 8.3288 us |
+| `table_ops/raw_set_str_1k` | 50.445 us |
+| `table_ops/mixed_ops_lua` | 680.32 us |
+| `end_to_end/compile_and_run` | 75.966 us |
+| `end_to_end/coroutine_cycle` | 28.718 us |
+
+The slowest current Criterion points are still the same categories the
+PUC-Rio suite highlights: recursive call overhead (`fib_20`), mixed Lua table
+workloads, GC churn, metatable dispatch, and string-heavy bulk operations.
 
 ### PUC-Rio Full Suite Benchmark
 
