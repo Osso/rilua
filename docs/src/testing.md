@@ -14,11 +14,21 @@ coverage.
 With `dynmod` feature: 1343 tests (620 unit, 6 dynmod, 431 integration, 277
 oracle, 5 proptest, 4 doctest). All major layers are active.
 
-Coverage policy decision (2026-04-14): `src/stdlib/testlib.rs` is treated as
-an internal harness, not a first-class near-term product-surface coverage
-target. The default coverage report still includes it for full transparency;
+Coverage policy decision (2026-04-14): near-term coverage goals keep
+`src/stdlib/taint.rs` and `src/stdlib/testlib.rs` separate from the
+first-class core target list.
+
+- `src/stdlib/testlib.rs` is an internal harness, not a first-class
+  product-surface coverage target.
+- `src/stdlib/taint.rs` should keep targeted regression tests when taint
+  behavior changes, but it does not block the near-term core coverage push.
+- Core-first coverage work stays focused on the interpreter and broadly-used
+  stdlib surface (`vm`, `debug`, `string`, GC, and similar paths).
+
+The default coverage report still includes both files for full transparency;
 `./scripts/coverage.sh summary-core` and `./scripts/coverage.sh html-core`
-exclude it when tracking core interpreter and stdlib coverage.
+exclude only `src/stdlib/testlib.rs` when tracking the core interpreter and
+stdlib coverage trend.
 
 ## Test Layers
 
