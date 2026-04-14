@@ -7,9 +7,10 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Current (2026-04-14): 1334 tests (618 unit, 431 integration, 277 oracle, 5
-proptest, 3 doctest). Measured coverage is about 74.7% lines and 79.1%
-functions.
+Current baseline (2026-04-14): 1334 tests (618 unit, 431 integration, 277
+oracle, 5 proptest, 3 doctest). Coverage baseline measured with
+`./scripts/coverage.sh summary`: 74.70% line coverage and 79.07% function
+coverage.
 With `dynmod` feature: 1343 tests (620 unit, 6 dynmod, 431 integration, 277
 oracle, 5 proptest, 4 doctest). All major layers are active.
 
