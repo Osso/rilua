@@ -508,6 +508,13 @@ pub struct LuaState {
     /// The deepest resumer is at index 0 (the main thread when no nesting).
     pub saved_threads: Vec<LuaThread>,
 
+    /// Whether taint tracking is active.
+    ///
+    /// When true, `__newindex` and `rawset` operations propagate the current
+    /// call frame's taint to the target table slot. When false (default),
+    /// taint metadata is not written, avoiding overhead for non-WoW uses.
+    pub taint_mode: bool,
+
     /// Application-specific data, type-erased.
     ///
     /// Allows the host to store arbitrary state accessible from Rust functions
@@ -589,6 +596,7 @@ impl LuaState {
             hook: HookState::new(),
             yielded_in_hook: false,
             saved_threads: Vec::new(),
+            taint_mode: false,
             app_data: None,
         }
     }
