@@ -1999,3 +1999,203 @@ pub fn str_dump(state: &mut LuaState) -> LuaResult<u32> {
     state.push(Val::Str(str_ref));
     Ok(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::vm::table::Table;
+
+    fn string_val(state: &mut LuaState, value: &str) -> Val {
+        Val::Str(state.gc.intern_string(value.as_bytes()))
+    }
+
+    fn bytes_val(state: &mut LuaState, value: &[u8]) -> Val {
+        Val::Str(state.gc.intern_string(value))
+    }
+
+    fn decode_bytes(state: &LuaState, value: Val) -> Vec<u8> {
+        match value {
+            Val::Str(string_ref) => state
+                .gc
+                .string_arena
+                .get(string_ref)
+                .map(|s| s.data().to_vec())
+                .expect("missing string ref"),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    fn decode_string(state: &LuaState, value: Val) -> String {
+        String::from_utf8_lossy(&decode_bytes(state, value)).into_owned()
+    }
+
+    fn runtime_message(err: LuaError) -> String {
+        match err {
+            LuaError::Runtime(err) => err.message,
+            other => panic!("expected runtime error, got {other:?}"),
+        }
+    }
+
+    fn set_args(state: &mut LuaState, args: &[Val]) {
+        state.base = 0;
+        state.call_stack[state.ci].base = 0;
+        state.top = 0;
+        state.ensure_stack(args.len());
+        for (idx, arg) in args.iter().enumerate() {
+            state.stack_set(idx, *arg);
+        }
+        state.top = args.len();
+    }
+
+    #[test]
+    fn sub_and_rep_handle_boundaries_and_size_limit() {
+        let mut state = LuaState::new();
+
+        let abcdef = string_val(&mut state, "abcdef");
+        let sub_args = [abcdef, Val::Num(-2.0), Val::Num(-1.0)];
+        set_args(&mut state, &sub_args);
+        let result_start = state.top;
+        assert_eq!(str_sub(&mut state).expect("string.sub failed"), 1);
+        assert_eq!(decode_string(&state, state.stack_get(result_start)), "ef");
+
+        let empty_args = [abcdef, Val::Num(10.0), Val::Num(20.0)];
+        set_args(&mut state, &empty_args);
+        let result_start = state.top;
+        assert_eq!(str_sub(&mut state).expect("string.sub failed"), 1);
+        assert_eq!(decode_string(&state, state.stack_get(result_start)), "");
+
+        let x = string_val(&mut state, "x");
+        let rep_args = [x, Val::Num((MAX_STRING_SIZE as f64) + 1.0)];
+        set_args(&mut state, &rep_args);
+        let err = str_rep(&mut state).expect_err("string.rep should fail on overflow");
+        assert_eq!(runtime_message(err), "string length overflow");
+    }
+
+    #[test]
+    fn format_handles_q_escaping_and_raw_byte_precision() {
+        let mut state = LuaState::new();
+
+        let q_format = string_val(&mut state, "%q");
+        let q_value = bytes_val(&mut state, b"a\0\r\n\"\\");
+        let q_args = [q_format, q_value];
+        set_args(&mut state, &q_args);
+        let result_start = state.top;
+        assert_eq!(str_format(&mut state).expect("string.format failed"), 1);
+        assert_eq!(
+            decode_bytes(&state, state.stack_get(result_start)),
+            b"\"a\\000\\r\\\n\\\"\\\\\""
+        );
+
+        let s_format = string_val(&mut state, "%.2s");
+        let s_value = bytes_val(&mut state, &[0xed, 0xa0, 0x80]);
+        let s_args = [s_format, s_value];
+        set_args(&mut state, &s_args);
+        let result_start = state.top;
+        assert_eq!(str_format(&mut state).expect("string.format failed"), 1);
+        assert_eq!(
+            decode_bytes(&state, state.stack_get(result_start)),
+            vec![0xed, 0xa0]
+        );
+    }
+
+    #[test]
+    fn find_plain_empty_pattern_returns_empty_range_from_init() {
+        let mut state = LuaState::new();
+
+        let haystack = string_val(&mut state, "abc");
+        let needle = string_val(&mut state, "");
+        let args = [haystack, needle, Val::Num(3.0), Val::Bool(true)];
+        set_args(&mut state, &args);
+        let result_start = state.top;
+        assert_eq!(str_find(&mut state).expect("string.find failed"), 2);
+        assert_eq!(state.stack_get(result_start), Val::Num(3.0));
+        assert_eq!(state.stack_get(result_start + 1), Val::Num(2.0));
+    }
+
+    #[test]
+    fn match_supports_frontier_and_backreference_patterns() {
+        let mut state = LuaState::new();
+
+        let frontier_source = string_val(&mut state, "!foo bar");
+        let frontier_pattern = string_val(&mut state, "%f[%a]foo");
+        let frontier_args = [frontier_source, frontier_pattern];
+        set_args(&mut state, &frontier_args);
+        let result_start = state.top;
+        assert_eq!(str_match(&mut state).expect("string.match failed"), 1);
+        assert_eq!(decode_string(&state, state.stack_get(result_start)), "foo");
+
+        let backref_source = string_val(&mut state, "one one");
+        let backref_pattern = string_val(&mut state, "(%a+)%s+%1");
+        let backref_args = [backref_source, backref_pattern];
+        set_args(&mut state, &backref_args);
+        let result_start = state.top;
+        assert_eq!(str_match(&mut state).expect("string.match failed"), 1);
+        assert_eq!(decode_string(&state, state.stack_get(result_start)), "one");
+    }
+
+    #[test]
+    fn gsub_advances_through_empty_matches_with_position_captures() {
+        let mut state = LuaState::new();
+
+        let source = string_val(&mut state, "ab");
+        let pattern = string_val(&mut state, "()");
+        let replacement = string_val(&mut state, "<%1>");
+        let args = [source, pattern, replacement];
+        set_args(&mut state, &args);
+        let result_start = state.top;
+        assert_eq!(str_gsub(&mut state).expect("string.gsub failed"), 2);
+        assert_eq!(
+            decode_string(&state, state.stack_get(result_start)),
+            "<1>a<2>b<3>"
+        );
+        assert_eq!(state.stack_get(result_start + 1), Val::Num(3.0));
+    }
+
+    #[test]
+    fn gsub_table_replacement_uses_falsey_fallback_to_original_match() {
+        let mut state = LuaState::new();
+        let replacements = state.gc.alloc_table(Table::new());
+        let cat = string_val(&mut state, "cat");
+        let dog = string_val(&mut state, "dog");
+        let wolf = string_val(&mut state, "wolf");
+        {
+            let table = state
+                .gc
+                .tables
+                .get_mut(replacements)
+                .expect("missing table");
+            table
+                .raw_set(cat, Val::Bool(false), &state.gc.string_arena)
+                .expect("raw_set failed");
+            table
+                .raw_set(dog, wolf, &state.gc.string_arena)
+                .expect("raw_set failed");
+        }
+
+        let source = string_val(&mut state, "cat dog");
+        let pattern = string_val(&mut state, "(%a+)");
+        let args = [source, pattern, Val::Table(replacements)];
+        set_args(&mut state, &args);
+        let result_start = state.top;
+        assert_eq!(str_gsub(&mut state).expect("string.gsub failed"), 2);
+        assert_eq!(
+            decode_string(&state, state.stack_get(result_start)),
+            "cat wolf"
+        );
+        assert_eq!(state.stack_get(result_start + 1), Val::Num(2.0));
+    }
+
+    #[test]
+    fn gsub_rejects_invalid_capture_references() {
+        let mut state = LuaState::new();
+
+        let source = string_val(&mut state, "abc");
+        let pattern = string_val(&mut state, "a");
+        let replacement = string_val(&mut state, "%2");
+        let args = [source, pattern, replacement];
+        set_args(&mut state, &args);
+        let err = str_gsub(&mut state).expect_err("string.gsub should reject %2");
+        assert_eq!(runtime_message(err), "invalid capture index %2");
+    }
+}
