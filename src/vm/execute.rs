@@ -2122,11 +2122,7 @@ fn table_set(state: &mut LuaState, table_ref: GcRef<Table>, key: Val, value: Val
 /// Key dispatch: `Val::Str` → `set_slot_taint_str`, integer-valued
 /// `Val::Num` → `set_slot_taint_int`. Other key types are ignored (they
 /// are rare and not tracked by WoW's taint system).
-pub(crate) fn propagate_slot_taint(
-    state: &mut LuaState,
-    table_ref: GcRef<Table>,
-    key: Val,
-) {
+pub(crate) fn propagate_slot_taint(state: &mut LuaState, table_ref: GcRef<Table>, key: Val) {
     if !state.taint_mode {
         return;
     }
