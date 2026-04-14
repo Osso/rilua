@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Benchmark PUC-Rio Lua 5.1.1 and rilua against the PUC-Rio test suite.
-# Usage: ./scripts/benchmark-tests.sh [runs]
+# Usage: ./scripts/benchmark-tests.sh [runs] [test ...]
 # Default: 10 runs per test, reports median in milliseconds.
 
 set -euo pipefail
@@ -14,7 +14,7 @@ TESTDIR="$ROOT/lua-5.1-tests"
 # Tests from all.lua that can run standalone.
 # Excluded: main.lua (CLI tests, needs special invocation),
 #           big.lua (requires coroutine wrapper from all.lua).
-TESTS=(
+DEFAULT_TESTS=(
     gc.lua
     db.lua
     calls.lua
@@ -36,6 +36,16 @@ TESTS=(
     verybig.lua
     files.lua
 )
+
+if [ "$#" -gt 0 ]; then
+    shift
+fi
+
+if [ "$#" -gt 0 ]; then
+    TESTS=("$@")
+else
+    TESTS=("${DEFAULT_TESTS[@]}")
+fi
 
 # Compute median from a list of integers (one per line)
 median() {
@@ -81,6 +91,13 @@ printf "%-20s %12s %12s %10s\n" "Test" "PUC-Rio (ms)" "rilua (ms)" "Ratio"
 printf "%-20s %12s %12s %10s\n" "--------------------" "------------" "----------" "-----"
 
 cd "$TESTDIR"
+
+for test in "${TESTS[@]}"; do
+    if [ ! -f "$test" ]; then
+        echo "Error: test not found: $TESTDIR/$test" >&2
+        exit 1
+    fi
+done
 
 pucrio_total=0
 rilua_total=0

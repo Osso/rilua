@@ -199,12 +199,14 @@ perf report
 `benches/interpreter.rs` contains criterion benchmarks covering:
 
 - **State creation**: empty, base libs, full stdlib
-- **Compilation**: minimal, loops, functions, tables
+- **Compilation**: minimal, loops, functions, tables, large compile workloads
 - **VM execution**: arithmetic loops, fibonacci, string concat, tables,
-  closures, metatable dispatch
+  closures, metatable dispatch, control-flow dispatch, large execute workloads
+- **Debug API**: `getinfo`, locals/upvalues, traceback-heavy metadata access
 - **GC**: full collect, allocation churn, incremental stepping
 - **String interning**: unique strings, dedup hits
-- **Table operations**: integer keys, string keys, mixed Lua ops
+- **Table operations**: integer keys, string keys, mixed Lua ops, `next`/`pairs`,
+  sort callback overhead
 - **End-to-end**: compile+run, coroutine cycles
 
 Run with:
@@ -214,7 +216,9 @@ cargo bench
 ```
 
 Results go to `target/criterion/`. Use `--save-baseline` and
-`--baseline` flags to compare across changes.
+`--baseline` flags to compare across changes. For a smaller stable
+subset, use `./scripts/perf-regression.sh smoke` and
+`./scripts/perf-regression.sh refresh-criterion-baseline`.
 
 ### Current Criterion Snapshot (2026-04-14)
 
@@ -266,28 +270,74 @@ Arguments:
 
 Output: min, median, and max times. Prints median to stdout.
 
-## Regression Gate
+## Regression Workflow
 
-`scripts/perf-gate.sh` compares the current build against the stored
-baseline with a configurable threshold (default 5%).
+The repo now has a single entrypoint for routine perf checks:
 
 ```sh
-./scripts/perf-gate.sh [baseline_ms] [threshold_pct]
+./scripts/perf-regression.sh [smoke|gate|all|refresh-criterion-baseline|show-config]
 ```
 
-If no arguments are given, reads `.perf-baseline` and uses 5%.
+### Stable Smoke Subset
 
-The script:
-1. Builds release
-2. Runs `bench-puc-rio.sh` with 5 iterations
-3. Compares median against `baseline + baseline * threshold / 100`
-4. Exits 0 (pass) or 1 (regression detected)
+`./scripts/perf-regression.sh smoke` runs two fast checks:
 
-After a confirmed improvement, update the baseline:
+1. A small official-test smoke subset through `scripts/benchmark-tests.sh`:
+   `constructs.lua`, `nextvar.lua`, `sort.lua`, `db.lua`, `verybig.lua`
+2. A matching Criterion smoke subset against a saved baseline:
+   - `control_flow_dispatch`
+   - `verybig_loaded_chunk`
+   - `next_pairs_mixed_1k`
+   - `sort_callback_1k`
+
+The PUC-Rio smoke subset is trend-only output. The explicit gate is the
+Criterion comparison, which fails if any smoke benchmark regresses by
+more than `20%` against the saved baseline (`perf-smoke` by default).
+`db.lua` keeps the debug-library hotspot in the smoke workflow; the
+Criterion smoke list stays intentionally narrower so the gate remains
+stable on repeat local runs. `verybig.lua` keeps the large compile/execute
+path in the official smoke subset, while Criterion smoke focuses on the
+lower-noise VM and table hot paths.
+
+### Full Gate
+
+`./scripts/perf-regression.sh gate` runs the full `all.lua` wall-clock
+gate against `.perf-baseline`.
+
+- Baseline source: `.perf-baseline`
+- Default runs: `5`
+- Default threshold: `5%`
+- Pass condition: current median `<= baseline + 5%`
+
+This is the strict regression guard for the full suite. Keep
+`.perf-baseline` conservative and only refresh it after an accepted,
+measured improvement.
+
+### Refreshing Baselines
+
+Refresh the local Criterion smoke baseline after a confirmed improvement:
+
+```sh
+./scripts/perf-regression.sh refresh-criterion-baseline
+```
+
+This saves the smoke baseline under `target/criterion/**/perf-smoke/`
+(gitignored). The compare path uses `cargo bench --baseline perf-smoke`
+and reads Criterion's `base/new` estimate files to enforce the numeric
+threshold.
+
+After a confirmed full-suite improvement, refresh `.perf-baseline`:
 
 ```sh
 ./scripts/bench-puc-rio.sh > .perf-baseline
 ```
+
+### Legacy Full-Suite Helper
+
+`scripts/perf-gate.sh` still exists as a small standalone wall-clock
+check, but `scripts/perf-regression.sh` is the preferred routine
+workflow because it combines the full-suite gate with the smoke subset
+and Criterion baseline comparison.
 
 ## Optimization Priorities
 
