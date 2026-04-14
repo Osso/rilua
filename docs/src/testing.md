@@ -7,11 +7,11 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Current baseline (2026-04-14): 1334 tests (618 unit, 431 integration, 277
+Current baseline (2026-04-14): 1371 tests (655 unit, 431 integration, 277
 oracle, 5 proptest, 3 doctest). Coverage baseline measured with
-`./scripts/coverage.sh summary`: 74.70% line coverage and 79.07% function
+`./scripts/coverage.sh summary`: 79.30% line coverage and 82.89% function
 coverage.
-With `dynmod` feature: 1343 tests (620 unit, 6 dynmod, 431 integration, 277
+With `dynmod` feature: 1380 tests (657 unit, 6 dynmod, 431 integration, 277
 oracle, 5 proptest, 4 doctest). All major layers are active.
 
 Coverage policy decision (2026-04-14): near-term coverage goals keep
@@ -28,7 +28,9 @@ first-class core target list.
 The default coverage report still includes both files for full transparency;
 `./scripts/coverage.sh summary-core` and `./scripts/coverage.sh html-core`
 exclude only `src/stdlib/testlib.rs` when tracking the core interpreter and
-stdlib coverage trend.
+stdlib coverage trend. The current core-only baseline from
+`./scripts/coverage.sh summary-core` is 84.57% line coverage and 86.50%
+function coverage.
 
 ## Test Layers
 
