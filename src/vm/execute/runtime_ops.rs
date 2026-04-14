@@ -553,93 +553,146 @@ pub(super) fn vm_settable(
 ) -> LuaResult<()> {
     let mut current = t;
     for _ in 0..MAXTAGLOOP {
-        if let Val::Table(table_ref) = current {
-            let existing = {
-                let table = state
-                    .gc
-                    .tables
-                    .get(table_ref)
-                    .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-                table.get(key, &state.gc.string_arena)
-            };
-
-            if !existing.is_nil() {
-                let table = state
-                    .gc
-                    .tables
-                    .get_mut(table_ref)
-                    .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-                table.raw_set(key, value, &state.gc.string_arena)?;
-                state.gc.barrier_back(table_ref);
-                propagate_slot_taint(state, table_ref, key);
-                return Ok(());
-            }
-
-            let tm = {
-                let table = state
-                    .gc
-                    .tables
-                    .get(table_ref)
-                    .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-                let mt = table.metatable();
-                match mt {
-                    Some(mt_ref) => get_tm_for_table(&state.gc, mt_ref, TMS::NewIndex),
-                    None => None,
-                }
-            };
-
-            match tm {
-                None => {
-                    let table = state
-                        .gc
-                        .tables
-                        .get_mut(table_ref)
-                        .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-                    let mem_before = table.estimated_memory();
-                    table.raw_set(key, value, &state.gc.string_arena)?;
-                    let mem_after = table.estimated_memory();
-                    if mem_after > mem_before {
-                        state.gc.gc_state.total_bytes += mem_after - mem_before;
-                    }
-                    if state.gc.gc_state.total_bytes > state.gc.gc_state.alloc_limit {
-                        return Err(crate::LuaError::Memory);
-                    }
-                    state.gc.barrier_back(table_ref);
-                    propagate_slot_taint(state, table_ref, key);
-                    return Ok(());
-                }
-                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
-                    call_tm_void(state, tm_val, current, key, value)?;
-                    return Ok(());
-                }
-                Some(tm_val) => {
-                    current = tm_val;
-                }
-            }
-        } else {
-            let tm = get_tm_for_val(&state.gc, current, TMS::NewIndex);
-            match tm {
-                None => {
-                    if let Some(reg) = obj_reg {
-                        return Err(type_error(state, proto, pc, base, reg, "index"));
-                    }
-                    return Err(runtime_error(
-                        proto,
-                        pc,
-                        &format!("attempt to index a {} value", current.type_name()),
-                    ));
-                }
-                Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
-                    call_tm_void(state, tm_val, current, key, value)?;
-                    return Ok(());
-                }
-                Some(tm_val) => {
-                    current = tm_val;
-                }
-            }
+        match settable_step(state, current, key, value, proto, pc, base, obj_reg)? {
+            SettableStep::Done => return Ok(()),
+            SettableStep::Continue(next) => current = next,
         }
     }
     Err(runtime_error_simple("loop in settable"))
+}
+
+enum SettableStep {
+    Done,
+    Continue(Val),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settable_step(
+    state: &mut LuaState,
+    current: Val,
+    key: Val,
+    value: Val,
+    proto: &Proto,
+    pc: usize,
+    base: usize,
+    obj_reg: Option<usize>,
+) -> LuaResult<SettableStep> {
+    match current {
+        Val::Table(table_ref) => handle_table_settable(state, current, table_ref, key, value),
+        _ => handle_non_table_settable(state, current, key, value, proto, pc, base, obj_reg),
+    }
+}
+
+fn handle_table_settable(
+    state: &mut LuaState,
+    current: Val,
+    table_ref: GcRef<Table>,
+    key: Val,
+    value: Val,
+) -> LuaResult<SettableStep> {
+    if !table_get(state, table_ref, key)?.is_nil() {
+        raw_set_existing_slot(state, table_ref, key, value)?;
+        return Ok(SettableStep::Done);
+    }
+
+    match get_table_newindex_tm(state, table_ref)? {
+        None => {
+            raw_set_new_slot(state, table_ref, key, value)?;
+            Ok(SettableStep::Done)
+        }
+        Some(tm_val) => resolve_settable_tm(state, current, key, value, tm_val),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_non_table_settable(
+    state: &mut LuaState,
+    current: Val,
+    key: Val,
+    value: Val,
+    proto: &Proto,
+    pc: usize,
+    base: usize,
+    obj_reg: Option<usize>,
+) -> LuaResult<SettableStep> {
+    let Some(tm_val) = get_tm_for_val(&state.gc, current, TMS::NewIndex) else {
+        return Err(settable_type_error(
+            state, current, proto, pc, base, obj_reg,
+        ));
+    };
+    resolve_settable_tm(state, current, key, value, tm_val)
+}
+
+fn raw_set_existing_slot(
+    state: &mut LuaState,
+    table_ref: GcRef<Table>,
+    key: Val,
+    value: Val,
+) -> LuaResult<()> {
+    let table = state
+        .gc
+        .tables
+        .get_mut(table_ref)
+        .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+    table.raw_set(key, value, &state.gc.string_arena)?;
+    state.gc.barrier_back(table_ref);
+    propagate_slot_taint(state, table_ref, key);
+    Ok(())
+}
+
+fn raw_set_new_slot(
+    state: &mut LuaState,
+    table_ref: GcRef<Table>,
+    key: Val,
+    value: Val,
+) -> LuaResult<()> {
+    table_set(state, table_ref, key, value)?;
+    propagate_slot_taint(state, table_ref, key);
+    Ok(())
+}
+
+fn get_table_newindex_tm(state: &LuaState, table_ref: GcRef<Table>) -> LuaResult<Option<Val>> {
+    let table = state
+        .gc
+        .tables
+        .get(table_ref)
+        .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+    Ok(table
+        .metatable()
+        .and_then(|mt_ref| get_tm_for_table(&state.gc, mt_ref, TMS::NewIndex)))
+}
+
+fn resolve_settable_tm(
+    state: &mut LuaState,
+    current: Val,
+    key: Val,
+    value: Val,
+    tm_val: Val,
+) -> LuaResult<SettableStep> {
+    if matches!(tm_val, Val::Function(_)) {
+        call_tm_void(state, tm_val, current, key, value)?;
+        return Ok(SettableStep::Done);
+    }
+    Ok(SettableStep::Continue(tm_val))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settable_type_error(
+    state: &LuaState,
+    current: Val,
+    proto: &Proto,
+    pc: usize,
+    base: usize,
+    obj_reg: Option<usize>,
+) -> crate::LuaError {
+    if let Some(reg) = obj_reg {
+        return type_error(state, proto, pc, base, reg, "index");
+    }
+    runtime_error(
+        proto,
+        pc,
+        &format!("attempt to index a {} value", current.type_name()),
+    )
 }
 
 fn get_tm_for_table(gc: &Gc, mt_ref: GcRef<Table>, event: TMS) -> Option<Val> {
