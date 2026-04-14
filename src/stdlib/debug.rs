@@ -585,6 +585,31 @@ struct ClosureInfo {
     line_info: Vec<u32>,
 }
 
+fn getinfo_field_count(options: &str) -> usize {
+    let mut count = 0;
+
+    if options.contains('S') {
+        count += 5;
+    }
+    if options.contains('l') {
+        count += 1;
+    }
+    if options.contains('u') {
+        count += 1;
+    }
+    if options.contains('n') {
+        count += 2;
+    }
+    if options.contains('f') {
+        count += 1;
+    }
+    if options.contains('L') {
+        count += 1;
+    }
+
+    count
+}
+
 /// Extract closure metadata into an owned struct so we release the
 /// immutable borrow on `state.gc.closures` before mutating state.
 fn extract_closure_info(
@@ -711,7 +736,9 @@ pub fn db_getinfo(state: &mut LuaState) -> LuaResult<u32> {
         }
     };
 
-    let result_table = state.gc.alloc_table(Table::new());
+    let result_table = state
+        .gc
+        .alloc_table(Table::with_sizes(0, getinfo_field_count(&options)));
 
     // PUC-Rio: when ar->i_ci == 0 (tail call), info_tailcall fills in
     // placeholder values and returns immediately.
@@ -788,7 +815,9 @@ pub fn db_getinfo(state: &mut LuaState) -> LuaResult<u32> {
         }
 
         if options.contains('L') && info.is_lua {
-            let lines_table = state.gc.alloc_table(Table::new());
+            let lines_table = state
+                .gc
+                .alloc_table(Table::with_sizes(info.line_info.len(), 0));
             for &line in &info.line_info {
                 let lt = state
                     .gc
@@ -1706,5 +1735,13 @@ mod tests {
         let info_func: crate::handles::Function = lua.global("info_func").expect("missing func");
         let sample: crate::handles::Function = lua.global("sample").expect("missing sample");
         assert_eq!(info_func, sample);
+    }
+
+    #[test]
+    fn getinfo_field_count_matches_option_sets() {
+        assert_eq!(getinfo_field_count(""), 0);
+        assert_eq!(getinfo_field_count("S"), 5);
+        assert_eq!(getinfo_field_count("ln"), 3);
+        assert_eq!(getinfo_field_count("flnSuL"), 11);
     }
 }
