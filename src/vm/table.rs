@@ -154,6 +154,14 @@ pub struct Table {
     /// Set by gettm() when a metamethod is NOT found; cleared to 0 on
     /// any rawset where the key starts with `__`.
     flags: u8,
+    /// Application-specific backing store identifier.
+    ///
+    /// When set, the table is backed by host application data (e.g., a game
+    /// frame). The two u32s are opaque to rilua — the host interprets them,
+    /// typically as a generational arena index (slot + generation).
+    /// Does not affect Lua table semantics: rawget/rawset/pairs/type all
+    /// work normally on both the array and hash parts.
+    backing: Option<(u32, u32)>,
 }
 
 impl Table {
@@ -166,6 +174,7 @@ impl Table {
             log2_size: 0,
             metatable: None,
             flags: 0,
+            backing: None,
         }
     }
 
@@ -184,6 +193,7 @@ impl Table {
                 log2_size: 0,
                 metatable: None,
                 flags: 0,
+                backing: None,
             }
         } else {
             let log2 = ceil_log2(hash_size);
@@ -199,6 +209,7 @@ impl Table {
                 log2_size: log2,
                 metatable: None,
                 flags: 0,
+                backing: None,
             }
         }
     }
@@ -237,6 +248,17 @@ impl Table {
     pub fn set_metatable(&mut self, mt: Option<GcRef<Self>>) {
         self.metatable = mt;
         self.flags = 0; // Invalidate metamethod cache
+    }
+
+    /// Returns the backing store identifier, if any.
+    #[inline]
+    pub fn backing(&self) -> Option<(u32, u32)> {
+        self.backing
+    }
+
+    /// Sets the backing store identifier.
+    pub fn set_backing(&mut self, backing: Option<(u32, u32)>) {
+        self.backing = backing;
     }
 
     /// Returns a slice of the array part for GC traversal.

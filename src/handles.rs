@@ -102,6 +102,18 @@ impl Table {
     pub fn gc_ref(self) -> GcRef<crate::vm::table::Table> {
         self.0
     }
+
+    /// Returns the backing store identifier, if any.
+    pub fn backing(&self, state: &LuaState) -> Option<(u32, u32)> {
+        state.gc.tables.get(self.0)?.backing()
+    }
+
+    /// Sets the backing store identifier.
+    pub fn set_backing(&self, state: &mut LuaState, backing: Option<(u32, u32)>) {
+        if let Some(t) = state.gc.tables.get_mut(self.0) {
+            t.set_backing(backing);
+        }
+    }
 }
 
 impl Function {

@@ -507,6 +507,13 @@ pub struct LuaState {
     /// Each entry corresponds to one level of nested `resume()` calls.
     /// The deepest resumer is at index 0 (the main thread when no nesting).
     pub saved_threads: Vec<LuaThread>,
+
+    /// Application-specific data, type-erased.
+    ///
+    /// Allows the host to store arbitrary state accessible from Rust functions
+    /// without going through the Lua registry. Use `app_data::<T>()` and
+    /// `app_data_mut::<T>()` to access.
+    app_data: Option<Box<dyn std::any::Any>>,
 }
 
 impl LuaApi for LuaState {
@@ -582,7 +589,23 @@ impl LuaState {
             hook: HookState::new(),
             yielded_in_hook: false,
             saved_threads: Vec::new(),
+            app_data: None,
         }
+    }
+
+    /// Sets application data of type `T`.
+    pub fn set_app_data<T: 'static>(&mut self, data: T) {
+        self.app_data = Some(Box::new(data));
+    }
+
+    /// Returns a reference to application data of type `T`, if set and matching.
+    pub fn app_data<T: 'static>(&self) -> Option<&T> {
+        self.app_data.as_ref()?.downcast_ref::<T>()
+    }
+
+    /// Returns a mutable reference to application data of type `T`, if set and matching.
+    pub fn app_data_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.app_data.as_mut()?.downcast_mut::<T>()
     }
 
     // ----- Stack operations -----
