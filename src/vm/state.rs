@@ -917,7 +917,7 @@ impl Default for LuaState {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Function, Lua};
+    use crate::{Function, Lua, LuaResult};
 
     use super::*;
 

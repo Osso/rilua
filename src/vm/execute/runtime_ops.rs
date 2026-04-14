@@ -192,46 +192,23 @@ pub(super) fn vm_concat(
         let lhs = state.stack_get(top - 2);
         let rhs = state.stack_get(top - 1);
 
-        if !is_string_or_number(lhs, &state.gc) || !is_string_or_number(rhs, &state.gc) {
-            let tm = get_tm_for_val(&state.gc, lhs, TMS::Concat)
-                .or_else(|| get_tm_for_val(&state.gc, rhs, TMS::Concat));
-            if let Some(tm_val) = tm {
-                call_tm_res(state, tm_val, lhs, rhs, top - 2)?;
-            } else {
-                let reg = if is_string_or_number(lhs, &state.gc) {
-                    last
-                } else {
-                    last - 1
-                };
-                return Err(type_error(state, proto, pc, base, reg, "concatenate"));
-            }
+        if needs_concat_metamethod(lhs, rhs, &state.gc) {
+            let error_context = ConcatErrorContext {
+                base,
+                last,
+                proto,
+                pc,
+            };
+            concat_via_metamethod(state, lhs, rhs, top - 2, &error_context)?;
             total -= 1;
             last -= 1;
-        } else {
-            let mut n = 2;
-            while n < total && is_string_or_number(state.stack_get(top - n - 1), &state.gc) {
-                n += 1;
-            }
-
-            let mut total_len: usize = 0;
-            for i in (0..n).rev() {
-                let value_len = val_string_len(state.stack_get(top - 1 - i), &state.gc);
-                if value_len >= MAX_STRING_SIZE - total_len {
-                    return Err(runtime_error(proto, pc, "string length overflow"));
-                }
-                total_len += value_len;
-            }
-
-            let mut buffer = Vec::with_capacity(total_len);
-            for i in (0..n).rev() {
-                let val = state.stack_get(top - 1 - i);
-                val_to_string_bytes(val, &state.gc, &mut buffer);
-            }
-            let r = state.gc.intern_string(&buffer);
-            state.stack_set(top - n, Val::Str(r));
-            total -= n - 1;
-            last -= n - 1;
+            continue;
         }
+
+        let run_len = count_concat_run(state, top, total);
+        concat_string_run(state, top, run_len, proto, pc)?;
+        total -= run_len - 1;
+        last -= run_len - 1;
     }
     Ok(())
 }
@@ -240,6 +217,89 @@ pub(super) fn vm_concat(
 /// We use u32::MAX - 2 to match PUC-Rio 32-bit behavior on all platforms,
 /// ensuring the PUC-Rio test suite passes regardless of host word size.
 const MAX_STRING_SIZE: usize = (u32::MAX - 2) as usize;
+
+fn needs_concat_metamethod(lhs: Val, rhs: Val, gc: &Gc) -> bool {
+    !is_string_or_number(lhs, gc) || !is_string_or_number(rhs, gc)
+}
+
+struct ConcatErrorContext<'a> {
+    base: usize,
+    last: usize,
+    proto: &'a Proto,
+    pc: usize,
+}
+
+fn concat_via_metamethod(
+    state: &mut LuaState,
+    lhs: Val,
+    rhs: Val,
+    result_reg: usize,
+    error_context: &ConcatErrorContext<'_>,
+) -> LuaResult<()> {
+    let tm = get_tm_for_val(&state.gc, lhs, TMS::Concat)
+        .or_else(|| get_tm_for_val(&state.gc, rhs, TMS::Concat));
+    if let Some(tm_val) = tm {
+        return call_tm_res(state, tm_val, lhs, rhs, result_reg);
+    }
+
+    let reg = if is_string_or_number(lhs, &state.gc) {
+        error_context.last
+    } else {
+        error_context.last - 1
+    };
+    Err(type_error(
+        state,
+        error_context.proto,
+        error_context.pc,
+        error_context.base,
+        reg,
+        "concatenate",
+    ))
+}
+
+fn count_concat_run(state: &LuaState, top: usize, total: usize) -> usize {
+    let mut run_len = 2;
+    while run_len < total && is_string_or_number(state.stack_get(top - run_len - 1), &state.gc) {
+        run_len += 1;
+    }
+    run_len
+}
+
+fn concat_string_run(
+    state: &mut LuaState,
+    top: usize,
+    run_len: usize,
+    proto: &Proto,
+    pc: usize,
+) -> LuaResult<()> {
+    let total_len = concat_run_length(state, top, run_len, proto, pc)?;
+    let mut buffer = Vec::with_capacity(total_len);
+    for i in (0..run_len).rev() {
+        let value = state.stack_get(top - 1 - i);
+        val_to_string_bytes(value, &state.gc, &mut buffer);
+    }
+    let string_ref = state.gc.intern_string(&buffer);
+    state.stack_set(top - run_len, Val::Str(string_ref));
+    Ok(())
+}
+
+fn concat_run_length(
+    state: &LuaState,
+    top: usize,
+    run_len: usize,
+    proto: &Proto,
+    pc: usize,
+) -> LuaResult<usize> {
+    let mut total_len = 0;
+    for i in (0..run_len).rev() {
+        let value_len = val_string_len(state.stack_get(top - 1 - i), &state.gc);
+        if value_len >= MAX_STRING_SIZE - total_len {
+            return Err(runtime_error(proto, pc, "string length overflow"));
+        }
+        total_len += value_len;
+    }
+    Ok(total_len)
+}
 
 fn is_string_or_number(val: Val, gc: &Gc) -> bool {
     matches!(val, Val::Num(_)) || {
