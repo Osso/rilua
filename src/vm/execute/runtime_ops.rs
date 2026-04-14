@@ -441,16 +441,7 @@ pub(super) fn vm_gettable(
 ) -> LuaResult<()> {
     let mut current = t;
     for _ in 0..MAXTAGLOOP {
-        if let Val::Table(table_ref) = current {
-            match handle_table_gettable(state, current, table_ref, key, result_reg)? {
-                GettableStep::Done => return Ok(()),
-                GettableStep::Continue(next) => current = next,
-            }
-            continue;
-        }
-
-        match handle_non_table_gettable(state, current, key, result_reg, proto, pc, base, obj_reg)?
-        {
+        match gettable_step(state, current, key, result_reg, proto, pc, base, obj_reg)? {
             GettableStep::Done => return Ok(()),
             GettableStep::Continue(next) => current = next,
         }
@@ -461,6 +452,23 @@ pub(super) fn vm_gettable(
 enum GettableStep {
     Done,
     Continue(Val),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gettable_step(
+    state: &mut LuaState,
+    current: Val,
+    key: Val,
+    result_reg: usize,
+    proto: &Proto,
+    pc: usize,
+    base: usize,
+    obj_reg: Option<usize>,
+) -> LuaResult<GettableStep> {
+    match current {
+        Val::Table(table_ref) => handle_table_gettable(state, current, table_ref, key, result_reg),
+        _ => handle_non_table_gettable(state, current, key, result_reg, proto, pc, base, obj_reg),
+    }
 }
 
 fn handle_table_gettable(
