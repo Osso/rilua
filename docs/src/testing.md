@@ -7,9 +7,11 @@ oracle comparison for behavioral equivalence, integration tests
 for language semantics, PUC-Rio official test suite as the
 compatibility target.**
 
-Current: 1325 tests (609 unit, 431 integration, 277 oracle, 5 proptest, 3 lua51).
-With `dynmod` feature: 1333 tests (611 unit, 6 dynmod, 431 integration,
-277 oracle, 5 proptest, 3 lua51). All 5 layers are active.
+Current (2026-04-14): 1334 tests (618 unit, 431 integration, 277 oracle, 5
+proptest, 3 doctest). Measured coverage is about 74.7% lines and 79.1%
+functions.
+With `dynmod` feature: 1343 tests (620 unit, 6 dynmod, 431 integration, 277
+oracle, 5 proptest, 4 doctest). All major layers are active.
 
 ## Test Layers
 
@@ -134,7 +136,7 @@ these may differ between implementations without affecting semantics.
 | Bytecode comparison | Phase 2 (compiler) | Compare rilua compiler output with `luac -l` |
 | Oracle comparison | Phase 3 + `print` | Compare rilua output with `lua -e` |
 | Integration `.lua` tests | Phase 3 + `assert` | `cargo test --test integration` |
-| PUC-Rio test suite | Phase 5a (base lib) | `cargo test --test lua51` |
+| PUC-Rio compatibility suite | Phase 5a (base lib) | direct rilua execution from `lua-5.1-tests/`, plus `scripts/benchmark-tests.sh` / `scripts/bench-puc-rio.sh` |
 
 ### Layer 3: Integration Tests
 
@@ -176,7 +178,9 @@ Chapter 5 ("Standard Libraries").
 
 Test infrastructure files: `tests/helpers/mod.rs` (shared utilities),
 `tests/helpers/oracle.rs` (PUC-Rio comparison), `tests/integration.rs`
-(runner), `tests/lua51.rs` (PUC-Rio suite runner).
+(integration runner), `tests/oracle.rs` (reference-oracle coverage),
+`tests/proptest_fuzz.rs` (property tests), and benchmark / compatibility
+scripts under `scripts/`.
 
 ### Layer 4: PUC-Rio Official Test Suite
 
@@ -395,8 +399,26 @@ This ensures:
 
 1. Consistent formatting
 2. No lint warnings
-3. All tests pass (unit, integration, oracle, PUC-Rio suite)
+3. All cargo test targets pass (unit, integration, oracle, proptest, doctest)
 4. Documentation builds without errors
+
+### Code Coverage Workflow
+
+Use the repo script instead of ad hoc `cargo llvm-cov` invocations:
+
+```bash
+# Summary JSON with line / function totals
+./scripts/coverage.sh summary
+
+# HTML report for file-level drill-down
+./scripts/coverage.sh html
+```
+
+Outputs go under `target/llvm-cov/`.
+
+The script resolves `llvm-cov` and `llvm-profdata` automatically, including
+falling back to `/usr/bin/llvm-cov` and `/usr/bin/llvm-profdata` when
+`cargo llvm-cov` cannot find rustup's `llvm-tools-preview`.
 
 ### Coverage Tracking
 
@@ -408,5 +430,5 @@ Test coverage is measured by:
    passing (tracked in CI).
 3. **Oracle comparison count** -- number of Lua snippets verified
    against PUC-Rio output.
-4. **Code coverage** -- `cargo-tarpaulin` or `llvm-cov` for line
-   coverage metrics (informational, not a gate).
+4. **Code coverage** -- `./scripts/coverage.sh summary` for stable
+   `llvm-cov` line and function coverage metrics (informational, not a gate).
