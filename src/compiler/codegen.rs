@@ -20,6 +20,7 @@ use crate::vm::instructions::{
 use crate::vm::proto::{
     LocalVar, Proto, ProtoRef, VARARG_HASARG, VARARG_ISVARARG, VARARG_NEEDSARG,
 };
+use crate::vm::string::lua_hash;
 use crate::vm::value::Val;
 
 // ---------------------------------------------------------------------------
@@ -174,13 +175,30 @@ struct BlockContext {
 /// Key for constant pool deduplication hash map.
 /// Uses bitwise equality for numbers (NaN != NaN, +0.0 != -0.0).
 #[derive(Hash, Eq, PartialEq)]
-enum ConstantKey {
-    /// Number constant keyed by f64 bit pattern.
-    Num(u64),
-    /// Boolean constant.
-    Bool(bool),
-    /// String constant keyed by raw bytes.
-    Str(Vec<u8>),
+struct ConstantKey {
+    kind: u8,
+    bits: u64,
+}
+
+impl ConstantKey {
+    fn number(n: f64) -> Self {
+        Self {
+            kind: 0,
+            bits: n.to_bits(),
+        }
+    }
+
+    fn boolean(value: bool) -> Self {
+        Self {
+            kind: 1,
+            bits: u64::from(value),
+        }
+    }
+}
+
+struct StringConstantEntry {
+    bytes: Vec<u8>,
+    index: u32,
 }
 
 /// Per-function compilation state.
@@ -213,6 +231,8 @@ pub(crate) struct FuncState {
     /// index in `proto.constants`. Mirrors PUC-Rio's `fs->h` hash table
     /// (`addk` in `lcode.c:224`).
     constant_index: HashMap<ConstantKey, u32>,
+    /// String constant dedup buckets keyed by cached Lua hash.
+    string_constant_index: HashMap<u32, Vec<StringConstantEntry>>,
 }
 
 impl FuncState {
@@ -228,6 +248,7 @@ impl FuncState {
             last_target: -1,
             nil_k: None,
             constant_index: HashMap::new(),
+            string_constant_index: HashMap::new(),
         }
     }
 
@@ -547,8 +568,8 @@ impl Compiler {
     /// which uses `luaH_set` on `fs->h` (`lcode.c:224`).
     pub(crate) fn add_constant(&mut self, val: Val) -> LuaResult<u32> {
         let key = match val {
-            Val::Num(n) => ConstantKey::Num(n.to_bits()),
-            Val::Bool(b) => ConstantKey::Bool(b),
+            Val::Num(n) => ConstantKey::number(n),
+            Val::Bool(b) => ConstantKey::boolean(b),
             // Nil placeholders are never deduped here; nil_constant()
             // handles its own caching.
             _ => {
@@ -583,10 +604,14 @@ impl Compiler {
     /// Stores `Val::Nil` as a placeholder in the constant pool; the real
     /// `Val::Str` is patched in by `patch_string_constants` before execution.
     pub(crate) fn string_constant(&mut self, s: &[u8]) -> LuaResult<u32> {
-        let key = ConstantKey::Str(s.to_vec());
+        let hash = lua_hash(s);
         let fs = self.fs_mut();
-        if let Some(&idx) = fs.constant_index.get(&key) {
-            return Ok(idx);
+        if let Some(entries) = fs.string_constant_index.get(&hash) {
+            for entry in entries {
+                if entry.bytes.as_slice() == s {
+                    return Ok(entry.index);
+                }
+            }
         }
         let idx = fs.proto.constants.len();
         if idx > MAXARG_BX as usize {
@@ -595,8 +620,12 @@ impl Compiler {
         fs.proto.constants.push(Val::Nil);
         #[allow(clippy::cast_possible_truncation)]
         let idx = idx as u32;
-        fs.proto.string_pool.push((idx, s.to_vec()));
-        fs.constant_index.insert(key, idx);
+        let bytes = s.to_vec();
+        fs.proto.string_pool.push((idx, bytes.clone()));
+        fs.string_constant_index
+            .entry(hash)
+            .or_default()
+            .push(StringConstantEntry { bytes, index: idx });
         Ok(idx)
     }
 
@@ -3261,6 +3290,12 @@ mod tests {
         assert!(ops.contains(&OpCode::LoadK));
         // Constant pool should have at least one entry (the string placeholder)
         assert!(!proto.constants.is_empty());
+    }
+
+    #[test]
+    fn duplicate_string_constants_share_one_pool_entry() {
+        let proto = compile(b"local a = 'hello'; local b = 'hello'; return a, b", "test").unwrap();
+        assert_eq!(proto.string_pool.len(), 1);
     }
 
     #[test]
