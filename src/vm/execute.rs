@@ -309,6 +309,13 @@ pub enum CallResult {
 }
 
 impl LuaState {
+    #[inline]
+    fn ensure_stack_len(&mut self, needed: usize) {
+        if needed > self.stack.len() {
+            self.stack.resize(needed, Val::Nil);
+        }
+    }
+
     /// Checks `call_depth` against the two-threshold stack overflow model.
     ///
     /// PUC-Rio `luaD_call` uses two thresholds:
@@ -379,7 +386,7 @@ impl LuaState {
         let saved_ci_top = self.call_stack[self.ci].top;
 
         // Ensure minimum stack for the hook call.
-        self.ensure_stack(self.top + LUA_MINSTACK);
+        self.ensure_stack_len(self.top + LUA_MINSTACK);
         self.call_stack[self.ci].top = self.top + LUA_MINSTACK;
 
         // Disable hooks during the callback (PUC-Rio: L->allowhook = 0).
@@ -455,7 +462,7 @@ impl LuaState {
                     // Shift stack up to insert __call at func position.
                     // The original value becomes the first argument.
                     let top = self.top;
-                    self.ensure_stack(top + 1);
+                    self.ensure_stack_len(top + 1);
                     let mut p = top;
                     while p > func_idx {
                         let v = self.stack_get(p - 1);
@@ -517,9 +524,6 @@ impl LuaState {
                 let max_stack = proto.max_stack_size as usize;
                 let is_vararg = proto.is_vararg & VARARG_ISVARARG != 0;
 
-                // Ensure enough stack space.
-                self.ensure_stack(func_idx + max_stack + 1);
-
                 let nargs = self.get_nargs(func_idx);
 
                 let new_base;
@@ -527,21 +531,21 @@ impl LuaState {
                     new_base = self.adjust_varargs(&proto, nargs, func_idx);
                 } else {
                     new_base = func_idx + 1;
-                    // Trim excess args or pad with nil.
+                    let fixed_top = new_base + num_params;
+                    self.ensure_stack_len(new_base + max_stack);
+
                     if nargs > num_params {
-                        self.top = new_base + num_params;
-                    } else {
-                        // Pad with nil for missing params.
-                        while self.top < new_base + num_params {
-                            self.push(Val::Nil);
-                        }
+                        self.top = fixed_top;
+                    } else if self.top < fixed_top {
+                        self.stack[self.top..fixed_top].fill(Val::Nil);
+                        self.top = fixed_top;
                     }
                 }
 
-                // Initialize remaining locals to nil.
                 let ci_top = new_base + max_stack;
-                for i in self.top..ci_top {
-                    self.stack_set(i, Val::Nil);
+                self.ensure_stack_len(ci_top);
+                if self.top < ci_top {
+                    self.stack[self.top..ci_top].fill(Val::Nil);
                 }
                 self.top = ci_top;
 
@@ -566,7 +570,7 @@ impl LuaState {
                 let func = rust_cl.func;
 
                 // Ensure minimum stack for Rust functions.
-                self.ensure_stack(self.top + LUA_MINSTACK);
+                self.ensure_stack_len(self.top + LUA_MINSTACK);
 
                 let ci_top = self.top + LUA_MINSTACK;
                 let ci = CallInfo::new(func_idx, func_idx + 1, ci_top, num_results);
@@ -624,32 +628,36 @@ impl LuaState {
         self.base = self.call_stack[self.ci].base;
 
         // Move results to where the function was.
-        let mut res = ci_func;
         if wanted == LUA_MULTRET {
-            // Move all available results.
-            let mut src = first_result;
-            while src < self.top {
-                self.stack_set(res, self.stack_get(src));
-                res += 1;
-                src += 1;
+            let count = self.top.saturating_sub(first_result);
+            if count > 0 && first_result != ci_func {
+                self.stack.copy_within(first_result..self.top, ci_func);
             }
+            self.top = ci_func + count;
+        } else if wanted == 0 {
+            self.top = ci_func;
+        } else if wanted == 1 {
+            let result = if first_result < self.top {
+                self.stack[first_result]
+            } else {
+                Val::Nil
+            };
+            self.stack[ci_func] = result;
+            self.top = ci_func + 1;
         } else {
-            let mut moved = 0i32;
-            let mut src = first_result;
-            while moved < wanted && src < self.top {
-                self.stack_set(res, self.stack_get(src));
-                res += 1;
-                src += 1;
-                moved += 1;
+            let wanted = wanted as usize;
+            let available = self.top.saturating_sub(first_result).min(wanted);
+            if available > 0 && first_result != ci_func {
+                self.stack
+                    .copy_within(first_result..first_result + available, ci_func);
             }
-            // Pad with nil if not enough results.
-            while moved < wanted {
-                self.stack_set(res, Val::Nil);
-                res += 1;
-                moved += 1;
+            let new_top = ci_func + wanted;
+            self.ensure_stack_len(new_top);
+            if available < wanted {
+                self.stack[ci_func + available..new_top].fill(Val::Nil);
             }
+            self.top = new_top;
         }
-        self.top = res;
 
         // Return true if the caller requested fixed results (not MULTRET).
         // Matches PUC-Rio: `return (L->nresults - LUA_MULTRET)` which is
@@ -707,7 +715,7 @@ impl LuaState {
         let new_base = self.top;
 
         // Ensure enough stack space for the copies + optional 'arg' table.
-        self.ensure_stack(new_base + num_params + 1);
+        self.ensure_stack_len(new_base + num_params + 1);
 
         // Copy fixed params to above varargs, nil out originals.
         for i in 0..num_params {
@@ -1842,6 +1850,38 @@ mod tests {
         p.max_stack_size = 20;
         p.is_vararg = VARARG_ISVARARG;
         p
+    }
+
+    #[test]
+    fn poscall_zero_results_clears_function_slot() {
+        let mut state = LuaState::new();
+        state.stack_set(0, Val::Num(99.0));
+        state.top = 3;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+        state.push_ci(CallInfo::new(0, 1, 5, 0));
+
+        let fixed = state.poscall(3);
+
+        assert!(fixed);
+        assert_eq!(state.ci, 0);
+        assert_eq!(state.top, 0);
+    }
+
+    #[test]
+    fn poscall_one_result_moves_single_value() {
+        let mut state = LuaState::new();
+        state.stack_set(0, Val::Num(11.0));
+        state.stack_set(3, Val::Num(42.0));
+        state.top = 4;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+        state.push_ci(CallInfo::new(0, 1, 5, 1));
+
+        let fixed = state.poscall(3);
+
+        assert!(fixed);
+        assert_eq!(state.ci, 0);
+        assert_eq!(state.stack_get(0), Val::Num(42.0));
+        assert_eq!(state.top, 1);
     }
 
     // ----- Data movement tests -----
