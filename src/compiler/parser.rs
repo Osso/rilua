@@ -30,6 +30,16 @@ struct FuncScope {
     upvalue_names: Vec<String>,
 }
 
+impl FuncScope {
+    fn has_local_name(&self, name: &str) -> bool {
+        self.local_names.iter().any(|local| local == name)
+    }
+
+    fn has_upvalue_name(&self, name: &str) -> bool {
+        self.upvalue_names.iter().any(|upvalue| upvalue == name)
+    }
+}
+
 /// Parser state.
 pub struct Parser<'a> {
     /// Lexer providing the token stream.
@@ -55,6 +65,13 @@ pub struct Parser<'a> {
 /// Maximum syntax nesting depth before "too many syntax levels" error.
 /// PUC-Rio uses `LUAI_MAXCCALLS` (200) for this.
 const MAX_SYNTAX_LEVELS: u32 = 200;
+const BLOCK_STMT_CAPACITY: usize = 8;
+const IF_BRANCH_CAPACITY: usize = 2;
+const EXPR_LIST_CAPACITY: usize = 2;
+const PARAM_CAPACITY: usize = 4;
+const TABLE_FIELD_CAPACITY: usize = 4;
+const FUNC_SCOPE_STACK_CAPACITY: usize = 4;
+const FUNC_SCOPE_NAME_CAPACITY: usize = 4;
 
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given source bytes.
@@ -76,12 +93,16 @@ impl<'a> Parser<'a> {
             loop_depth: 0,
             syntax_depth: 0,
             // Top-level chunk is itself a function scope (line 0).
-            func_scopes: vec![FuncScope {
-                line_defined: 0,
-                local_count: 0,
-                local_names: Vec::new(),
-                upvalue_names: Vec::new(),
-            }],
+            func_scopes: {
+                let mut scopes = Vec::with_capacity(FUNC_SCOPE_STACK_CAPACITY);
+                scopes.push(FuncScope {
+                    line_defined: 0,
+                    local_count: 0,
+                    local_names: Vec::with_capacity(FUNC_SCOPE_NAME_CAPACITY),
+                    upvalue_names: Vec::with_capacity(FUNC_SCOPE_NAME_CAPACITY),
+                });
+                scopes
+            },
         })
     }
 
@@ -125,6 +146,7 @@ impl<'a> Parser<'a> {
     fn register_locals_named(&mut self, names: &[String]) -> LuaResult<()> {
         self.register_locals(names.len() as u32)?;
         if let Some(scope) = self.func_scopes.last_mut() {
+            scope.local_names.reserve(names.len());
             scope.local_names.extend(names.iter().cloned());
         }
         Ok(())
@@ -142,27 +164,19 @@ impl<'a> Parser<'a> {
 
         // Check if name is a local in the current (innermost) function scope.
         let current = n_scopes - 1;
-        if self.func_scopes[current]
-            .local_names
-            .contains(&name.to_string())
-        {
+        if self.func_scopes[current].has_local_name(name) {
             return Ok(()); // local variable, not an upvalue
         }
         // Already tracked as an upvalue of the current scope?
-        if self.func_scopes[current]
-            .upvalue_names
-            .contains(&name.to_string())
-        {
+        if self.func_scopes[current].has_upvalue_name(name) {
             return Ok(()); // already counted
         }
 
         // Walk up the chain to find where this name is defined.
         let mut found_at = None;
         for i in (0..current).rev() {
-            if self.func_scopes[i].local_names.contains(&name.to_string())
-                || self.func_scopes[i]
-                    .upvalue_names
-                    .contains(&name.to_string())
+            if self.func_scopes[i].has_local_name(name)
+                || self.func_scopes[i].has_upvalue_name(name)
             {
                 found_at = Some(i);
                 break;
@@ -380,7 +394,7 @@ impl<'a> Parser<'a> {
             .last()
             .map(|s| (s.local_count, s.local_names.len()));
 
-        let mut stmts = Vec::new();
+        let mut stmts = Vec::with_capacity(BLOCK_STMT_CAPACITY);
         loop {
             if self.current.is_block_follow() {
                 break;
@@ -433,8 +447,8 @@ impl<'a> Parser<'a> {
         self.advance()?; // consume 'if'
         let open_line = span.line;
 
-        let mut conditions = Vec::new();
-        let mut bodies = Vec::new();
+        let mut conditions = Vec::with_capacity(IF_BRANCH_CAPACITY);
+        let mut bodies = Vec::with_capacity(IF_BRANCH_CAPACITY);
 
         // First condition + body
         conditions.push(self.parse_expr()?);
@@ -743,7 +757,8 @@ impl<'a> Parser<'a> {
 
     /// Parses a comma-separated list of one or more expressions.
     fn parse_expr_list(&mut self) -> LuaResult<Vec<Expr>> {
-        let mut exprs = vec![self.parse_expr()?];
+        let mut exprs = Vec::with_capacity(EXPR_LIST_CAPACITY);
+        exprs.push(self.parse_expr()?);
         while self.test_next_char(b',')? {
             exprs.push(self.parse_expr()?);
         }
@@ -967,7 +982,7 @@ impl<'a> Parser<'a> {
         let open_line = self.span.line;
         self.expect_char(b'(')?;
 
-        let mut params = Vec::new();
+        let mut params = Vec::with_capacity(PARAM_CAPACITY);
         let mut has_varargs = false;
 
         if !self.check_char(b')') {
@@ -1000,8 +1015,8 @@ impl<'a> Parser<'a> {
         self.func_scopes.push(FuncScope {
             line_defined: def_span.line,
             local_count: 0,
-            local_names: Vec::new(),
-            upvalue_names: Vec::new(),
+            local_names: Vec::with_capacity(params.len().max(FUNC_SCOPE_NAME_CAPACITY)),
+            upvalue_names: Vec::with_capacity(FUNC_SCOPE_NAME_CAPACITY),
         });
         self.register_locals_named(&params)?;
 
@@ -1035,7 +1050,7 @@ impl<'a> Parser<'a> {
         let open_line = span.line;
         self.expect_char(b'{')?;
 
-        let mut fields = Vec::new();
+        let mut fields = Vec::with_capacity(TABLE_FIELD_CAPACITY);
 
         while !self.check_char(b'}') {
             let field = self.parse_field()?;
@@ -1275,6 +1290,24 @@ mod tests {
         {
             assert_eq!(conditions.len(), 2);
             assert_eq!(bodies.len(), 2);
+            assert!(else_body.is_some());
+        } else {
+            panic!("expected If");
+        }
+    }
+
+    #[test]
+    fn if_chain_preserves_all_branches() {
+        let block = parse_ok("if a then elseif b then elseif c then elseif d then else end");
+        if let Stat::If {
+            conditions,
+            bodies,
+            else_body,
+            ..
+        } = &block[0]
+        {
+            assert_eq!(conditions.len(), 4);
+            assert_eq!(bodies.len(), 4);
             assert!(else_body.is_some());
         } else {
             panic!("expected If");
@@ -1671,6 +1704,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn table_with_many_fields() {
+        let block = parse_ok("return {a = 1, b = 2, c = 3, d = 4, 5, 6}");
+        if let Stat::Return { values, .. } = &block[0] {
+            if let Expr::TableCtor { fields, .. } = &values[0] {
+                assert_eq!(fields.len(), 6);
+            } else {
+                panic!("expected TableCtor");
+            }
+        } else {
+            panic!("expected Return");
+        }
+    }
+
     // -- Function body --
 
     #[test]
@@ -1690,6 +1737,17 @@ mod tests {
         if let Stat::FuncDecl { body, .. } = &block[0] {
             assert_eq!(body.params, vec!["a"]);
             assert!(body.has_varargs);
+        } else {
+            panic!("expected FuncDecl");
+        }
+    }
+
+    #[test]
+    fn func_with_multiple_params() {
+        let block = parse_ok("function foo(a, b, c, d) end");
+        if let Stat::FuncDecl { body, .. } = &block[0] {
+            assert_eq!(body.params, vec!["a", "b", "c", "d"]);
+            assert!(!body.has_varargs);
         } else {
             panic!("expected FuncDecl");
         }

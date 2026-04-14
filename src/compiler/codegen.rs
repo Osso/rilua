@@ -1912,7 +1912,7 @@ fn compile_assign(
     line: u32,
 ) -> LuaResult<()> {
     // Compile all targets to get their variable locations.
-    let mut target_exprs: Vec<ExprContext> = Vec::new();
+    let mut target_exprs: Vec<ExprContext> = Vec::with_capacity(targets.len());
     for target in targets {
         let e = compile_expr(compiler, target)?;
         if e.kind != ExprKind::Local
