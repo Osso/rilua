@@ -103,6 +103,23 @@ Policy:
 - Revisit a stricter overall target such as `1.5x` only after the
   current outliers are no longer dominating the suite profile.
 
+### Readability Refactor Policy
+
+Large readability-driven refactors stay parked until the coverage and
+performance baselines are healthier than the current 2026-04-14 snapshot.
+
+In practice:
+
+- Small extractions are still acceptable when coverage and profiling have
+  already identified a stable seam and the refactor helps local reasoning
+  without widening the behavioral surface.
+- Broad readability-first rewrites of hot VM/compiler modules should wait
+  until the current core coverage push and hotspot-driven perf work are in
+  a stronger position.
+- New readability TODOs created by seam extractions should stay parked
+  behind coverage and perf work unless they are needed to unlock a verified
+  bug fix or measured optimization.
+
 ### Full-Suite Runner
 
 The repo's regression-gate harness uses the official `all.lua` runner:
