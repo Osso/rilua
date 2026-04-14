@@ -52,6 +52,14 @@ pub struct CallInfo {
     /// Cached at frame creation to avoid arena lookups in hot paths
     /// like `resolve_stack_level_raw`.
     pub is_lua: bool,
+
+    /// WoW taint tag for this call frame.
+    ///
+    /// `None` means the frame is "secure" (Blizzard code).
+    /// `Some(addon_name)` means the frame is tainted by the named addon.
+    /// When tainted code sets a variable, the variable inherits this taint.
+    /// Used by `issecure()`, `issecurevariable()`, and `securecall()`.
+    pub taint: Option<String>,
 }
 
 impl CallInfo {
@@ -69,6 +77,7 @@ impl CallInfo {
             num_results,
             tail_calls: 0,
             is_lua: false,
+            taint: None,
         }
     }
 }
