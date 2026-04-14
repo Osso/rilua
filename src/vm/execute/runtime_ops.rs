@@ -1,6 +1,7 @@
 //! Runtime helpers extracted from the main execute loop.
 
 use crate::error::{LuaResult, chunkid};
+use crate::vm::value::{append_lua_number_bytes, lua_number_string_len};
 
 use super::{
     CallResult, Closure, Gc, GcRef, LuaState, MAXTAGLOOP, Proto, TMS, Table, Val, arith_error,
@@ -314,7 +315,7 @@ fn is_string_or_number(val: Val, gc: &Gc) -> bool {
 fn val_string_len(val: Val, gc: &Gc) -> usize {
     match val {
         Val::Str(r) => gc.string_arena.get(r).map_or(0, |s| s.data().len()),
-        Val::Num(_) => format!("{val}").len(),
+        Val::Num(n) => lua_number_string_len(n),
         _ => 0,
     }
 }
@@ -326,10 +327,7 @@ fn val_to_string_bytes(val: Val, gc: &Gc, buffer: &mut Vec<u8>) {
                 buffer.extend_from_slice(s.data());
             }
         }
-        Val::Num(_) => {
-            let formatted = format!("{val}");
-            buffer.extend_from_slice(formatted.as_bytes());
-        }
+        Val::Num(n) => append_lua_number_bytes(buffer, n),
         _ => {}
     }
 }

@@ -24,6 +24,7 @@
 use std::any::Any;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::io::Write as _;
 
 use super::closure::Closure;
 use super::gc::arena::GcRef;
@@ -396,6 +397,77 @@ fn strip_trailing_zeros(s: &str) -> &str {
     trimmed.trim_end_matches('.')
 }
 
+const MAX_FIXED_INTEGER_ABS: f64 = 1e14;
+
+fn lua_fixed_integer(n: f64) -> Option<i64> {
+    if !n.is_finite() || n == 0.0 || n.abs() >= MAX_FIXED_INTEGER_ABS {
+        return None;
+    }
+    let int = n as i64;
+    #[allow(clippy::float_cmp)]
+    if (int as f64) == n { Some(int) } else { None }
+}
+
+fn lua_integer_len(int: i64) -> usize {
+    let abs = if int < 0 {
+        int.unsigned_abs()
+    } else {
+        int as u64
+    };
+    let digits = if abs == 0 {
+        1
+    } else {
+        abs.ilog10() as usize + 1
+    };
+    digits + usize::from(int < 0)
+}
+
+pub(crate) fn lua_number_string_len(n: f64) -> usize {
+    if n.is_nan() {
+        return 4;
+    }
+    if n.is_infinite() {
+        return if n.is_sign_positive() { 3 } else { 4 };
+    }
+    if n == 0.0 {
+        return if n.is_sign_negative() { 2 } else { 1 };
+    }
+    if let Some(int) = lua_fixed_integer(n) {
+        return lua_integer_len(int);
+    }
+    format!("{}", Val::Num(n)).len()
+}
+
+pub(crate) fn append_lua_number_bytes(buffer: &mut Vec<u8>, n: f64) {
+    if n.is_nan() {
+        buffer.extend_from_slice(b"-nan");
+        return;
+    }
+    if n.is_infinite() {
+        if n.is_sign_positive() {
+            buffer.extend_from_slice(b"inf");
+        } else {
+            buffer.extend_from_slice(b"-inf");
+        }
+        return;
+    }
+    if n == 0.0 {
+        if n.is_sign_negative() {
+            buffer.extend_from_slice(b"-0");
+        } else {
+            buffer.push(b'0');
+        }
+        return;
+    }
+    if let Some(int) = lua_fixed_integer(n) {
+        let _ = write!(buffer, "{int}");
+        return;
+    }
+
+    let formatted = format!("{}", Val::Num(n));
+    buffer.extend_from_slice(formatted.as_bytes());
+}
+
 /// Write a Rust scientific-notation string in C-style format with
 /// stripped trailing zeros. Converts `1.23e5` to `1.23e+05`.
 fn fmt_scientific_stripped(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
@@ -661,6 +733,42 @@ mod tests {
     fn display_one_third() {
         // PUC-Rio: "0.33333333333333" (14 significant digits).
         assert_eq!(format!("{}", Val::Num(1.0 / 3.0)), "0.33333333333333");
+    }
+
+    #[test]
+    fn lua_number_string_len_matches_written_bytes() {
+        let values = [
+            -12345.0,
+            -0.0,
+            0.0,
+            42.0,
+            99999999999999.0,
+            1e15,
+            std::f64::consts::PI,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+
+        for value in values {
+            let mut bytes = Vec::new();
+            append_lua_number_bytes(&mut bytes, value);
+            assert_eq!(lua_number_string_len(value), bytes.len(), "value={value:?}");
+        }
+    }
+
+    #[test]
+    fn append_lua_number_bytes_uses_fixed_decimal_for_small_integers() {
+        let mut bytes = Vec::new();
+        append_lua_number_bytes(&mut bytes, 12345.0);
+        assert_eq!(bytes, b"12345");
+    }
+
+    #[test]
+    fn append_lua_number_bytes_keeps_scientific_format_for_large_integers() {
+        let mut bytes = Vec::new();
+        append_lua_number_bytes(&mut bytes, 1e15);
+        assert_eq!(bytes, b"1e+15");
     }
 
     // -- Accessors --

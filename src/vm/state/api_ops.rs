@@ -1,6 +1,7 @@
 //! API-facing table and metamethod operations for `LuaState`.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
+use crate::vm::value::append_lua_number_bytes;
 
 use super::{LuaState, Table, Val};
 use crate::vm::gc::arena::GcRef;
@@ -274,10 +275,7 @@ impl LuaState {
                     buffer.extend_from_slice(s.data());
                 }
             }
-            Val::Num(_) => {
-                let formatted = format!("{val}");
-                buffer.extend_from_slice(formatted.as_bytes());
-            }
+            Val::Num(n) => append_lua_number_bytes(buffer, n),
             _ => {}
         }
     }

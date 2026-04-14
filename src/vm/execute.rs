@@ -33,7 +33,7 @@ use super::state::{
     Gc, LUA_MINSTACK, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET, MAXCALLS, MAXCCALLS,
 };
 use super::table::Table;
-use super::value::{Userdata, Val};
+use super::value::{Userdata, Val, append_lua_number_bytes, lua_number_string_len};
 
 use crate::platform::{localeconv, strcoll, strtod};
 
@@ -161,10 +161,10 @@ pub(crate) fn str_to_number(data: &[u8]) -> Option<f64> {
 fn coerce_to_string(val: Val, gc: &mut Gc) -> Option<Val> {
     match val {
         Val::Str(_) => Some(val),
-        Val::Num(_) => {
-            // Format the number as a string.
-            let formatted = format!("{val}");
-            let r = gc.intern_string(formatted.as_bytes());
+        Val::Num(n) => {
+            let mut bytes = Vec::with_capacity(lua_number_string_len(n));
+            append_lua_number_bytes(&mut bytes, n);
+            let r = gc.intern_string(&bytes);
             Some(Val::Str(r))
         }
         _ => None,
