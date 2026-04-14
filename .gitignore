@@ -27,6 +27,7 @@
 # Benchmark tooling
 /scripts/mlua-runner/target/
 /benchmark-results.csv
+/luac.out
 
 # mdbook build output
 /docs/book/
