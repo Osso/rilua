@@ -2112,6 +2112,61 @@ fn table_set(state: &mut LuaState, table_ref: GcRef<Table>, key: Val, value: Val
     Ok(())
 }
 
+/// Propagate the current call frame's taint to a table slot.
+///
+/// Called after every raw table write when `state.taint_mode` is active.
+/// Only writes taint when the current frame is tainted (`Some`). Secure
+/// frames (taint = `None`) do not clear existing taint — that is handled
+/// separately by explicit `clear_slot_taint_str` calls.
+///
+/// Key dispatch: `Val::Str` → `set_slot_taint_str`, integer-valued
+/// `Val::Num` → `set_slot_taint_int`. Other key types are ignored (they
+/// are rare and not tracked by WoW's taint system).
+pub(crate) fn propagate_slot_taint(
+    state: &mut LuaState,
+    table_ref: GcRef<Table>,
+    key: Val,
+) {
+    if !state.taint_mode {
+        return;
+    }
+    let taint = match state.call_stack[state.ci].taint.as_deref() {
+        Some(t) => t.to_owned(),
+        None => return,
+    };
+    // Resolve the key to a TaintKey variant before taking the mutable table borrow,
+    // because `string_arena` and `tables` cannot be borrowed simultaneously.
+    enum ResolvedKey {
+        Str(Vec<u8>),
+        Int(i64),
+        Other,
+    }
+    let resolved = match key {
+        Val::Str(r) => match state.gc.string_arena.get(r) {
+            Some(s) => ResolvedKey::Str(s.data().to_vec()),
+            None => ResolvedKey::Other,
+        },
+        Val::Num(n) if n.is_finite() => {
+            let k = n as i64;
+            #[allow(clippy::float_cmp)]
+            if (k as f64) == n {
+                ResolvedKey::Int(k)
+            } else {
+                ResolvedKey::Other
+            }
+        }
+        _ => ResolvedKey::Other,
+    };
+    let Some(table) = state.gc.tables.get_mut(table_ref) else {
+        return;
+    };
+    match resolved {
+        ResolvedKey::Str(bytes) => table.set_slot_taint_str(&bytes, &taint),
+        ResolvedKey::Int(k) => table.set_slot_taint_int(k, &taint),
+        ResolvedKey::Other => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Table access with metamethods
 // ---------------------------------------------------------------------------
@@ -2245,6 +2300,7 @@ fn vm_settable(
                     .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
                 table.raw_set(key, value, &state.gc.string_arena)?;
                 state.gc.barrier_back(table_ref);
+                propagate_slot_taint(state, table_ref, key);
                 return Ok(());
             }
 
@@ -2280,6 +2336,7 @@ fn vm_settable(
                         return Err(crate::LuaError::Memory);
                     }
                     state.gc.barrier_back(table_ref);
+                    propagate_slot_taint(state, table_ref, key);
                     return Ok(());
                 }
                 Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
