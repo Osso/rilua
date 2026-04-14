@@ -1699,7 +1699,75 @@ impl LuaState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::closure::{Closure, RustClosure};
     use crate::vm::state::LuaState;
+    use crate::vm::value::Userdata;
+    use std::sync::{Mutex, OnceLock};
+
+    #[derive(Debug)]
+    struct FinalizerMarker {
+        id: i32,
+    }
+
+    fn finalizer_log() -> &'static Mutex<Vec<i32>> {
+        static FINALIZER_LOG: OnceLock<Mutex<Vec<i32>>> = OnceLock::new();
+        FINALIZER_LOG.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    fn reset_finalizer_log() {
+        finalizer_log().lock().expect("log poisoned").clear();
+    }
+
+    fn read_finalizer_log() -> Vec<i32> {
+        finalizer_log().lock().expect("log poisoned").clone()
+    }
+
+    fn string_key(state: &mut LuaState, name: &str) -> Val {
+        Val::Str(state.gc.intern_string(name.as_bytes()))
+    }
+
+    fn string_value(state: &mut LuaState, value: &str) -> Val {
+        Val::Str(state.gc.intern_string(value.as_bytes()))
+    }
+
+    fn raw_set_named(state: &mut LuaState, table_ref: GcRef<Table>, name: &str, value: Val) {
+        let key = string_key(state, name);
+        state
+            .gc
+            .tables
+            .get_mut(table_ref)
+            .expect("missing table")
+            .raw_set(key, value, &state.gc.string_arena)
+            .expect("raw_set failed");
+    }
+
+    fn raw_get_named(state: &mut LuaState, table_ref: GcRef<Table>, name: &str) -> Val {
+        let key = string_key(state, name);
+        state
+            .gc
+            .tables
+            .get(table_ref)
+            .expect("missing table")
+            .get(key, &state.gc.string_arena)
+    }
+
+    fn finalizer_recorder(state: &mut LuaState) -> LuaResult<u32> {
+        let userdata_ref = match state.stack_get(state.base) {
+            Val::Userdata(userdata_ref) => userdata_ref,
+            other => panic!("expected userdata argument, got {other:?}"),
+        };
+        let marker = state
+            .gc
+            .userdata
+            .get(userdata_ref)
+            .and_then(Userdata::downcast_ref::<FinalizerMarker>)
+            .expect("missing finalizer marker");
+        finalizer_log()
+            .lock()
+            .expect("log poisoned")
+            .push(marker.id);
+        Ok(0)
+    }
 
     #[test]
     fn full_gc_does_not_crash() {
@@ -1808,8 +1876,6 @@ mod tests {
 
     #[test]
     fn gc_preserves_closure_on_stack() {
-        use crate::vm::closure::{Closure, RustClosure};
-
         let mut state = LuaState::new();
 
         let rc = RustClosure::new(|_| Ok(0), "on_stack");
@@ -1823,5 +1889,136 @@ mod tests {
             state.gc.closures.is_valid(cl),
             "stack closure should survive GC"
         );
+    }
+
+    #[test]
+    fn gc_step_with_zero_budget_starts_but_does_not_finish_a_cycle() {
+        let mut state = LuaState::new();
+        let _orphan = state.gc.alloc_table(Table::new());
+
+        let total_bytes = state.gc.gc_state.total_bytes;
+        let completed = state.gc_step(0).expect("gc_step failed");
+
+        assert!(!completed, "zero-budget step should not complete a cycle");
+        assert_eq!(state.gc.gc_state.phase, GcPhase::Propagate);
+        assert_eq!(state.gc.gc_state.gc_threshold, total_bytes + GCSTEPSIZE);
+        assert!(!state.gc.gc_state.gc_running, "gc_running should be reset");
+    }
+
+    #[test]
+    fn gc_check_triggers_auto_step_then_reports_memory_limit() {
+        let mut state = LuaState::new();
+        let _orphan = state.gc.alloc_table(Table::new());
+
+        state.gc.gc_state.gc_threshold = 0;
+        state.gc.gc_state.alloc_limit = 0;
+
+        let result = state.gc_check();
+
+        assert!(matches!(result, Err(LuaError::Memory)));
+        assert_ne!(state.gc.gc_state.phase, GcPhase::Pause);
+        assert!(!state.gc.gc_state.gc_running, "gc_running should be reset");
+    }
+
+    #[test]
+    fn full_gc_clears_dead_weak_values_but_preserves_strings() {
+        let mut state = LuaState::new();
+
+        let weak_table = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+        let dead_table = state.gc.alloc_table(Table::new());
+        let live_string = string_value(&mut state, "still here");
+        let weak_mode = string_value(&mut state, "v");
+        let dead_key = string_key(&mut state, "dead");
+        let string_key = string_key(&mut state, "string");
+        let global_ref = state.global;
+
+        raw_set_named(&mut state, metatable, "__mode", weak_mode);
+        state
+            .gc
+            .tables
+            .get_mut(weak_table)
+            .expect("missing weak table")
+            .set_metatable(Some(metatable));
+
+        state
+            .gc
+            .tables
+            .get_mut(weak_table)
+            .expect("missing weak table")
+            .raw_set(dead_key, Val::Table(dead_table), &state.gc.string_arena)
+            .expect("weak table raw_set failed");
+        state
+            .gc
+            .tables
+            .get_mut(weak_table)
+            .expect("missing weak table")
+            .raw_set(string_key, live_string, &state.gc.string_arena)
+            .expect("weak table raw_set failed");
+
+        raw_set_named(&mut state, global_ref, "weak_table", Val::Table(weak_table));
+
+        state.full_gc().expect("full_gc failed");
+
+        assert!(matches!(
+            raw_get_named(&mut state, weak_table, "dead"),
+            Val::Nil
+        ));
+        assert_eq!(raw_get_named(&mut state, weak_table, "string"), live_string);
+        if let Val::Str(string_ref) = live_string {
+            assert!(
+                state.gc.string_arena.is_valid(string_ref),
+                "string values in weak tables should survive clearing"
+            );
+        }
+        assert!(
+            !state.gc.tables.is_valid(dead_table),
+            "dead weak values should be collected"
+        );
+    }
+
+    #[test]
+    fn full_gc_preserves_values_in_saved_threads() {
+        let mut state = LuaState::new();
+
+        let saved_string = string_value(&mut state, "saved thread root");
+        let mut saved = crate::vm::state::LuaThread::new(Val::Nil, state.global);
+        saved.stack[1] = saved_string;
+        saved.top = 2;
+        state.saved_threads.push(saved);
+
+        state.full_gc().expect("full_gc failed");
+
+        match saved_string {
+            Val::Str(string_ref) => {
+                assert!(
+                    state.gc.string_arena.is_valid(string_ref),
+                    "saved thread values should be treated as GC roots"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn full_gc_runs_userdata_finalizers_newest_first() {
+        let mut state = LuaState::new();
+        reset_finalizer_log();
+
+        let metatable = state.gc.alloc_table(Table::new());
+        let finalizer = state.gc.alloc_closure(Closure::Rust(RustClosure::new(
+            finalizer_recorder,
+            "__gc_recorder",
+        )));
+        raw_set_named(&mut state, metatable, "__gc", Val::Function(finalizer));
+
+        let older = Userdata::with_metatable(Box::new(FinalizerMarker { id: 1 }), metatable);
+        let newer = Userdata::with_metatable(Box::new(FinalizerMarker { id: 2 }), metatable);
+        let _older_ref = state.gc.alloc_userdata(older);
+        let _newer_ref = state.gc.alloc_userdata(newer);
+
+        state.full_gc().expect("full_gc failed");
+
+        assert_eq!(read_finalizer_log(), vec![2, 1]);
     }
 }
