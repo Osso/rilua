@@ -1488,3 +1488,223 @@ pub fn db_traceback(state: &mut LuaState) -> LuaResult<u32> {
     state.push(Val::Str(result_ref));
     Ok(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::Lua;
+    use crate::api::{LuaApi, LuaApiMut};
+    use crate::stdlib::StdLib;
+
+    fn new_lua() -> Lua {
+        Lua::new_with(StdLib::BASE | StdLib::DEBUG).expect("failed to create Lua state")
+    }
+
+    fn decode_string(lua: &Lua, value: Val) -> String {
+        match value {
+            Val::Str(string_ref) => lua
+                .state()
+                .gc
+                .string_arena
+                .get(string_ref)
+                .map(|s| String::from_utf8_lossy(s.data()).into_owned())
+                .expect("missing string ref"),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    fn global_bool(lua: &mut Lua, name: &str) -> bool {
+        match lua.get_global_val(name) {
+            Val::Bool(value) => value,
+            other => panic!("expected boolean in {name}, got {other:?}"),
+        }
+    }
+
+    fn global_number(lua: &mut Lua, name: &str) -> f64 {
+        match lua.get_global_val(name) {
+            Val::Num(value) => value,
+            other => panic!("expected number in {name}, got {other:?}"),
+        }
+    }
+
+    fn global_string(lua: &mut Lua, name: &str) -> String {
+        let value = lua.get_global_val(name);
+        decode_string(lua, value)
+    }
+
+    #[test]
+    fn metatable_helpers_bypass_protection_and_support_type_metatables() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            local mt = { __metatable = "protected" }
+            local t = {}
+            set_ok = debug.setmetatable(t, mt)
+            raw_meta_same = debug.getmetatable(t) == mt
+            protected_meta = getmetatable(t) == "protected"
+
+            local num_mt = {}
+            number_set_ok = debug.setmetatable(1, num_mt)
+            number_meta_same = debug.getmetatable(1) == num_mt
+            debug.setmetatable(1, nil)
+            "#,
+        )
+        .expect("metatable helper script failed");
+
+        assert!(global_bool(&mut lua, "set_ok"));
+        assert!(global_bool(&mut lua, "raw_meta_same"));
+        assert!(global_bool(&mut lua, "protected_meta"));
+        assert!(global_bool(&mut lua, "number_set_ok"));
+        assert!(global_bool(&mut lua, "number_meta_same"));
+    }
+
+    #[test]
+    fn getinfo_reports_function_metadata_and_active_lines() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            function sample(a)
+              local info = debug.getinfo(sample, "SufL")
+              info_source = info.source
+              info_what = info.what
+              info_nups = info.nups
+              info_func_same = info.func == sample
+              info_has_lines = type(info.activelines) == "table"
+              info_line_defined_positive = info.linedefined > 0
+              info_last_line_defined_valid = info.lastlinedefined >= info.linedefined
+            end
+
+            function caller()
+              local info = debug.getinfo(1, "n")
+              level_name = info.name
+              level_namewhat = info.namewhat
+            end
+
+            sample(1)
+            caller()
+            "#,
+        )
+        .expect("getinfo script failed");
+
+        assert_eq!(global_string(&mut lua, "info_source"), "=(string)");
+        assert_eq!(global_string(&mut lua, "info_what"), "Lua");
+        assert_eq!(global_number(&mut lua, "info_nups"), 0.0);
+        assert!(global_bool(&mut lua, "info_func_same"));
+        assert!(global_bool(&mut lua, "info_has_lines"));
+        assert!(global_bool(&mut lua, "info_line_defined_positive"));
+        assert!(global_bool(&mut lua, "info_last_line_defined_valid"));
+        assert_eq!(global_string(&mut lua, "level_name"), "caller");
+        assert_eq!(global_string(&mut lua, "level_namewhat"), "global");
+    }
+
+    #[test]
+    fn locals_and_upvalues_expose_live_names_and_values() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            function make_probe(seed)
+              local captured = seed + 1
+              local probe
+              probe = function(arg)
+                local local_name, local_val = debug.getlocal(1, 1)
+                local missing_local_name = select(1, debug.getlocal(1, 99))
+
+                local found_name, found_val = nil, nil
+                local _ = captured
+                for i = 1, 10 do
+                  local name, value = debug.getupvalue(probe, i)
+                  if name == "captured" then
+                    found_name, found_val = name, value
+                  end
+                end
+
+                _G.local_name = local_name
+                _G.local_val = local_val
+                _G.missing_local_name = missing_local_name
+                _G.upvalue_name = found_name
+                _G.upvalue_val = found_val
+                _G.missing_rust_upvalue = select(1, debug.getupvalue(print, 1))
+              end
+              return probe
+            end
+
+            make_probe(4)(9)
+            "#,
+        )
+        .expect("locals/upvalues script failed");
+
+        assert_eq!(global_string(&mut lua, "local_name"), "arg");
+        assert_eq!(global_number(&mut lua, "local_val"), 9.0);
+        assert_eq!(lua.get_global_val("missing_local_name"), Val::Nil);
+        assert_eq!(global_string(&mut lua, "upvalue_name"), "captured");
+        assert_eq!(global_number(&mut lua, "upvalue_val"), 5.0);
+        assert_eq!(lua.get_global_val("missing_rust_upvalue"), Val::Nil);
+    }
+
+    #[test]
+    fn traceback_includes_message_and_frame_names() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            function alpha()
+              local value = beta()
+              return value
+            end
+
+            function beta()
+              return debug.traceback("boom", 1)
+            end
+
+            trace = alpha()
+            passthrough_nil = debug.traceback(nil)
+            "#,
+        )
+        .expect("traceback script failed");
+
+        let trace = global_string(&mut lua, "trace");
+        assert!(trace.starts_with("boom\nstack traceback:"), "got: {trace}");
+        assert!(trace.contains("in function 'beta'"), "got: {trace}");
+        assert!(trace.contains("in function 'alpha'"), "got: {trace}");
+        assert_eq!(lua.get_global_val("passthrough_nil"), Val::Nil);
+    }
+
+    #[test]
+    fn debug_stub_remains_a_noop() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            local results = { debug.debug() }
+            stub_result_count = #results
+            "#,
+        )
+        .expect("debug.debug script failed");
+
+        assert_eq!(global_number(&mut lua, "stub_result_count"), 0.0);
+    }
+
+    #[test]
+    fn getinfo_f_field_returns_same_function_handle() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            function sample()
+              return 1
+            end
+
+            info_func = debug.getinfo(sample, "f").func
+            "#,
+        )
+        .expect("getinfo f-field script failed");
+
+        let info_func: crate::handles::Function = lua.global("info_func").expect("missing func");
+        let sample: crate::handles::Function = lua.global("sample").expect("missing sample");
+        assert_eq!(info_func, sample);
+    }
+}
