@@ -537,6 +537,22 @@ After a confirmed full-suite improvement, refresh `.perf-baseline`:
 ./scripts/bench-puc-rio.sh > .perf-baseline
 ```
 
+Latest check on `2026-04-14`: do not refresh `.perf-baseline` yet.
+
+- `./scripts/perf-regression.sh all` stopped in the smoke phase because
+  `control_flow_dispatch` regressed by `+24.30%` against the saved
+  `perf-smoke` Criterion baseline, which exceeds the current `+20%`
+  smoke threshold.
+- `./scripts/perf-regression.sh gate` still passed the full-suite wall-clock
+  guard at `2700 ms`, but that is worse than the current `.perf-baseline`
+  value of `2630 ms`.
+
+Keep `.perf-baseline` unchanged until both conditions hold at once:
+
+1. The manual smoke workflow stays within the current thresholds.
+2. The full `all.lua` gate shows a real improvement over the saved baseline,
+   not just a non-regression pass.
+
 ### Legacy Full-Suite Helper
 
 `scripts/perf-gate.sh` still exists as a small standalone wall-clock
