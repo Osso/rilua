@@ -189,7 +189,7 @@ fn issecurevariable(state: &mut LuaState) -> LuaResult<u32> {
 
     let Val::Table(table_ref) = table_val else {
         state.push(Val::Bool(true));
-        Ok(1)
+        return Ok(1);
     };
 
     let taint = match key_val {

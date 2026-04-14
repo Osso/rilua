@@ -234,6 +234,7 @@ impl Table {
                 metatable: None,
                 flags: 0,
                 backing: None,
+                slot_taint: None,
             }
         }
     }
