@@ -1378,6 +1378,112 @@ mod tests {
 
     use super::*;
 
+    fn string_key(state: &mut LuaState, name: &str) -> Val {
+        Val::Str(state.gc.intern_string(name.as_bytes()))
+    }
+
+    fn string_value(state: &mut LuaState, value: &str) -> Val {
+        Val::Str(state.gc.intern_string(value.as_bytes()))
+    }
+
+    fn decode_string(state: &LuaState, value: Val) -> String {
+        match value {
+            Val::Str(string_ref) => state
+                .gc
+                .string_arena
+                .get(string_ref)
+                .map(|s| String::from_utf8_lossy(s.data()).into_owned())
+                .expect("missing string ref"),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    fn raw_set_named(
+        state: &mut LuaState,
+        table_ref: crate::vm::gc::arena::GcRef<Table>,
+        name: &str,
+        value: Val,
+    ) {
+        let key = string_key(state, name);
+        state
+            .gc
+            .tables
+            .get_mut(table_ref)
+            .expect("missing table")
+            .raw_set(key, value, &state.gc.string_arena)
+            .expect("raw_set failed");
+    }
+
+    fn raw_get_named(
+        state: &mut LuaState,
+        table_ref: crate::vm::gc::arena::GcRef<Table>,
+        name: &str,
+    ) -> Val {
+        let key = string_key(state, name);
+        state
+            .gc
+            .tables
+            .get(table_ref)
+            .expect("missing table")
+            .get(key, &state.gc.string_arena)
+    }
+
+    fn make_rust_function(
+        state: &mut LuaState,
+        name: &str,
+        func: crate::vm::closure::RustFn,
+    ) -> Val {
+        let closure =
+            crate::vm::closure::Closure::Rust(crate::vm::closure::RustClosure::new(func, name));
+        Val::Function(state.gc.alloc_closure(closure))
+    }
+
+    fn index_returns_magic(state: &mut LuaState) -> LuaResult<u32> {
+        state.push(Val::Num(42.0));
+        Ok(1)
+    }
+
+    fn newindex_writes_to_log(state: &mut LuaState) -> LuaResult<u32> {
+        let log_key = state.gc.intern_string(b"newindex_log");
+        let log_table = {
+            let global = state
+                .gc
+                .tables
+                .get(state.global)
+                .expect("missing global table");
+            match global.get(Val::Str(log_key), &state.gc.string_arena) {
+                Val::Table(table_ref) => table_ref,
+                other => panic!("expected log table, got {other:?}"),
+            }
+        };
+
+        let key = state.stack_get(state.base + 1);
+        let value = state.stack_get(state.base + 2);
+        state
+            .gc
+            .tables
+            .get_mut(log_table)
+            .expect("missing log table")
+            .raw_set(key, value, &state.gc.string_arena)?;
+        Ok(0)
+    }
+
+    fn bool_true(state: &mut LuaState) -> LuaResult<u32> {
+        state.push(Val::Bool(true));
+        Ok(1)
+    }
+
+    fn bool_false(state: &mut LuaState) -> LuaResult<u32> {
+        state.push(Val::Bool(false));
+        Ok(1)
+    }
+
+    fn concat_joined(state: &mut LuaState) -> LuaResult<u32> {
+        let joined = string_value(state, "joined");
+        state.push(joined);
+        Ok(1)
+    }
+
     // ----- LuaState construction -----
 
     #[test]
@@ -1792,5 +1898,270 @@ mod tests {
         set_value(state, "y", 88.0).ok();
         let val = get_value(state, "y");
         assert_eq!(val.ok(), Some(88.0));
+    }
+
+    #[test]
+    fn gettable_follows_index_table_chain() {
+        let mut state = LuaState::new();
+        let source = state.gc.alloc_table(Table::new());
+        let fallback = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+
+        raw_set_named(&mut state, fallback, "answer", Val::Num(99.0));
+        raw_set_named(&mut state, metatable, "__index", Val::Table(fallback));
+        state
+            .gc
+            .tables
+            .get_mut(source)
+            .expect("missing source table")
+            .set_metatable(Some(metatable));
+
+        let answer_key = string_key(&mut state, "answer");
+        let result = state
+            .gettable(Val::Table(source), answer_key)
+            .expect("gettable failed");
+        assert_eq!(result, Val::Num(99.0));
+    }
+
+    #[test]
+    fn gettable_calls_index_metamethod_function() {
+        let mut state = LuaState::new();
+        let source = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+        let index_fn = make_rust_function(&mut state, "__index", index_returns_magic);
+
+        raw_set_named(&mut state, metatable, "__index", index_fn);
+        state
+            .gc
+            .tables
+            .get_mut(source)
+            .expect("missing source table")
+            .set_metatable(Some(metatable));
+
+        let missing_key = string_key(&mut state, "missing");
+        let result = state
+            .gettable(Val::Table(source), missing_key)
+            .expect("gettable failed");
+        assert_eq!(result, Val::Num(42.0));
+    }
+
+    #[test]
+    fn gettable_reports_looping_index_chain() {
+        let mut state = LuaState::new();
+        let first = state.gc.alloc_table(Table::new());
+        let second = state.gc.alloc_table(Table::new());
+        let first_mt = state.gc.alloc_table(Table::new());
+        let second_mt = state.gc.alloc_table(Table::new());
+
+        raw_set_named(&mut state, first_mt, "__index", Val::Table(second));
+        raw_set_named(&mut state, second_mt, "__index", Val::Table(first));
+        state
+            .gc
+            .tables
+            .get_mut(first)
+            .expect("missing first table")
+            .set_metatable(Some(first_mt));
+        state
+            .gc
+            .tables
+            .get_mut(second)
+            .expect("missing second table")
+            .set_metatable(Some(second_mt));
+
+        let missing_key = string_key(&mut state, "missing");
+        let err = state
+            .gettable(Val::Table(first), missing_key)
+            .expect_err("looping __index chain should fail");
+        assert_eq!(err.to_string(), "loop in gettable");
+    }
+
+    #[test]
+    fn settable_writes_through_newindex_table() {
+        let mut state = LuaState::new();
+        let source = state.gc.alloc_table(Table::new());
+        let target = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+
+        raw_set_named(&mut state, metatable, "__newindex", Val::Table(target));
+        state
+            .gc
+            .tables
+            .get_mut(source)
+            .expect("missing source table")
+            .set_metatable(Some(metatable));
+
+        let key = string_key(&mut state, "written");
+        state
+            .settable(Val::Table(source), key, Val::Num(7.0))
+            .expect("settable failed");
+
+        assert_eq!(raw_get_named(&mut state, target, "written"), Val::Num(7.0));
+        assert_eq!(raw_get_named(&mut state, source, "written"), Val::Nil);
+    }
+
+    #[test]
+    fn settable_calls_newindex_metamethod_function() {
+        let mut state = LuaState::new();
+        let source = state.gc.alloc_table(Table::new());
+        let log = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+        let global_ref = state.global;
+        let newindex_fn = make_rust_function(&mut state, "__newindex", newindex_writes_to_log);
+
+        raw_set_named(&mut state, global_ref, "newindex_log", Val::Table(log));
+        raw_set_named(&mut state, metatable, "__newindex", newindex_fn);
+        state
+            .gc
+            .tables
+            .get_mut(source)
+            .expect("missing source table")
+            .set_metatable(Some(metatable));
+
+        let key = string_key(&mut state, "captured");
+        state
+            .settable(Val::Table(source), key, Val::Num(11.0))
+            .expect("settable failed");
+
+        assert_eq!(raw_get_named(&mut state, log, "captured"), Val::Num(11.0));
+    }
+
+    #[test]
+    fn settable_errors_when_indexing_non_table_without_metamethod() {
+        let mut state = LuaState::new();
+        let key = string_key(&mut state, "x");
+        let err = state
+            .settable(Val::Num(1.0), key, Val::Num(2.0))
+            .expect_err("settable should reject plain numbers");
+        assert_eq!(err.to_string(), "attempt to index a number value");
+    }
+
+    #[test]
+    fn api_equal_and_lessthan_use_shared_metamethods() {
+        let mut state = LuaState::new();
+        let left = state.gc.alloc_table(Table::new());
+        let right = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+
+        let lt = make_rust_function(&mut state, "__lt", bool_true);
+        let eq = make_rust_function(&mut state, "__eq", bool_true);
+        raw_set_named(&mut state, metatable, "__lt", lt);
+        raw_set_named(&mut state, metatable, "__eq", eq);
+
+        state
+            .gc
+            .tables
+            .get_mut(left)
+            .expect("missing left table")
+            .set_metatable(Some(metatable));
+        state
+            .gc
+            .tables
+            .get_mut(right)
+            .expect("missing right table")
+            .set_metatable(Some(metatable));
+
+        assert!(
+            state
+                .api_lessthan(Val::Table(left), Val::Table(right))
+                .expect("api_lessthan failed")
+        );
+        assert!(
+            state
+                .api_equal(Val::Table(left), Val::Table(right))
+                .expect("api_equal failed")
+        );
+    }
+
+    #[test]
+    fn api_equal_returns_false_for_different_eq_metamethods() {
+        let mut state = LuaState::new();
+        let left = state.gc.alloc_table(Table::new());
+        let right = state.gc.alloc_table(Table::new());
+        let left_mt = state.gc.alloc_table(Table::new());
+        let right_mt = state.gc.alloc_table(Table::new());
+        let left_eq = make_rust_function(&mut state, "__eq_left", bool_true);
+        let right_eq = make_rust_function(&mut state, "__eq_right", bool_false);
+
+        raw_set_named(&mut state, left_mt, "__eq", left_eq);
+        raw_set_named(&mut state, right_mt, "__eq", right_eq);
+        state
+            .gc
+            .tables
+            .get_mut(left)
+            .expect("missing left table")
+            .set_metatable(Some(left_mt));
+        state
+            .gc
+            .tables
+            .get_mut(right)
+            .expect("missing right table")
+            .set_metatable(Some(right_mt));
+
+        assert!(
+            !state
+                .api_equal(Val::Table(left), Val::Table(right))
+                .expect("api_equal failed")
+        );
+    }
+
+    #[test]
+    fn api_lessthan_and_concat_report_missing_metamethod_errors() {
+        let mut state = LuaState::new();
+        let left = state.gc.alloc_table(Table::new());
+        let right = state.gc.alloc_table(Table::new());
+
+        let err = state
+            .api_lessthan(Val::Table(left), Val::Table(right))
+            .expect_err("api_lessthan should fail without __lt");
+        assert_eq!(err.to_string(), "attempt to compare table with table");
+
+        state.push(Val::Bool(true));
+        state.push(Val::Bool(false));
+        let err = state.api_concat(2).expect_err("api_concat should fail");
+        assert_eq!(err.to_string(), "attempt to concatenate a boolean value");
+    }
+
+    #[test]
+    fn api_concat_uses_concat_metamethod() {
+        let mut state = LuaState::new();
+        let left = state.gc.alloc_table(Table::new());
+        let right = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+        let concat_fn = make_rust_function(&mut state, "__concat", concat_joined);
+
+        raw_set_named(&mut state, metatable, "__concat", concat_fn);
+        state
+            .gc
+            .tables
+            .get_mut(left)
+            .expect("missing left table")
+            .set_metatable(Some(metatable));
+        state
+            .gc
+            .tables
+            .get_mut(right)
+            .expect("missing right table")
+            .set_metatable(Some(metatable));
+
+        state.push(Val::Table(left));
+        state.push(Val::Table(right));
+        state.api_concat(2).expect("api_concat failed");
+        let result = state.pop();
+        assert_eq!(decode_string(&state, result), "joined");
+    }
+
+    #[test]
+    fn lua_api_with_mut_state_create_userdata_metatable_reuses_registry_entry() {
+        let mut lua = Lua::new_empty();
+        let state = &mut lua.state;
+
+        let first = state
+            .create_userdata_metatable("CoverageType")
+            .expect("first metatable creation failed");
+        let second = state
+            .create_userdata_metatable("CoverageType")
+            .expect("second metatable creation failed");
+
+        assert_eq!(first, second);
     }
 }
