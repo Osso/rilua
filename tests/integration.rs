@@ -3353,6 +3353,49 @@ fn debug_getinfo_in_pcall() {
     assert_eq!(stdout, "true\nmain\n");
 }
 
+#[test]
+fn debug_getinfo_survives_gc_during_dumped_chunk_execution() {
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        collectgarbage("setpause", 190)
+        collectgarbage("setstepmul", 180)
+        for i = 1, 20000 do
+            local t = {i, i + 1, i + 2}
+            local s = "str" .. i
+        end
+
+        local src = [[
+            local g = {
+                x = function()
+                    local caller = debug.getinfo(2)
+                    print(caller.name, caller.namewhat)
+                    local current = debug.getinfo(1)
+                    print(current.name, current.namewhat)
+                    return "xixi"
+                end
+            }
+
+            local f = function()
+                return 1 + 1 and (not 1 or g.x())
+            end
+
+            print(f())
+
+            local info = debug.getinfo(f)
+            print(info.what, info.namewhat, info.name == nil, info.func == f)
+        ]]
+
+        local chunk = assert(loadstring(src, "@mini"))
+        local dumped = string.dump(chunk)
+        chunk = assert(loadstring(dumped))
+        chunk()
+        "#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "f\tlocal\nx\tfield\nxixi\nLua\t\ttrue\ttrue\n");
+}
+
 // ---------------------------------------------------------------------------
 // CLI tests (Phase 8d)
 // ---------------------------------------------------------------------------

@@ -1553,6 +1553,19 @@ impl LuaState {
         self.gc.mark_table(registry);
 
         self.gc.mark_gc_roots();
+        self.mark_cached_state_strings();
+    }
+
+    fn mark_cached_state_strings(&mut self) {
+        for &name in &self.hook_event_names {
+            self.gc.mark_value(Val::Str(name));
+        }
+        for &mask in &self.hook_mask_names {
+            self.gc.mark_value(Val::Str(mask));
+        }
+        for &field in &self.debug_info_field_names {
+            self.gc.mark_value(Val::Str(field));
+        }
     }
 
     /// Traverses the main thread's stack, open upvalues, call stack,

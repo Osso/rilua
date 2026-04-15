@@ -947,6 +947,7 @@ fn set_table_str(
         .get_mut(table_ref)
         .ok_or_else(|| simple_error("table not found".into()))?;
     t.raw_set(Val::Str(k), Val::Str(v), &state.gc.string_arena)?;
+    state.gc.barrier_back(table_ref);
     Ok(())
 }
 
@@ -964,6 +965,7 @@ fn set_table_int(
         .get_mut(table_ref)
         .ok_or_else(|| simple_error("table not found".into()))?;
     t.raw_set(Val::Str(k), Val::Num(value as f64), &state.gc.string_arena)?;
+    state.gc.barrier_back(table_ref);
     Ok(())
 }
 
@@ -981,6 +983,7 @@ fn set_table_val(
         .get_mut(table_ref)
         .ok_or_else(|| simple_error("table not found".into()))?;
     t.raw_set(Val::Str(k), value, &state.gc.string_arena)?;
+    state.gc.barrier_back(table_ref);
     Ok(())
 }
 

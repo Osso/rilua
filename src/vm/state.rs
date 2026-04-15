@@ -559,13 +559,13 @@ pub struct LuaState {
     pub hook: HookState,
 
     /// Interned hook event name strings used by `callhook`.
-    hook_event_names: [GcRef<LuaString>; HOOK_EVENT_NAMES.len()],
+    pub(crate) hook_event_names: [GcRef<LuaString>; HOOK_EVENT_NAMES.len()],
 
     /// Interned `debug.gethook()` mask strings indexed by call/ret/line bits.
-    hook_mask_names: [GcRef<LuaString>; HOOK_MASK_NAMES.len()],
+    pub(crate) hook_mask_names: [GcRef<LuaString>; HOOK_MASK_NAMES.len()],
 
     /// Interned `debug.getinfo()` result-table field names.
-    debug_info_field_names: [GcRef<LuaString>; DEBUG_INFO_FIELD_NAMES.len()],
+    pub(crate) debug_info_field_names: [GcRef<LuaString>; DEBUG_INFO_FIELD_NAMES.len()],
 
     /// True if the current thread yielded from a hook dispatch point.
     /// Set by the execute loop when `yield_on_hook` is active, cleared
