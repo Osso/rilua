@@ -12,7 +12,9 @@ use crate::vm::callinfo::CallInfo;
 use crate::vm::closure::Closure;
 use crate::vm::debug_info;
 use crate::vm::gc::arena::GcRef;
-use crate::vm::state::{Gc, HookState, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET};
+use crate::vm::state::{
+    DebugInfoField, Gc, HookState, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET,
+};
 use crate::vm::table::Table;
 use crate::vm::value::Val;
 
@@ -645,6 +647,7 @@ fn getinfo_field_count(options: &str) -> usize {
 fn extract_closure_info(
     state: &LuaState,
     cl_ref: GcRef<crate::vm::closure::Closure>,
+    need_activelines: bool,
 ) -> Option<ClosureInfo> {
     let cl = state.gc.closures.get(cl_ref)?;
     Some(match cl {
@@ -661,7 +664,11 @@ fn extract_closure_info(
             },
             nups: i64::from(lcl.proto.num_upvalues),
             name: String::new(),
-            line_info: lcl.proto.line_info.clone(),
+            line_info: if need_activelines {
+                lcl.proto.line_info.clone()
+            } else {
+                Vec::new()
+            },
         },
         Closure::Rust(rcl) => ClosureInfo {
             is_lua: false,
@@ -778,20 +785,30 @@ pub fn db_getinfo(state: &mut LuaState) -> LuaResult<u32> {
         return Ok(1);
     }
 
-    let info = closure_ref.and_then(|r| extract_closure_info(state, r));
+    let info = closure_ref.and_then(|r| extract_closure_info(state, r, options.contains('L')));
 
     if let Some(info) = &info {
         if options.contains('S') {
-            set_table_str(state, result_table, "source", &info.source)?;
-            set_table_str(state, result_table, "short_src", &info.short_src)?;
-            set_table_int(state, result_table, "linedefined", info.line_defined)?;
+            set_table_str(state, result_table, DebugInfoField::Source, &info.source)?;
+            set_table_str(
+                state,
+                result_table,
+                DebugInfoField::ShortSrc,
+                &info.short_src,
+            )?;
             set_table_int(
                 state,
                 result_table,
-                "lastlinedefined",
+                DebugInfoField::LineDefined,
+                info.line_defined,
+            )?;
+            set_table_int(
+                state,
+                result_table,
+                DebugInfoField::LastLineDefined,
                 info.last_line_defined,
             )?;
-            set_table_str(state, result_table, "what", info.what)?;
+            set_table_str(state, result_table, DebugInfoField::What, info.what)?;
         }
 
         if options.contains('l') {
@@ -804,11 +821,16 @@ pub fn db_getinfo(state: &mut LuaState) -> LuaResult<u32> {
                     current_line(state, ci_i)
                 }
             });
-            set_table_int(state, result_table, "currentline", i64::from(line))?;
+            set_table_int(
+                state,
+                result_table,
+                DebugInfoField::CurrentLine,
+                i64::from(line),
+            )?;
         }
 
         if options.contains('u') {
-            set_table_int(state, result_table, "nups", info.nups)?;
+            set_table_int(state, result_table, DebugInfoField::Nups, info.nups)?;
         }
 
         if options.contains('n') {
@@ -833,15 +855,20 @@ pub fn db_getinfo(state: &mut LuaState) -> LuaResult<u32> {
             };
             // PUC-Rio: only sets "name" if non-NULL; nil otherwise.
             if name.is_empty() {
-                set_table_val(state, result_table, "name", Val::Nil)?;
+                set_table_val(state, result_table, DebugInfoField::Name, Val::Nil)?;
             } else {
-                set_table_str(state, result_table, "name", &name)?;
+                set_table_str(state, result_table, DebugInfoField::Name, &name)?;
             }
-            set_table_str(state, result_table, "namewhat", &namewhat)?;
+            set_table_str(state, result_table, DebugInfoField::NameWhat, &namewhat)?;
         }
 
         if let (true, Some(cl_ref)) = (options.contains('f'), closure_ref) {
-            set_table_val(state, result_table, "func", Val::Function(cl_ref))?;
+            set_table_val(
+                state,
+                result_table,
+                DebugInfoField::Func,
+                Val::Function(cl_ref),
+            )?;
         }
 
         if options.contains('L') && info.is_lua {
@@ -860,7 +887,12 @@ pub fn db_getinfo(state: &mut LuaState) -> LuaResult<u32> {
                     &state.gc.string_arena,
                 )?;
             }
-            set_table_val(state, result_table, "activelines", Val::Table(lines_table))?;
+            set_table_val(
+                state,
+                result_table,
+                DebugInfoField::ActiveLines,
+                Val::Table(lines_table),
+            )?;
         }
     }
 
@@ -877,25 +909,25 @@ fn fill_tail_call_info(
     options: &str,
 ) -> LuaResult<()> {
     if options.contains('S') {
-        set_table_str(state, table_ref, "source", "=(tail call)")?;
-        set_table_str(state, table_ref, "short_src", "(tail call)")?;
-        set_table_int(state, table_ref, "linedefined", -1)?;
-        set_table_int(state, table_ref, "lastlinedefined", -1)?;
-        set_table_str(state, table_ref, "what", "tail")?;
+        set_table_str(state, table_ref, DebugInfoField::Source, "=(tail call)")?;
+        set_table_str(state, table_ref, DebugInfoField::ShortSrc, "(tail call)")?;
+        set_table_int(state, table_ref, DebugInfoField::LineDefined, -1)?;
+        set_table_int(state, table_ref, DebugInfoField::LastLineDefined, -1)?;
+        set_table_str(state, table_ref, DebugInfoField::What, "tail")?;
     }
     if options.contains('l') {
-        set_table_int(state, table_ref, "currentline", -1)?;
+        set_table_int(state, table_ref, DebugInfoField::CurrentLine, -1)?;
     }
     if options.contains('u') {
-        set_table_int(state, table_ref, "nups", 0)?;
+        set_table_int(state, table_ref, DebugInfoField::Nups, 0)?;
     }
     if options.contains('n') {
-        set_table_str(state, table_ref, "name", "")?;
-        set_table_str(state, table_ref, "namewhat", "")?;
+        set_table_str(state, table_ref, DebugInfoField::Name, "")?;
+        set_table_str(state, table_ref, DebugInfoField::NameWhat, "")?;
     }
     if options.contains('f') {
         // func is nil for tail call frames.
-        set_table_val(state, table_ref, "func", Val::Nil)?;
+        set_table_val(state, table_ref, DebugInfoField::Func, Val::Nil)?;
     }
     Ok(())
 }
@@ -904,10 +936,10 @@ fn fill_tail_call_info(
 fn set_table_str(
     state: &mut LuaState,
     table_ref: GcRef<Table>,
-    key: &str,
+    key: DebugInfoField,
     value: &str,
 ) -> LuaResult<()> {
-    let k = state.gc.intern_string(key.as_bytes());
+    let k = state.debug_info_field_key(key);
     let v = state.gc.intern_string(value.as_bytes());
     let t = state
         .gc
@@ -922,10 +954,10 @@ fn set_table_str(
 fn set_table_int(
     state: &mut LuaState,
     table_ref: GcRef<Table>,
-    key: &str,
+    key: DebugInfoField,
     value: i64,
 ) -> LuaResult<()> {
-    let k = state.gc.intern_string(key.as_bytes());
+    let k = state.debug_info_field_key(key);
     let t = state
         .gc
         .tables
@@ -939,10 +971,10 @@ fn set_table_int(
 fn set_table_val(
     state: &mut LuaState,
     table_ref: GcRef<Table>,
-    key: &str,
+    key: DebugInfoField,
     value: Val,
 ) -> LuaResult<()> {
-    let k = state.gc.intern_string(key.as_bytes());
+    let k = state.debug_info_field_key(key);
     let t = state
         .gc
         .tables
@@ -1613,6 +1645,29 @@ mod tests {
         assert!(global_bool(&mut lua, "info_last_line_defined_valid"));
         assert_eq!(global_string(&mut lua, "level_name"), "caller");
         assert_eq!(global_string(&mut lua, "level_namewhat"), "global");
+    }
+
+    #[test]
+    fn getinfo_without_l_option_skips_activelines_table() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            function sample()
+              local info = debug.getinfo(sample, "Sufn")
+              info_has_active_lines = info.activelines ~= nil
+              info_has_func = info.func == sample
+              info_namewhat_type = type(info.namewhat)
+            end
+
+            sample()
+            "#,
+        )
+        .expect("getinfo without L script failed");
+
+        assert!(!global_bool(&mut lua, "info_has_active_lines"));
+        assert!(global_bool(&mut lua, "info_has_func"));
+        assert_eq!(global_string(&mut lua, "info_namewhat_type"), "string");
     }
 
     #[test]
