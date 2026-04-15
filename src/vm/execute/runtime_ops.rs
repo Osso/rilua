@@ -3,6 +3,8 @@
 use crate::error::{LuaResult, chunkid};
 use crate::vm::value::{append_lua_number_bytes, lua_number_string_len};
 
+use super::super::gc::arena::Arena;
+use super::super::string::LuaString;
 use super::{
     CallResult, Closure, Gc, GcRef, LuaState, MAXTAGLOOP, Proto, TMS, Table, Val, arith_error,
     compare_error, gettmbyobj, runtime_error, runtime_error_simple, type_error, val_raw_equal,
@@ -438,8 +440,19 @@ pub(super) fn vm_gettable(
     obj_reg: Option<usize>,
 ) -> LuaResult<()> {
     let mut current = t;
+    let resolved_key = resolve_gettable_key(key, &state.gc);
     for _ in 0..MAXTAGLOOP {
-        match gettable_step(state, current, key, result_reg, proto, pc, base, obj_reg)? {
+        match gettable_step(
+            state,
+            current,
+            key,
+            resolved_key,
+            result_reg,
+            proto,
+            pc,
+            base,
+            obj_reg,
+        )? {
             GettableStep::Done => return Ok(()),
             GettableStep::Continue(next) => current = next,
         }
@@ -457,6 +470,7 @@ fn gettable_step(
     state: &mut LuaState,
     current: Val,
     key: Val,
+    resolved_key: ResolvedGetKey,
     result_reg: usize,
     proto: &Proto,
     pc: usize,
@@ -464,8 +478,46 @@ fn gettable_step(
     obj_reg: Option<usize>,
 ) -> LuaResult<GettableStep> {
     match current {
-        Val::Table(table_ref) => handle_table_gettable(state, current, table_ref, key, result_reg),
+        Val::Table(table_ref) => {
+            handle_table_gettable(state, current, table_ref, key, resolved_key, result_reg)
+        }
         _ => handle_non_table_gettable(state, current, key, result_reg, proto, pc, base, obj_reg),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ResolvedGetKey {
+    Str { key: GcRef<LuaString>, hash: u32 },
+    Int(i64),
+    Other(Val),
+}
+
+fn resolve_gettable_key(key: Val, gc: &Gc) -> ResolvedGetKey {
+    match key {
+        Val::Str(string_ref) => {
+            gc.string_arena
+                .get(string_ref)
+                .map_or(ResolvedGetKey::Other(key), |string| ResolvedGetKey::Str {
+                    key: string_ref,
+                    hash: string.hash(),
+                })
+        }
+        Val::Num(number) => resolve_integer_gettable_key(number)
+            .map_or(ResolvedGetKey::Other(key), ResolvedGetKey::Int),
+        _ => ResolvedGetKey::Other(key),
+    }
+}
+
+fn resolve_integer_gettable_key(number: f64) -> Option<i64> {
+    if !number.is_finite() {
+        return None;
+    }
+    let integer_key = number as i64;
+    #[allow(clippy::float_cmp)]
+    if (integer_key as f64) == number {
+        Some(integer_key)
+    } else {
+        None
     }
 }
 
@@ -474,6 +526,7 @@ fn handle_table_gettable(
     current: Val,
     table_ref: GcRef<Table>,
     key: Val,
+    resolved_key: ResolvedGetKey,
     result_reg: usize,
 ) -> LuaResult<GettableStep> {
     let table = state
@@ -481,7 +534,7 @@ fn handle_table_gettable(
         .tables
         .get(table_ref)
         .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-    let result = table.get(key, &state.gc.string_arena);
+    let result = gettable_fast_result(table, resolved_key, &state.gc.string_arena);
 
     if !result.is_nil() {
         state.stack_set(result_reg, result);
@@ -501,6 +554,14 @@ fn handle_table_gettable(
             Ok(GettableStep::Done)
         }
         Some(tm_val) => Ok(GettableStep::Continue(tm_val)),
+    }
+}
+
+fn gettable_fast_result(table: &Table, key: ResolvedGetKey, strings: &Arena<LuaString>) -> Val {
+    match key {
+        ResolvedGetKey::Str { key, hash } => table.get_str_hashed(key, hash),
+        ResolvedGetKey::Int(integer_key) => table.get_int(integer_key),
+        ResolvedGetKey::Other(raw_key) => table.get(raw_key, strings),
     }
 }
 

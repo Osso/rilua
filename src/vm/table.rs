@@ -816,11 +816,26 @@ impl Table {
             return Val::Nil;
         };
 
-        let mp = hash_pow2(s.hash(), self.hash_size());
+        self.get_str_hashed(key, s.hash())
+    }
+
+    /// Look up a string key using a pre-resolved cached hash.
+    ///
+    /// This avoids re-reading the interned string object when the caller
+    /// already resolved the key and hash once for repeated table access.
+    #[inline]
+    pub fn get_str_hashed(&self, key: GcRef<LuaString>, hash: u32) -> Val {
+        if self.nodes.is_empty() {
+            return Val::Nil;
+        }
+
+        let mp = hash_pow2(hash, self.hash_size());
         let mut cur = Some(mp);
         while let Some(i) = cur {
             let node = &self.nodes[i as usize];
-            if node.key == Val::Str(key) {
+            if let Val::Str(node_key) = node.key
+                && node_key == key
+            {
                 return node.value;
             }
             cur = node.next;
@@ -1443,6 +1458,26 @@ mod tests {
 
         assert_eq!(t.get_str(key_a, &strings_arena), Val::Num(1.0));
         assert_eq!(t.get_str(key_b, &strings_arena), Val::Num(2.0));
+    }
+
+    #[test]
+    fn get_str_hashed_matches_interned_lookup() {
+        let mut strings_arena = Arena::new();
+        let mut str_table = StringTable::new();
+
+        let key = intern_str(&mut strings_arena, &mut str_table, b"cached");
+        let hash = strings_arena
+            .get(key)
+            .map(LuaString::hash)
+            .expect("interned string should exist");
+
+        let mut table = Table::with_sizes(0, 4);
+        table
+            .raw_set(Val::Str(key), Val::Bool(true), &strings_arena)
+            .ok();
+
+        assert_eq!(table.get_str_hashed(key, hash), Val::Bool(true));
+        assert_eq!(table.get_str(key, &strings_arena), Val::Bool(true));
     }
 
     #[test]
