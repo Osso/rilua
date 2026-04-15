@@ -451,7 +451,7 @@ pub fn tab_sort(state: &mut LuaState) -> LuaResult<u32> {
         Val::Nil => SortComparator::Default,
         v @ Val::Function(_) => {
             let call_base = state.top;
-            state.ensure_stack(call_base + 4);
+            state.ensure_stack(4);
             SortComparator::Lua { func: v, call_base }
         }
         _ => return Err(bad_argument("sort", 2, "function expected")),
@@ -481,9 +481,9 @@ fn sort_comp(state: &mut LuaState, a: Val, b: Val, comp: SortComparator) -> LuaR
     match comp {
         SortComparator::Default => default_less_than(state, a, b),
         SortComparator::Lua { func, call_base } => {
-            state.stack_set(call_base, func);
-            state.stack_set(call_base + 1, a);
-            state.stack_set(call_base + 2, b);
+            state.stack[call_base] = func;
+            state.stack[call_base + 1] = a;
+            state.stack[call_base + 2] = b;
             state.top = call_base + 3;
 
             state.call_function(call_base, 1)?;
@@ -491,6 +491,46 @@ fn sort_comp(state: &mut LuaState, a: Val, b: Val, comp: SortComparator) -> LuaR
             let result = state.stack_get(call_base);
             state.top = call_base;
             Ok(result.is_truthy())
+        }
+    }
+}
+
+fn scan_sort_forward(
+    state: &mut LuaState,
+    tref: GcRef<Table>,
+    mut idx: i64,
+    upper: i64,
+    pivot: Val,
+    comp: SortComparator,
+) -> LuaResult<(i64, Val)> {
+    loop {
+        idx += 1;
+        if idx > upper {
+            return Err(simple_error("invalid order function for sorting".into()));
+        }
+        let value = get_raw(state, tref, idx);
+        if !sort_comp(state, value, pivot, comp)? {
+            return Ok((idx, value));
+        }
+    }
+}
+
+fn scan_sort_backward(
+    state: &mut LuaState,
+    tref: GcRef<Table>,
+    lower: i64,
+    mut idx: i64,
+    pivot: Val,
+    comp: SortComparator,
+) -> LuaResult<(i64, Val)> {
+    loop {
+        idx -= 1;
+        if idx < lower {
+            return Err(simple_error("invalid order function for sorting".into()));
+        }
+        let value = get_raw(state, tref, idx);
+        if !sort_comp(state, pivot, value, comp)? {
+            return Ok((idx, value));
         }
     }
 }
@@ -622,37 +662,22 @@ fn auxsort(
         let mut j = u - 1;
 
         loop {
-            // Scan right: find first a[i] >= pivot
-            i += 1;
-            while sort_comp(state, get_raw(state, tref, i), pivot, comp)? {
-                if i > u {
-                    return Err(simple_error("invalid order function for sorting".into()));
-                }
-                i += 1;
-            }
-            // Scan left: find first a[j] <= pivot
-            j -= 1;
-            while sort_comp(state, pivot, get_raw(state, tref, j), comp)? {
-                if j < l {
-                    return Err(simple_error("invalid order function for sorting".into()));
-                }
-                j -= 1;
-            }
+            let (next_i, ai) = scan_sort_forward(state, tref, i, u, pivot, comp)?;
+            i = next_i;
+            let (next_j, aj) = scan_sort_backward(state, tref, l, j, pivot, comp)?;
+            j = next_j;
 
             if j < i {
                 break;
             }
 
             // Swap a[i] and a[j].
-            let ai = get_raw(state, tref, i);
-            let aj = get_raw(state, tref, j);
             swap_sort_values(state, tref, i, ai, j, aj)?;
         }
 
         // Place pivot at position i.
-        let au1 = get_raw(state, tref, u - 1);
         let ai = get_raw(state, tref, i);
-        swap_sort_values(state, tref, u - 1, au1, i, ai)?;
+        swap_sort_values(state, tref, u - 1, pivot, i, ai)?;
 
         // Recurse on smaller partition, loop on larger (tail recursion).
         if i - l < u - i {

@@ -1261,6 +1261,26 @@ fn table_sort_custom_comparator() {
 }
 
 #[test]
+fn table_sort_custom_comparator_grouped_duplicates() {
+    let (stdout, _, code) = run_rilua(
+        r#"
+        local t = {29, 11, 24, 14, 20, 33, 12, 22, 31, 13}
+        table.sort(t, function(a, b)
+            local am = a % 10
+            local bm = b % 10
+            if am == bm then
+                return a < b
+            end
+            return am < bm
+        end)
+        print(table.concat(t, ", "))
+        "#,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "20, 11, 31, 12, 22, 13, 33, 14, 24, 29\n");
+}
+
+#[test]
 fn table_sort_empty() {
     let (stdout, _, code) = run_rilua("local t = {}; table.sort(t); print(#t)");
     assert_eq!(code, 0);
