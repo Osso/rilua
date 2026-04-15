@@ -205,6 +205,18 @@ pub enum OpArgMask {
 }
 
 impl OpCode {
+    /// Converts a valid raw opcode to `OpCode` without the large match table.
+    ///
+    /// Safety: `n` must be `< NUM_OPCODES`. All values in that range map to a
+    /// valid discriminant because `OpCode` is a contiguous `#[repr(u8)]` enum
+    /// from `0..NUM_OPCODES`.
+    #[inline]
+    #[must_use]
+    #[allow(unsafe_code)]
+    unsafe fn from_u8_unchecked(n: u8) -> Self {
+        unsafe { std::mem::transmute::<u8, Self>(n) }
+    }
+
     /// Converts a raw integer to an opcode, if valid.
     #[must_use]
     pub fn from_u8(n: u8) -> Option<Self> {
@@ -487,8 +499,14 @@ impl Instruction {
     #[must_use]
     pub fn opcode(self) -> OpCode {
         let op = (self.0 >> POS_OP) & MASK_OP;
-        #[allow(clippy::cast_possible_truncation)]
-        OpCode::from_u8(op as u8).unwrap_or(OpCode::Move)
+        if op < NUM_OPCODES {
+            #[allow(clippy::cast_possible_truncation, unsafe_code)]
+            unsafe {
+                OpCode::from_u8_unchecked(op as u8)
+            }
+        } else {
+            OpCode::Move
+        }
     }
 
     /// Extracts the A field (bits 6-13).
