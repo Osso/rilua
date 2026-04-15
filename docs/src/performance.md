@@ -246,7 +246,8 @@ CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --rel
 ```
 
 Perf data was captured into `target/perf/*.sym.data` for:
-`constructs.lua`, `nextvar.lua`, `sort.lua`, `db.lua`, and `verybig.lua`.
+`constructs.lua`, `nextvar.lua`, `sort.lua`, `db.lua`, `verybig.lua`,
+and, on a later pass, `errors.lua`.
 
 #### `constructs.lua`
 
@@ -348,6 +349,52 @@ Candidate fixes from this stack:
   fixed and known up front.
 - Treat debug metadata lookup itself as secondary until table-building
   overhead is reduced.
+
+#### `errors.lua` (profiled on 2026-04-14 after the `loadstring` and debug-table wins)
+
+Latest symbolized capture command:
+
+```sh
+CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --release
+cd lua-5.1-tests
+perf record -g --call-graph dwarf -o ../target/perf/errors.sym.data ../target/release/rilua errors.lua
+perf report --stdio -i ../target/perf/errors.sym.data
+```
+
+The dominant symbol on the latest optimized tree is:
+
+- `rilua::stdlib::debug::generate_traceback_raw` (`91.96%` self in the
+  sampled run)
+
+The next visible named entries are much smaller:
+
+- `rilua::vm::execute::runtime_ops::vm_gettable` (`1.53%`)
+- `rilua::vm::execute::execute` (`0.78%`)
+- `rilua::vm::execute::<impl rilua::vm::state::LuaState>::precall` (`0.68%`)
+- `rilua::compiler::parser::Parser::parse_suffixed_expr` (`0.58%`)
+- `rilua::compiler::lexer::Lexer::read_number` (`0.15%`)
+
+Read: the remaining `errors.lua` gap is still runtime-side, not
+parser-syntax-formatting-side. In this profile, traceback construction
+dominates the workload by a very large margin, while parser work is
+visible only as low-single-subpercent parsing activity and syntax-error
+formatting symbols such as `chunkid` / `SyntaxError::to_lua_bytes` do not
+stand out in the sampled hot set.
+
+Inference from the symbols:
+
+- VM runtime-error formatting, especially stack-trace generation, is
+  still the main remaining cost in `errors.lua`.
+- Parser syntax-error formatting is not the current primary limiter on
+  the optimized tree; further wins there are likely to be second-order
+  compared with trimming traceback generation.
+
+Candidate fixes from this stack:
+
+- Reduce repeated full-traceback generation on runtime-error-heavy paths
+  before changing parser syntax formatting again.
+- Focus on `generate_traceback_raw`, its stack-level walk, and frame-line
+  formatting helpers before touching lexer/parser error wording.
 
 #### `verybig.lua`
 
