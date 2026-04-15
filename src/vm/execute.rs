@@ -109,6 +109,50 @@ pub(crate) fn coerce_to_number(val: Val, gc: &Gc) -> Option<f64> {
     }
 }
 
+#[inline]
+fn exact_integer_number(n: f64) -> Option<i64> {
+    const POSITIVE_ZERO_BITS: u64 = 0.0f64.to_bits();
+    const NEGATIVE_ZERO_BITS: u64 = (-0.0f64).to_bits();
+
+    if !n.is_finite() {
+        return None;
+    }
+    let int = n as i64;
+    let round_trip = (int as f64).to_bits();
+    let input = n.to_bits();
+    if round_trip == input
+        || (int == 0 && (input == POSITIVE_ZERO_BITS || input == NEGATIVE_ZERO_BITS))
+    {
+        Some(int)
+    } else {
+        None
+    }
+}
+
+fn coerce_integer_for_loop(init: Val, limit: Val, step: Val, gc: &Gc) -> Option<(i64, i64, i64)> {
+    let init = exact_integer_number(coerce_to_number(init, gc)?)?;
+    let limit = exact_integer_number(coerce_to_number(limit, gc)?)?;
+    let step = exact_integer_number(coerce_to_number(step, gc)?)?;
+    Some((init, limit, step))
+}
+
+fn integer_for_loop_state(state: &LuaState, ra: usize) -> Option<(i64, i64, i64)> {
+    let Val::Num(idx) = state.stack_get(ra) else {
+        return None;
+    };
+    let Val::Num(limit) = state.stack_get(ra + 1) else {
+        return None;
+    };
+    let Val::Num(step) = state.stack_get(ra + 2) else {
+        return None;
+    };
+    Some((
+        exact_integer_number(idx)?,
+        exact_integer_number(limit)?,
+        exact_integer_number(step)?,
+    ))
+}
+
 /// Parse a byte slice as a Lua number (matching PUC-Rio's `luaO_str2d`).
 ///
 /// Uses libc `strtod` for locale-aware decimal parsing. Supports hex
@@ -1416,6 +1460,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let limit = state.stack_get(ra + 1);
                     let step = state.stack_get(ra + 2);
 
+                    if let Some((n_init, n_limit, n_step)) =
+                        coerce_integer_for_loop(init, limit, step, &state.gc)
+                    {
+                        state.stack_set(ra, Val::Num((n_init - n_step) as f64));
+                        state.stack_set(ra + 1, Val::Num(n_limit as f64));
+                        state.stack_set(ra + 2, Val::Num(n_step as f64));
+
+                        let sbx = instr.sbx();
+                        pc = ((pc as i64) + i64::from(sbx)) as usize;
+                        continue;
+                    }
+
                     let n_init = coerce_to_number(init, &state.gc).ok_or_else(|| {
                         runtime_error(&proto, pc, "'for' initial value must be a number")
                     })?;
@@ -1434,6 +1490,25 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 }
 
                 OpCode::ForLoop => {
+                    if let Some((idx, limit, step)) = integer_for_loop_state(state, ra)
+                        && let Some(next_idx) = idx.checked_add(step)
+                    {
+                        let continue_loop = if step > 0 {
+                            next_idx <= limit
+                        } else {
+                            limit <= next_idx
+                        };
+
+                        if continue_loop {
+                            let sbx = instr.sbx();
+                            pc = ((pc as i64) + i64::from(sbx)) as usize;
+                            let next_idx = Val::Num(next_idx as f64);
+                            state.stack_set(ra, next_idx);
+                            state.stack_set(ra + 3, next_idx);
+                        }
+                        continue;
+                    }
+
                     let Val::Num(step) = state.stack_get(ra + 2) else {
                         return Err(runtime_error(&proto, pc, "'for' step is not a number"));
                     };
@@ -2108,6 +2183,40 @@ mod tests {
         // After loop, R(0) should be 3 (last successful index)
         // and R(3) should be 3.
         assert_eq!(state.stack_get(state.base + 3), Val::Num(3.0));
+    }
+
+    #[test]
+    fn op_forloop_descending_integer_step() {
+        // for i=3,1,-1 do end
+        let code = vec![
+            Instruction::a_bx(OpCode::LoadK, 0, 0).raw(), // R(0) = 3 (init)
+            Instruction::a_bx(OpCode::LoadK, 1, 1).raw(), // R(1) = 1 (limit)
+            Instruction::a_bx(OpCode::LoadK, 2, 2).raw(), // R(2) = -1 (step)
+            Instruction::a_sbx(OpCode::ForPrep, 0, 0).raw(),
+            Instruction::a_sbx(OpCode::ForLoop, 0, -1).raw(),
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let constants = vec![Val::Num(3.0), Val::Num(1.0), Val::Num(-1.0)];
+        let mut state = setup_state(make_proto(code, constants));
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base + 3), Val::Num(1.0));
+    }
+
+    #[test]
+    fn op_forloop_fractional_step_still_works() {
+        // for i=1,2,0.5 do end
+        let code = vec![
+            Instruction::a_bx(OpCode::LoadK, 0, 0).raw(), // R(0) = 1 (init)
+            Instruction::a_bx(OpCode::LoadK, 1, 1).raw(), // R(1) = 2 (limit)
+            Instruction::a_bx(OpCode::LoadK, 2, 2).raw(), // R(2) = 0.5 (step)
+            Instruction::a_sbx(OpCode::ForPrep, 0, 0).raw(),
+            Instruction::a_sbx(OpCode::ForLoop, 0, -1).raw(),
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let constants = vec![Val::Num(1.0), Val::Num(2.0), Val::Num(0.5)];
+        let mut state = setup_state(make_proto(code, constants));
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base + 3), Val::Num(2.0));
     }
 
     // ----- Table tests -----
