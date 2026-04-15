@@ -303,6 +303,152 @@ fn register_sort_callback(group: &mut BenchmarkGroup<'_, WallTime>) {
     });
 }
 
+fn register_list_append_manual(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("list_append_manual_1k", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE | StdLib::TABLE).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r"
+            return function()
+                local values = {}
+                local total = 0
+
+                for i = 1, 1000 do
+                    values[#values + 1] = i
+                end
+
+                for i = 1, #values do
+                    total = total + values[i]
+                end
+
+                return total
+            end
+            ",
+            "list_append_manual_1k",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("list append manual bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_list_append_insert(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("list_append_insert_1k", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE | StdLib::TABLE).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r"
+            return function()
+                local values = {}
+                local total = 0
+
+                for i = 1, 1000 do
+                    table.insert(values, i)
+                end
+
+                for i = 1, #values do
+                    total = total + values[i]
+                end
+
+                return total
+            end
+            ",
+            "list_append_insert_1k",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("list append insert bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_list_remove_tail(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("list_remove_tail_1k", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE | StdLib::TABLE).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r"
+            local template = {}
+            for i = 1, 1000 do
+                template[i] = i
+            end
+
+            local values = {}
+
+            local function refill()
+                for i = 1, #template do
+                    values[i] = template[i]
+                end
+            end
+
+            return function()
+                refill()
+                local total = 0
+
+                while #values > 0 do
+                    total = total + table.remove(values)
+                end
+
+                return total
+            end
+            ",
+            "list_remove_tail_1k",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("list remove tail bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_list_remove_head(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("list_remove_head_256", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE | StdLib::TABLE).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r"
+            local template = {}
+            for i = 1, 256 do
+                template[i] = i
+            end
+
+            local values = {}
+
+            local function refill()
+                for i = 1, #template do
+                    values[i] = template[i]
+                end
+            end
+
+            return function()
+                refill()
+                local total = 0
+
+                while #values > 0 do
+                    total = total + table.remove(values, 1)
+                end
+
+                return total
+            end
+            ",
+            "list_remove_head_256",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("list remove head bench failed");
+            black_box(results);
+        });
+    });
+}
+
 fn register_debug_hook_roundtrip(group: &mut BenchmarkGroup<'_, WallTime>) {
     group.bench_function("hook_roundtrip_200", |b| {
         let mut lua = Lua::new_with(StdLib::BASE | StdLib::DEBUG).expect("new failed");
@@ -753,6 +899,10 @@ fn bench_table_ops(c: &mut Criterion) {
         });
     });
 
+    register_list_append_manual(&mut group);
+    register_list_append_insert(&mut group);
+    register_list_remove_tail(&mut group);
+    register_list_remove_head(&mut group);
     register_next_pairs_mixed(&mut group);
     register_sort_callback(&mut group);
 
