@@ -655,6 +655,38 @@ Latest check on `2026-04-14`: do not refresh `.perf-baseline` yet.
   machine:
   - saved `perf-smoke`: about `380.08 µs`
   - fresh same-tree temporary baseline: about `499.08 µs`
+
+Latest check on `2026-04-15`: still do not refresh either the local
+Criterion smoke baseline or `.perf-baseline`.
+
+- `./scripts/perf-regression.sh smoke` passed the Criterion threshold on
+  all four smoke benchmarks:
+  - `control_flow_dispatch`: `312.46 µs` (`-17.79%` vs saved baseline)
+  - `verybig_loaded_chunk`: `668.63 µs` (`+8.41%`, still within the
+    `+20%` threshold)
+  - `next_pairs_mixed_1k`: `4.2249 ms` (`-17.03%`)
+  - `sort_callback_1k`: `1.0064 ms` (`-3.29%`)
+- The same smoke run showed the official per-file subset is not cleanly
+  better across the board yet:
+  - `constructs.lua`: `2.47x`
+  - `nextvar.lua`: `1.44x`
+  - `sort.lua`: `1.75x`
+  - `db.lua`: `0.96x`
+  - `verybig.lua`: `1.69x`
+- `./scripts/perf-regression.sh gate` did not reach the timing gate at
+  all. The full-suite runner failed on run 1.
+- Direct rerun of the hidden gate command showed a real behavioral
+  failure:
+  - `cd lua-5.1-tests && RILUA_TEST_LIB=1 ../target/release/rilua all.lua`
+  - current failure site: `db.lua:26` under `assert`
+
+Decision:
+
+- Do not refresh `perf-smoke` yet. The Criterion smoke numbers are
+  mostly healthier, but the official smoke subset is mixed and the full
+  suite is not currently green.
+- Do not refresh `.perf-baseline` under any circumstance until the
+  `all.lua` failure is fixed and the gate runs to completion again.
   - immediate fresh compare: about `580.50 µs`
   - saved-to-fresh gap: about `+31.31%`
   - fresh-to-new gap: about `+16.31%`, which stays within the current
