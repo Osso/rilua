@@ -701,6 +701,37 @@ Keep `.perf-baseline` unchanged until both conditions hold at once:
 2. The full `all.lua` gate shows a real improvement over the saved baseline,
    not just a non-regression pass.
 
+Latest check on `2026-04-15` after the next two runtime wins: still do
+not refresh either local perf baseline.
+
+- `cd lua-5.1-tests && RILUA_TEST_LIB=1 ../target/release/rilua all.lua`
+  is green again on the current tree.
+  - current wall clock: about `2.13 s`
+- `./scripts/perf-regression.sh smoke` also passed the current Criterion
+  thresholds:
+  - `control_flow_dispatch`: `365.65 µs` (`-3.80%` vs saved baseline)
+  - `verybig_loaded_chunk`: `739.75 µs` (`+19.94%`, barely inside the
+    current `+20%` threshold)
+  - `next_pairs_mixed_1k`: `5.3239 ms` (`+4.56%`)
+  - `sort_callback_1k`: `1.1965 ms` (`+14.99%`)
+- The official smoke subset is still not net-improved across the board,
+  so it does not satisfy the refresh prerequisite yet:
+  - `constructs.lua`: `2.39x`
+  - `nextvar.lua`: `1.57x`
+  - `sort.lua`: `1.76x`
+  - `db.lua`: `1.37x`
+  - `verybig.lua`: `1.60x`
+
+Decision:
+
+- Do not refresh the local Criterion `perf-smoke` baseline yet. The
+  smoke workflow passes, but two of the four Criterion benches are only
+  marginally inside threshold and the official smoke subset is mixed.
+- Do not refresh `.perf-baseline` yet. A green `all.lua` run is now in
+  place, but the current rule requires both a green full suite and a
+  net-improved official smoke subset before any local perf baseline
+  moves.
+
 ### Legacy Full-Suite Helper
 
 `scripts/perf-gate.sh` still exists as a small standalone wall-clock
