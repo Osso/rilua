@@ -248,10 +248,13 @@ fn generate_traceback_raw(
 ) -> String {
     const LEVELS1: usize = 12;
     const LEVELS2: usize = 10;
-
-    let resolve = |level| resolve_stack_level_raw(stack, call_stack, ci, gc, level);
-
-    let mut result = String::new();
+    let traceback = TracebackContext {
+        stack,
+        call_stack,
+        ci,
+        gc,
+    };
+    let mut result = String::with_capacity(estimate_traceback_capacity(msg, traceback));
 
     if !msg.is_empty() {
         result.push_str(msg);
@@ -260,6 +263,118 @@ fn generate_traceback_raw(
 
     result.push_str("stack traceback:");
 
+    if traceback.has_no_tail_calls() {
+        append_traceback_without_tail_calls(&mut result, traceback, start_level, LEVELS1, LEVELS2);
+        return result;
+    }
+
+    append_traceback_with_tail_calls(&mut result, traceback, start_level, LEVELS1, LEVELS2);
+    result
+}
+
+#[derive(Clone, Copy)]
+struct TracebackContext<'a> {
+    stack: &'a [Val],
+    call_stack: &'a [CallInfo],
+    ci: usize,
+    gc: &'a Gc,
+}
+
+impl TracebackContext<'_> {
+    fn has_no_tail_calls(self) -> bool {
+        self.call_stack
+            .get(..=self.ci)
+            .is_none_or(|frames| frames.iter().all(|frame| frame.tail_calls == 0))
+    }
+
+    fn count_frames_without_tail_calls(self) -> usize {
+        let real_frames = self.ci;
+        let has_main_thread_sentinel = self.call_stack.first().is_some_and(|frame| {
+            frame.func < self.stack.len() && matches!(self.stack[frame.func], Val::Nil)
+        });
+        real_frames + usize::from(has_main_thread_sentinel)
+    }
+
+    fn ci_index(self, offset: usize) -> usize {
+        self.ci.saturating_sub(offset)
+    }
+}
+
+fn estimate_traceback_capacity(msg: &str, traceback: TracebackContext<'_>) -> usize {
+    let frame_count = traceback
+        .ci
+        .min(traceback.call_stack.len().saturating_sub(1))
+        + 1;
+    msg.len() + 32 + frame_count * 48
+}
+
+fn append_traceback_without_tail_calls(
+    result: &mut String,
+    traceback: TracebackContext<'_>,
+    start_level: usize,
+    levels1: usize,
+    levels2: usize,
+) {
+    let total_frames = traceback.count_frames_without_tail_calls();
+    if start_level >= total_frames {
+        return;
+    }
+
+    let remaining_frames = total_frames - start_level;
+    let show_split = remaining_frames > levels1 + levels2;
+    let first_frames = if show_split {
+        levels1
+    } else {
+        remaining_frames
+    };
+    let skipped_frames = remaining_frames.saturating_sub(first_frames + levels2);
+
+    append_traceback_frame_range(result, traceback, start_level, first_frames);
+
+    if skipped_frames == 0 {
+        return;
+    }
+
+    result.push_str("\n\t...");
+
+    append_traceback_frame_range(result, traceback, total_frames - levels2, levels2);
+}
+
+fn append_traceback_frame_range(
+    result: &mut String,
+    traceback: TracebackContext<'_>,
+    start: usize,
+    len: usize,
+) {
+    for offset in start..start + len {
+        result.push_str("\n\t");
+        format_frame_line(
+            result,
+            traceback.stack,
+            traceback.call_stack,
+            traceback.ci_index(offset),
+            traceback.gc,
+        );
+    }
+}
+
+fn append_traceback_with_tail_calls(
+    result: &mut String,
+    traceback: TracebackContext<'_>,
+    start_level: usize,
+    levels1: usize,
+    levels2: usize,
+) {
+    let resolve = |level| {
+        resolve_stack_level_raw(
+            traceback.stack,
+            traceback.call_stack,
+            traceback.ci,
+            traceback.gc,
+            level,
+        )
+    };
+
     let mut level = start_level;
     let mut first_part = true;
     loop {
@@ -267,14 +382,14 @@ fn generate_traceback_raw(
             break;
         };
 
-        if level > LEVELS1 && first_part {
-            if resolve(level + LEVELS2).is_some() {
+        if level > levels1 && first_part {
+            if resolve(level + levels2).is_some() {
                 result.push_str("\n\t...");
-                let mut probe = level + LEVELS2;
+                let mut probe = level + levels2;
                 while resolve(probe).is_some() {
                     probe += 1;
                 }
-                level = probe - LEVELS2;
+                level = probe - levels2;
                 first_part = false;
                 continue;
             }
@@ -288,14 +403,18 @@ fn generate_traceback_raw(
                 result.push_str("(tail call): ?");
             }
             StackLevel::Real(ci_idx) => {
-                format_frame_line(&mut result, stack, call_stack, ci_idx, gc);
+                format_frame_line(
+                    result,
+                    traceback.stack,
+                    traceback.call_stack,
+                    ci_idx,
+                    traceback.gc,
+                );
             }
         }
 
         level += 1;
     }
-
-    result
 }
 
 /// Formats a single traceback frame line for a real CI frame.
@@ -1744,6 +1863,31 @@ mod tests {
         assert!(trace.contains("in function 'beta'"), "got: {trace}");
         assert!(trace.contains("in function 'alpha'"), "got: {trace}");
         assert_eq!(lua.get_global_val("passthrough_nil"), Val::Nil);
+    }
+
+    #[test]
+    fn traceback_elides_middle_frames_for_long_stacks() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            local function recurse(n)
+              if n > 0 then
+                local value = recurse(n - 1)
+                return value
+              end
+              return debug.traceback("boom", 1)
+            end
+
+            trace = recurse(24)
+            "#,
+        )
+        .expect("long traceback script failed");
+
+        let trace = global_string(&mut lua, "trace");
+        assert!(trace.contains("\n\t..."), "got: {trace}");
+        assert!(trace.contains("in function 'recurse'"), "got: {trace}");
+        assert!(trace.contains("in main chunk"), "got: {trace}");
     }
 
     #[test]
