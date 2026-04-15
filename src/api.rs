@@ -372,16 +372,28 @@ pub fn state_get_fenv(state: &LuaState, func: &Function) -> LuaResult<Table> {
     Ok(Table(env_ref))
 }
 
-/// Check whether the current call frame runs under secure taint.
+/// Check whether the currently-executing chain of calls runs under clean
+/// (untainted) taint.
 ///
-/// Equivalent to the Lua `issecure()` global: returns `true` when no taint
-/// is active on the currently-executing CallInfo, `false` when any addon
-/// taint string is set. Useful for gating "protected" operations (e.g.
-/// frame attribute mutation) from Rust handlers without round-tripping
+/// Equivalent to the Lua `issecure()` global but walks the entire live
+/// portion of the call stack (`0..=state.ci`): returns `false` if any
+/// frame on the way down carries an addon taint tag. This matches
+/// PUC-Rio / Elune semantics where a tainted caller makes every callee
+/// insecure, even when the callee's own CallInfo hasn't been stamped —
+/// rilua doesn't auto-propagate taint through `CallInfo::new`, so
+/// checking just `ci` would miss tainted ancestors.
+///
+/// Useful for gating "protected" operations (frame attribute writes,
+/// SecureHandler dispatch) from Rust handlers without round-tripping
 /// through Lua.
 pub fn state_is_secure(state: &LuaState) -> bool {
-    state
-        .call_stack
-        .get(state.ci)
-        .is_none_or(|ci| ci.taint.is_none())
+    for depth in 0..=state.ci {
+        let Some(frame) = state.call_stack.get(depth) else {
+            break;
+        };
+        if frame.taint.is_some() {
+            return false;
+        }
+    }
+    true
 }

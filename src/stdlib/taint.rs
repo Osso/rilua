@@ -172,17 +172,20 @@ fn get_or_create_closure_taint_table(state: &mut LuaState) -> crate::vm::gc::are
 
 fn getstacktaint(state: &mut LuaState) -> LuaResult<u32> {
     ensure_runtime_tables(state)?;
-    let taint = state
-        .call_stack
-        .get(state.ci)
-        .and_then(|ci| ci.taint.as_ref());
+    // Report the deepest taint visible to the caller — matches the Elune
+    // `L->stacktaint` semantics where taint persists across calls. Our
+    // per-CI storage requires walking the stack to find it.
+    let taint = (0..=state.ci)
+        .rev()
+        .filter_map(|depth| state.call_stack.get(depth))
+        .find_map(|ci| ci.taint.as_ref());
     match taint {
         Some(name) => {
             let s = state.gc.intern_string(name.as_bytes());
             state.push(Val::Str(s));
             Ok(1)
         }
-        None => Ok(0), // nil
+        None => Ok(0),
     }
 }
 
@@ -197,7 +200,13 @@ fn setstacktaint(state: &mut LuaState) -> LuaResult<u32> {
         Val::Str(_) => decode_taint_name(state, val),
         _ => None,
     };
-    if let Some(ci) = state.call_stack.get_mut(state.ci) {
+    // Apply the taint to the CALLER's CallInfo, not our own. Elune keeps
+    // taint on a single per-thread slot (`L->stacktaint`) that persists
+    // across the call; rilua uses per-CI storage, so the equivalent
+    // "persist past this call" behavior requires writing to the frame
+    // that will keep executing after setstacktaint returns.
+    let target = state.ci.checked_sub(1).unwrap_or(state.ci);
+    if let Some(ci) = state.call_stack.get_mut(target) {
         ci.taint = taint;
     }
     Ok(0)
@@ -220,10 +229,11 @@ fn settaintmode(state: &mut LuaState) -> LuaResult<u32> {
 
 fn issecure(state: &mut LuaState) -> LuaResult<u32> {
     ensure_runtime_tables(state)?;
-    let secure = state
-        .call_stack
-        .get(state.ci)
-        .is_none_or(|ci| ci.taint.is_none());
+    // Walk the live call stack (0..=ci) and report secure only when every
+    // frame is clean. Rilua stores taint per-CallInfo and doesn't auto-
+    // propagate it through `CallInfo::new`, so checking just the current
+    // frame would miss a tainted caller.
+    let secure = crate::api::state_is_secure(state);
     state.push(Val::Bool(secure));
     Ok(1)
 }
