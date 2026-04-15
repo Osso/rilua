@@ -247,8 +247,62 @@ pub trait LuaApiMut: LuaApi {
     }
 
     // -----------------------------------------------------------------------
+    // Function environment (Lua 5.1 setfenv / getfenv)
+    // -----------------------------------------------------------------------
+
+    /// Sets the function environment of a Lua closure.
+    ///
+    /// Equivalent to Lua 5.1's `setfenv(func, env)` / `lua_setfenv`: replaces
+    /// the closure's environment table so global lookups resolve through
+    /// `env` instead of the default `_G`. Inner closures created by the
+    /// function at runtime inherit this environment via OP_CLOSURE.
+    ///
+    /// Returns an error if `func` is not a Lua closure (C/Rust closures
+    /// reject env changes, matching PUC-Rio behavior).
+    fn set_fenv(&mut self, func: &Function, env: &Table) -> LuaResult<()> {
+        let env_ref = env.gc_ref();
+        let state = self.state_mut();
+        let closure = state
+            .gc
+            .closures
+            .get_mut(func.gc_ref())
+            .ok_or_else(|| RuntimeError::new("setfenv: invalid function handle"))?;
+        match closure {
+            Closure::Lua(lua_cl) => {
+                lua_cl.env = env_ref;
+                Ok(())
+            }
+            Closure::Rust(_) => Err(LuaError::Runtime(RuntimeError::new(
+                "'setfenv' cannot change environment of given object",
+            ))),
+        }
+    }
+
+    /// Returns the function environment of a Lua closure.
+    ///
+    /// Equivalent to Lua 5.1's `getfenv(func)` / `lua_getfenv` for Lua
+    /// closures. For Rust/C closures, returns the thread's global env
+    /// (matching PUC-Rio's behavior).
+    fn get_fenv(&mut self, func: &Function) -> LuaResult<Table> {
+        let state = self.state_mut();
+        let closure = state
+            .gc
+            .closures
+            .get(func.gc_ref())
+            .ok_or_else(|| RuntimeError::new("getfenv: invalid function handle"))?;
+        let env_ref = match closure {
+            Closure::Lua(lua_cl) => lua_cl.env,
+            Closure::Rust(_) => state.global,
+        };
+        Ok(Table(env_ref))
+    }
+
+    // -----------------------------------------------------------------------
     // Compilation and loading
     // -----------------------------------------------------------------------
+
+    // (Free-function variants for callers holding `&mut LuaState` directly are
+    // provided below outside the trait.)
 
     /// Compiles Lua source bytes (or loads a binary chunk) and returns a function handle.
     fn load_bytes(&mut self, source: &[u8], name: &str) -> LuaResult<Function> {
@@ -273,4 +327,47 @@ pub trait LuaApiMut: LuaApi {
     fn load(&mut self, source: &str) -> LuaResult<Function> {
         self.load_bytes(source.as_bytes(), "=(string)")
     }
+}
+
+// -----------------------------------------------------------------------
+// State-level helpers (for callers holding `&mut LuaState` directly)
+// -----------------------------------------------------------------------
+
+/// Sets the function environment of a Lua closure via raw state access.
+///
+/// Equivalent to [`LuaApiMut::set_fenv`] but usable from contexts that only
+/// have `&mut LuaState` (e.g. inside a `RustFn` handler or a `with_state`
+/// closure, where the full `Lua` handle is not reachable).
+pub fn state_set_fenv(state: &mut LuaState, func: &Function, env: &Table) -> LuaResult<()> {
+    let env_ref = env.gc_ref();
+    let closure = state
+        .gc
+        .closures
+        .get_mut(func.gc_ref())
+        .ok_or_else(|| RuntimeError::new("setfenv: invalid function handle"))?;
+    match closure {
+        Closure::Lua(lua_cl) => {
+            lua_cl.env = env_ref;
+            Ok(())
+        }
+        Closure::Rust(_) => Err(LuaError::Runtime(RuntimeError::new(
+            "'setfenv' cannot change environment of given object",
+        ))),
+    }
+}
+
+/// Returns the function environment of a Lua closure via raw state access.
+///
+/// Equivalent to [`LuaApiMut::get_fenv`] for callers holding `&mut LuaState`.
+pub fn state_get_fenv(state: &LuaState, func: &Function) -> LuaResult<Table> {
+    let closure = state
+        .gc
+        .closures
+        .get(func.gc_ref())
+        .ok_or_else(|| RuntimeError::new("getfenv: invalid function handle"))?;
+    let env_ref = match closure {
+        Closure::Lua(lua_cl) => lua_cl.env,
+        Closure::Rust(_) => state.global,
+    };
+    Ok(Table(env_ref))
 }
