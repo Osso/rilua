@@ -20,7 +20,7 @@ fn load_returned_function(lua: &mut Lua, source: &str, name: &str) -> Function {
         .expect("bootstrap call failed");
     match results.as_slice() {
         [Val::Function(func)] => Function::from_gc_ref(*func),
-        other => panic!("expected returned function, got {other:?}"),
+        other => unreachable!("expected returned function, got {other:?}"),
     }
 }
 
@@ -99,7 +99,7 @@ fn register_control_flow_dispatch(group: &mut BenchmarkGroup<'_, WallTime>) {
         let mut lua = Lua::new_with(StdLib::BASE).expect("new failed");
         let bench = load_returned_function(
             &mut lua,
-            r#"
+            r"
             return function()
                 local acc = 0
                 for outer = 1, 80 do
@@ -126,7 +126,7 @@ fn register_control_flow_dispatch(group: &mut BenchmarkGroup<'_, WallTime>) {
 
                 return acc
             end
-            "#,
+            ",
             "control_flow_dispatch",
         );
         b.iter(|| {
@@ -260,7 +260,7 @@ fn register_sort_callback(group: &mut BenchmarkGroup<'_, WallTime>) {
         let mut lua = Lua::new_with(StdLib::BASE | StdLib::TABLE).expect("new failed");
         let bench = load_returned_function(
             &mut lua,
-            r#"
+            r"
             local template = {}
             for i = 1, 1000 do
                 template[i] = 1001 - i
@@ -291,13 +291,110 @@ fn register_sort_callback(group: &mut BenchmarkGroup<'_, WallTime>) {
                 end
                 return total
             end
-            "#,
+            ",
             "sort_callback_1k",
         );
         b.iter(|| {
             let results = lua
                 .call_function(black_box(&bench), &[])
                 .expect("sort bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_debug_hook_roundtrip(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("hook_roundtrip_200", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE | StdLib::DEBUG).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r#"
+            local event_total = 0
+            local line_total = 0
+
+            local function leaf(x)
+                return x + 1
+            end
+
+            local function hop(x)
+                return leaf(x) + 1
+            end
+
+            local function hook(event, line)
+                event_total = event_total + #event
+                if line ~= nil then
+                    line_total = line_total + line
+                end
+            end
+
+            return function()
+                event_total = 0
+                line_total = 0
+                local total = 0
+
+                debug.sethook(hook, "crl")
+                for i = 1, 200 do
+                    local current_hook, mask, count = debug.gethook()
+                    if current_hook == hook and mask == "crl" then
+                        total = total + count
+                    end
+                    total = total + hop(i)
+                end
+                debug.sethook()
+
+                return total + event_total + line_total
+            end
+            "#,
+            "debug_hook_roundtrip",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("debug hook bench failed");
+            black_box(results);
+        });
+    });
+}
+
+fn register_loadstring_runtime_errors(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("loadstring_runtime_mix_200", |b| {
+        let mut lua = Lua::new_with(StdLib::BASE).expect("new failed");
+        let bench = load_returned_function(
+            &mut lua,
+            r#"
+            local broken_source = "local x = "
+
+            local function runtime_fail()
+                local value = {}
+                return value + 1
+            end
+
+            return function()
+                local total = 0
+
+                for _ = 1, 200 do
+                    local compiled, syntax_err = loadstring(broken_source)
+                    if compiled ~= nil then
+                        error("expected syntax error")
+                    end
+
+                    local ok, runtime_err = pcall(runtime_fail)
+                    if ok then
+                        error("expected runtime error")
+                    end
+
+                    total = total + #syntax_err + #runtime_err
+                end
+
+                return total
+            end
+            "#,
+            "loadstring_runtime_errors",
+        );
+        b.iter(|| {
+            let results = lua
+                .call_function(black_box(&bench), &[])
+                .expect("error path bench failed");
             black_box(results);
         });
     });
@@ -499,6 +596,19 @@ fn bench_debug_api(c: &mut Criterion) {
     let mut group = c.benchmark_group("debug_api");
 
     register_debug_metadata_roundtrip(&mut group);
+    register_debug_hook_roundtrip(&mut group);
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Error paths
+// ---------------------------------------------------------------------------
+
+fn bench_error_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("error_paths");
+
+    register_loadstring_runtime_errors(&mut group);
 
     group.finish();
 }
@@ -710,6 +820,7 @@ criterion_group!(
     bench_compilation,
     bench_vm_execution,
     bench_debug_api,
+    bench_error_paths,
     bench_gc,
     bench_string_interning,
     bench_table_ops,

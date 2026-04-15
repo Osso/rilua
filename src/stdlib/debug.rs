@@ -1704,10 +1704,10 @@ mod tests {
         let mut lua = new_lua();
 
         lua.exec(
-            r#"
+            r"
             local results = { debug.debug() }
             stub_result_count = #results
-            "#,
+            ",
         )
         .expect("debug.debug script failed");
 
