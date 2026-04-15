@@ -30,6 +30,7 @@ use super::state::{
     Gc, HookEvent, LUA_MINSTACK, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET, MAXCALLS,
     MAXCCALLS,
 };
+use super::string::LuaString;
 use super::table::Table;
 use super::value::{Userdata, Val, append_lua_number_bytes, lua_number_string_len};
 use crate::check_interrupted;
@@ -151,6 +152,60 @@ fn integer_for_loop_state(state: &LuaState, ra: usize) -> Option<(i64, i64, i64)
         exact_integer_number(limit)?,
         exact_integer_number(step)?,
     ))
+}
+
+#[derive(Clone, Copy)]
+enum PlainTableKey {
+    Str { key: GcRef<LuaString>, hash: u32 },
+    Int(i64),
+    Other(Val),
+}
+
+fn resolve_plain_table_key(key: Val, gc: &Gc) -> PlainTableKey {
+    match key {
+        Val::Str(string_ref) => {
+            gc.string_arena
+                .get(string_ref)
+                .map_or(PlainTableKey::Other(key), |string| PlainTableKey::Str {
+                    key: string_ref,
+                    hash: string.hash(),
+                })
+        }
+        Val::Num(number) => {
+            exact_integer_number(number).map_or(PlainTableKey::Other(key), PlainTableKey::Int)
+        }
+        _ => PlainTableKey::Other(key),
+    }
+}
+
+fn try_plain_table_get_ref(
+    state: &mut LuaState,
+    table_ref: GcRef<Table>,
+    key: Val,
+    result_reg: usize,
+) -> bool {
+    let resolved_key = resolve_plain_table_key(key, &state.gc);
+    let Some(table) = state.gc.tables.get(table_ref) else {
+        return false;
+    };
+    if table.metatable().is_some() {
+        return false;
+    }
+
+    let result = match resolved_key {
+        PlainTableKey::Str { key, hash } => table.get_str_hashed(key, hash),
+        PlainTableKey::Int(integer_key) => table.get_int(integer_key),
+        PlainTableKey::Other(raw_key) => table.get(raw_key, &state.gc.string_arena),
+    };
+    state.stack_set(result_reg, result);
+    true
+}
+
+fn try_plain_table_get(state: &mut LuaState, table_val: Val, key: Val, result_reg: usize) -> bool {
+    let Val::Table(table_ref) = table_val else {
+        return false;
+    };
+    try_plain_table_get_ref(state, table_ref, key, result_reg)
 }
 
 /// Parse a byte slice as a Lua number (matching PUC-Rio's `luaO_str2d`).
@@ -1045,8 +1100,10 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::GetGlobal => {
                     let bx = instr.bx() as usize;
                     let key = proto.constants[bx];
-                    state.call_stack[state.ci].saved_pc = pc;
-                    vm_gettable(state, Val::Table(env), key, ra, &proto, pc, base, None)?;
+                    if !try_plain_table_get_ref(state, env, key, ra) {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        vm_gettable(state, Val::Table(env), key, ra, &proto, pc, base, None)?;
+                    }
                 }
 
                 OpCode::SetGlobal => {
@@ -1062,8 +1119,10 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let b = instr.b() as usize;
                     let table_val = state.stack_get(base + b);
                     let key = rk(&state.stack, base, &proto.constants, instr.c());
-                    state.call_stack[state.ci].saved_pc = pc;
-                    vm_gettable(state, table_val, key, ra, &proto, pc, base, Some(b))?;
+                    if !try_plain_table_get(state, table_val, key, ra) {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        vm_gettable(state, table_val, key, ra, &proto, pc, base, Some(b))?;
+                    }
                 }
 
                 OpCode::SetTable => {
@@ -1088,8 +1147,10 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     // R(A+1) := R(B) -- save table for method call
                     state.stack_set(ra + 1, table_val);
                     let key = rk(&state.stack, base, &proto.constants, instr.c());
-                    state.call_stack[state.ci].saved_pc = pc;
-                    vm_gettable(state, table_val, key, ra, &proto, pc, base, Some(b))?;
+                    if !try_plain_table_get(state, table_val, key, ra) {
+                        state.call_stack[state.ci].saved_pc = pc;
+                        vm_gettable(state, table_val, key, ra, &proto, pc, base, Some(b))?;
+                    }
                 }
 
                 // ----- Arithmetic -----
@@ -2273,6 +2334,59 @@ mod tests {
 
         execute(&mut state).ok();
         assert_eq!(state.stack_get(state.base + 1), Val::Num(99.0));
+    }
+
+    #[test]
+    fn op_getglobal_respects_env_index_metamethod() {
+        let mut state = LuaState::new();
+        let key_ref = state.gc.intern_string(b"myvar");
+        let index_key = state.gc.intern_string(b"__index");
+
+        let fallback = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+
+        state
+            .gc
+            .tables
+            .get_mut(fallback)
+            .expect("missing fallback table")
+            .raw_set(Val::Str(key_ref), Val::Num(77.0), &state.gc.string_arena)
+            .expect("fallback raw_set should succeed");
+        state
+            .gc
+            .tables
+            .get_mut(metatable)
+            .expect("missing metatable")
+            .raw_set(
+                Val::Str(index_key),
+                Val::Table(fallback),
+                &state.gc.string_arena,
+            )
+            .expect("metatable raw_set should succeed");
+        state
+            .gc
+            .tables
+            .get_mut(state.global)
+            .expect("missing globals table")
+            .set_metatable(Some(metatable));
+
+        let code = vec![
+            Instruction::a_bx(OpCode::GetGlobal, 0, 0).raw(),
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let constants = vec![Val::Str(key_ref)];
+
+        let proto_rc = ProtoRef::new(make_proto(code, constants));
+        let env = state.global;
+        let cl = LuaClosure::new(proto_rc, env);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base), Val::Num(77.0));
     }
 
     // ----- Len tests -----
