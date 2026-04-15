@@ -63,6 +63,18 @@ pub const MASK_LINE: u8 = 1 << 2; // LUA_MASKLINE
 /// Hook mask bit: fire every N instructions.
 pub const MASK_COUNT: u8 = 1 << 3; // LUA_MASKCOUNT
 
+const HOOK_EVENT_NAMES: [&str; 5] = ["call", "return", "tail return", "count", "line"];
+const HOOK_MASK_NAMES: [&str; 8] = ["", "c", "r", "cr", "l", "cl", "rl", "crl"];
+
+#[derive(Clone, Copy)]
+pub(crate) enum HookEvent {
+    Call = 0,
+    Return = 1,
+    TailReturn = 2,
+    Count = 3,
+    Line = 4,
+}
+
 // ---------------------------------------------------------------------------
 // Gc (garbage collector state -- allocation only, no sweep yet)
 // ---------------------------------------------------------------------------
@@ -337,6 +349,14 @@ impl Default for HookState {
     }
 }
 
+fn cache_hook_event_names(gc: &mut Gc) -> [GcRef<LuaString>; HOOK_EVENT_NAMES.len()] {
+    HOOK_EVENT_NAMES.map(|name| gc.intern_string(name.as_bytes()))
+}
+
+fn cache_hook_mask_names(gc: &mut Gc) -> [GcRef<LuaString>; HOOK_MASK_NAMES.len()] {
+    HOOK_MASK_NAMES.map(|mask| gc.intern_string(mask.as_bytes()))
+}
+
 // ---------------------------------------------------------------------------
 // LuaThread (coroutine)
 // ---------------------------------------------------------------------------
@@ -506,6 +526,12 @@ pub struct LuaState {
     /// Per-thread debug hook state for the currently running thread.
     pub hook: HookState,
 
+    /// Interned hook event name strings used by `callhook`.
+    hook_event_names: [GcRef<LuaString>; HOOK_EVENT_NAMES.len()],
+
+    /// Interned `debug.gethook()` mask strings indexed by call/ret/line bits.
+    hook_mask_names: [GcRef<LuaString>; HOOK_MASK_NAMES.len()],
+
     /// True if the current thread yielded from a hook dispatch point.
     /// Set by the execute loop when `yield_on_hook` is active, cleared
     /// by `auxresume` after handling the hook-yield resume path.
@@ -576,6 +602,8 @@ impl LuaState {
     #[must_use]
     pub fn new() -> Self {
         let mut gc = Gc::new();
+        let hook_event_names = cache_hook_event_names(&mut gc);
+        let hook_mask_names = cache_hook_mask_names(&mut gc);
 
         // Allocate global and registry tables.
         let global = gc.alloc_table(Table::new());
@@ -608,6 +636,8 @@ impl LuaState {
             rng_state: 1, // C standard: default as if srand(1) was called.
             current_thread: None,
             hook: HookState::new(),
+            hook_event_names,
+            hook_mask_names,
             yielded_in_hook: false,
             saved_threads: Vec::new(),
             taint_mode: false,
@@ -685,6 +715,17 @@ impl LuaState {
         } else {
             Val::Nil
         }
+    }
+
+    #[inline]
+    pub(crate) fn hook_event_name(&self, event: HookEvent) -> Val {
+        Val::Str(self.hook_event_names[event as usize])
+    }
+
+    #[inline]
+    pub(crate) fn hook_mask_string(&self, mask: u8) -> Val {
+        let mask_index = usize::from(mask & (MASK_CALL | MASK_RET | MASK_LINE));
+        Val::Str(self.hook_mask_names[mask_index])
     }
 
     // ----- CallInfo helpers -----
@@ -1079,8 +1120,9 @@ mod tests {
         let state = LuaState::new();
         // Two tables allocated (global + registry).
         assert_eq!(state.gc.tables.len(), 2);
-        // 17 interned metamethod name strings from init_tm_names.
-        assert_eq!(state.gc.string_arena.len(), TM_N as u32);
+        // Startup interns metamethod names plus cached debug hook strings.
+        let startup_strings = TM_N + HOOK_EVENT_NAMES.len() + HOOK_MASK_NAMES.len();
+        assert_eq!(state.gc.string_arena.len(), startup_strings as u32);
         assert_eq!(state.gc.closures.len(), 0);
         assert_eq!(state.gc.upvalues.len(), 0);
         assert_eq!(state.gc.userdata.len(), 0);

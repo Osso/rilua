@@ -12,7 +12,7 @@ use crate::vm::callinfo::CallInfo;
 use crate::vm::closure::Closure;
 use crate::vm::debug_info;
 use crate::vm::gc::arena::GcRef;
-use crate::vm::state::{Gc, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET};
+use crate::vm::state::{Gc, HookState, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET};
 use crate::vm::table::Table;
 use crate::vm::value::Val;
 
@@ -73,6 +73,39 @@ fn check_number(state: &LuaState, name: &str, n: usize) -> LuaResult<f64> {
 /// Returns the thread-offset: 1 if arg(0) is a Thread, else 0.
 fn get_thread_offset(state: &LuaState) -> usize {
     usize::from(nargs(state) >= 1 && matches!(arg(state, 0), Val::Thread(_)))
+}
+
+#[inline]
+fn clear_hook_state(hook: &mut HookState) {
+    hook.hook_func = Val::Nil;
+    hook.hook_mask = 0;
+    hook.base_hook_count = 0;
+    hook.hook_count = 0;
+}
+
+#[inline]
+fn install_hook_state(hook: &mut HookState, hook_func: Val, mask: u8, count: i32) {
+    hook.hook_func = hook_func;
+    hook.hook_mask = mask;
+    hook.base_hook_count = count;
+    hook.hook_count = count;
+}
+
+#[inline]
+fn parse_hook_mask(mask_bytes: &[u8], count: i32) -> u8 {
+    let mut mask = 0;
+    for byte in mask_bytes {
+        match *byte {
+            b'c' => mask |= MASK_CALL,
+            b'r' => mask |= MASK_RET,
+            b'l' => mask |= MASK_LINE,
+            _ => {}
+        }
+    }
+    if count > 0 {
+        mask |= MASK_COUNT;
+    }
+    mask
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,19 +1342,7 @@ pub fn db_gethook(state: &mut LuaState) -> LuaResult<u32> {
         state.push(hook_func);
     }
 
-    // Build the mask string (PUC-Rio order: c, r, l).
-    let mut mask_str = String::with_capacity(3);
-    if hook_mask & MASK_CALL != 0 {
-        mask_str.push('c');
-    }
-    if hook_mask & MASK_RET != 0 {
-        mask_str.push('r');
-    }
-    if hook_mask & MASK_LINE != 0 {
-        mask_str.push('l');
-    }
-    let mask_ref = state.gc.intern_string(mask_str.as_bytes());
-    state.push(Val::Str(mask_ref));
+    state.push(state.hook_mask_string(hook_mask));
 
     // Push the count.
     #[allow(clippy::cast_precision_loss)]
@@ -1344,34 +1365,24 @@ pub fn db_sethook(state: &mut LuaState) -> LuaResult<u32> {
             // Thread variant.
             if let Val::Thread(co_ref) = arg(state, 0) {
                 if state.current_thread == Some(co_ref) {
-                    state.hook.hook_func = Val::Nil;
-                    state.hook.hook_mask = 0;
-                    state.hook.base_hook_count = 0;
-                    state.hook.hook_count = 0;
+                    clear_hook_state(&mut state.hook);
                 } else if let Some(thread) = state.gc.threads.get_mut(co_ref) {
-                    thread.hook.hook_func = Val::Nil;
-                    thread.hook.hook_mask = 0;
-                    thread.hook.base_hook_count = 0;
-                    thread.hook.hook_count = 0;
+                    clear_hook_state(&mut thread.hook);
                 }
             }
         } else {
-            state.hook.hook_func = Val::Nil;
-            state.hook.hook_mask = 0;
-            state.hook.base_hook_count = 0;
-            state.hook.hook_count = 0;
+            clear_hook_state(&mut state.hook);
         }
         return Ok(0);
     }
 
     // Parse mask string.
-    let mask_str = match arg(state, arg_offset + 1) {
+    let mask_bytes = match arg(state, arg_offset + 1) {
         Val::Str(r) => state
             .gc
             .string_arena
             .get(r)
-            .map(|s| String::from_utf8_lossy(s.data()).to_string())
-            .unwrap_or_default(),
+            .map_or_else(<&[u8]>::default, crate::vm::string::LuaString::data),
         _ => return Err(bad_argument("sethook", arg_offset + 2, "string expected")),
     };
 
@@ -1391,41 +1402,19 @@ pub fn db_sethook(state: &mut LuaState) -> LuaResult<u32> {
         return Err(bad_argument("sethook", arg_offset + 1, "function expected"));
     }
 
-    // Build the mask.
-    let mut mask: u8 = 0;
-    if mask_str.contains('c') {
-        mask |= MASK_CALL;
-    }
-    if mask_str.contains('r') {
-        mask |= MASK_RET;
-    }
-    if mask_str.contains('l') {
-        mask |= MASK_LINE;
-    }
-    if count > 0 {
-        mask |= MASK_COUNT;
-    }
+    let mask = parse_hook_mask(mask_bytes, count);
 
     // Apply to the appropriate thread.
     if arg_offset == 1 {
         if let Val::Thread(co_ref) = arg(state, 0) {
             if state.current_thread == Some(co_ref) {
-                state.hook.hook_func = hook_arg;
-                state.hook.hook_mask = mask;
-                state.hook.base_hook_count = count;
-                state.hook.hook_count = count;
+                install_hook_state(&mut state.hook, hook_arg, mask, count);
             } else if let Some(thread) = state.gc.threads.get_mut(co_ref) {
-                thread.hook.hook_func = hook_arg;
-                thread.hook.hook_mask = mask;
-                thread.hook.base_hook_count = count;
-                thread.hook.hook_count = count;
+                install_hook_state(&mut thread.hook, hook_arg, mask, count);
             }
         }
     } else {
-        state.hook.hook_func = hook_arg;
-        state.hook.hook_mask = mask;
-        state.hook.base_hook_count = count;
-        state.hook.hook_count = count;
+        install_hook_state(&mut state.hook, hook_arg, mask, count);
     }
 
     Ok(0)
@@ -1712,6 +1701,39 @@ mod tests {
         .expect("debug.debug script failed");
 
         assert_eq!(global_number(&mut lua, "stub_result_count"), 0.0);
+    }
+
+    #[test]
+    fn sethook_and_gethook_roundtrip_state() {
+        let mut lua = new_lua();
+
+        lua.exec(
+            r#"
+            local function hook(event, line)
+              return event, line
+            end
+
+            debug.sethook(hook, "lcr", 7)
+            local current_hook, mask, count = debug.gethook()
+            hook_same = current_hook == hook
+            hook_mask = mask
+            hook_count = count
+
+            debug.sethook()
+            local off_hook, off_mask, off_count = debug.gethook()
+            hook_cleared = off_hook == nil
+            cleared_mask = off_mask
+            cleared_count = off_count
+            "#,
+        )
+        .expect("sethook/gethook script failed");
+
+        assert!(global_bool(&mut lua, "hook_same"));
+        assert_eq!(global_string(&mut lua, "hook_mask"), "crl");
+        assert_eq!(global_number(&mut lua, "hook_count"), 7.0);
+        assert!(global_bool(&mut lua, "hook_cleared"));
+        assert_eq!(global_string(&mut lua, "cleared_mask"), "");
+        assert_eq!(global_number(&mut lua, "cleared_count"), 0.0);
     }
 
     #[test]

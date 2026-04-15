@@ -27,7 +27,8 @@ use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
 use super::proto::ProtoRef;
 use super::proto::{Proto, VARARG_ISVARARG, VARARG_NEEDSARG};
 use super::state::{
-    Gc, LUA_MINSTACK, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET, MAXCALLS, MAXCCALLS,
+    Gc, HookEvent, LUA_MINSTACK, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET, MAXCALLS,
+    MAXCCALLS,
 };
 use super::table::Table;
 use super::value::{Userdata, Val, append_lua_number_bytes, lua_number_string_len};
@@ -369,7 +370,7 @@ impl LuaState {
     /// - Sets `allow_hook = false` to prevent recursive hook calls
     /// - Pushes the hook function, event string, and line number (or nil)
     /// - Calls the hook with 2 arguments and 0 results
-    pub fn callhook(&mut self, event: &str, line: i32) -> LuaResult<()> {
+    pub(crate) fn callhook(&mut self, event: HookEvent, line: i32) -> LuaResult<()> {
         if !self.hook.allow_hook {
             return Ok(());
         }
@@ -390,9 +391,8 @@ impl LuaState {
         self.hook.allow_hook = false;
 
         let call_base = self.top;
-        let event_ref = self.gc.intern_string(event.as_bytes());
         self.stack_set(call_base, hook_func);
-        self.stack_set(call_base + 1, Val::Str(event_ref));
+        self.stack_set(call_base + 1, self.hook_event_name(event));
         if line >= 0 {
             #[allow(clippy::cast_precision_loss)]
             self.stack_set(call_base + 2, Val::Num(f64::from(line)));
@@ -556,7 +556,7 @@ impl LuaState {
                 // Hooks expect savedpc to point past the first instruction.
                 if self.hook.hook_mask & MASK_CALL != 0 {
                     self.call_stack[self.ci].saved_pc += 1;
-                    self.callhook("call", -1)?;
+                    self.callhook(HookEvent::Call, -1)?;
                     self.call_stack[self.ci].saved_pc =
                         self.call_stack[self.ci].saved_pc.saturating_sub(1);
                 }
@@ -580,7 +580,7 @@ impl LuaState {
 
                 // Fire call hook (PUC-Rio: luaD_precall lines 316-317).
                 if self.hook.hook_mask & MASK_CALL != 0 {
-                    self.callhook("call", -1)?;
+                    self.callhook(HookEvent::Call, -1)?;
                 }
 
                 // Execute the Rust function.
@@ -607,11 +607,11 @@ impl LuaState {
         // first_result is saved/restored as an offset.
         if self.hook.hook_mask & MASK_RET != 0 {
             let fr_offset = first_result;
-            let _ = self.callhook("return", -1);
+            let _ = self.callhook(HookEvent::Return, -1);
             // Handle tail return hooks (PUC-Rio: callrethooks lines 335-336).
             let tail_calls = self.call_stack[self.ci].tail_calls;
             for _ in 0..tail_calls {
-                let _ = self.callhook("tail return", -1);
+                let _ = self.callhook(HookEvent::TailReturn, -1);
             }
             first_result = fr_offset;
         }
@@ -896,9 +896,17 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
             // The decrement runs every instruction when line or count hooks
             // are set. traceexec fires when counter reaches zero OR line
             // hooks are active.
-            if (state.hook.hook_mask & (MASK_LINE | MASK_COUNT)) != 0 {
-                state.hook.hook_count -= 1;
-                if state.hook.hook_count == 0 || (state.hook.hook_mask & MASK_LINE) != 0 {
+            let trace_mask = state.hook.hook_mask & (MASK_LINE | MASK_COUNT);
+            if trace_mask != 0 {
+                let has_count_hook = trace_mask & MASK_COUNT != 0;
+                let has_line_hook = trace_mask & MASK_LINE != 0;
+                let count_hook_fired = if has_count_hook {
+                    state.hook.hook_count -= 1;
+                    state.hook.hook_count == 0
+                } else {
+                    false
+                };
+                if count_hook_fired || has_line_hook {
                     // npc = index of the current instruction (pc was advanced).
                     // Equivalent to PUC-Rio's pcRel(pc, p) = (pc - code) - 1.
                     let npc = pc - 1;
@@ -909,19 +917,19 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
 
                     // Count hook: fire when hookcount reaches zero
                     // (PUC-Rio: traceexec lines 64-68).
-                    if state.hook.hook_mask > MASK_LINE && state.hook.hook_count == 0 {
+                    if count_hook_fired {
                         state.hook.hook_count = state.hook.base_hook_count;
                         if state.hook.yield_on_hook {
                             state.call_stack[state.ci].saved_pc = npc;
                             state.yielded_in_hook = true;
                             return Err(LuaError::Yield(0));
                         }
-                        state.callhook("count", -1)?;
+                        state.callhook(HookEvent::Count, -1)?;
                     }
 
                     // Line hook: fire on new function entry, jump back,
                     // or new source line (PUC-Rio: traceexec lines 70-78).
-                    if (state.hook.hook_mask & MASK_LINE) != 0 {
+                    if has_line_hook {
                         #[allow(clippy::cast_possible_wrap)]
                         let newline = proto.line_info.get(npc).copied().unwrap_or(0) as i32;
                         let should_fire = npc == 0 || pc <= old_pc || {
@@ -936,7 +944,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                                 state.yielded_in_hook = true;
                                 return Err(LuaError::Yield(0));
                             }
-                            state.callhook("line", newline)?;
+                            state.callhook(HookEvent::Line, newline)?;
                         }
                     }
 
