@@ -9,7 +9,7 @@ use crate::vm::instructions::{LUAI_MAXUPVALUES, LUAI_MAXVARS};
 
 use super::ast::{BinOp, Block, Expr, FuncBody, FuncName, Stat, TableField, UnOp};
 use super::lexer::Lexer;
-use super::token::{Span, Token};
+use super::token::{Span, Token, TokenKind};
 
 /// Per-function scope tracking for local/upvalue limit checking.
 /// Mirrors PUC-Rio's FuncState fields (nactvar, upvalues[]).
@@ -46,6 +46,8 @@ pub struct Parser<'a> {
     lexer: Lexer<'a>,
     /// Current token.
     current: Token,
+    /// Cheap classification of the current token for hot parser checks.
+    current_kind: TokenKind,
     /// Span of the current token.
     span: Span,
     /// Line of the last consumed token (PUC-Rio: `ls->lastline`).
@@ -85,9 +87,11 @@ impl<'a> Parser<'a> {
     /// Used by `compile_with_reader` to pass a reader-based lexer.
     pub fn from_lexer(mut lexer: Lexer<'a>) -> LuaResult<Self> {
         let (current, span) = lexer.next()?;
+        let current_kind = current.kind();
         Ok(Self {
             lexer,
             current,
+            current_kind,
             span,
             lastline: 1,
             loop_depth: 0,
@@ -218,6 +222,7 @@ impl<'a> Parser<'a> {
         // PUC-Rio: ls->lastline = ls->linenumber (before reading next token)
         self.lastline = prev_span.line;
         let (tok, span) = self.lexer.next()?;
+        self.current_kind = tok.kind();
         self.current = tok;
         self.span = span;
         Ok((prev_token, prev_span))
@@ -225,12 +230,23 @@ impl<'a> Parser<'a> {
 
     /// Returns true if the current token matches the expected token.
     fn check(&self, expected: &Token) -> bool {
-        self.current == *expected
+        self.current_kind == expected.kind()
     }
 
     /// Returns true if the current token is a `Char` with the given byte.
     fn check_char(&self, ch: u8) -> bool {
-        self.current == Token::Char(ch)
+        self.current_kind == TokenKind::Char(ch)
+    }
+
+    fn is_block_follow(&self) -> bool {
+        matches!(
+            self.current_kind,
+            TokenKind::Else
+                | TokenKind::ElseIf
+                | TokenKind::End
+                | TokenKind::Until
+                | TokenKind::Eos
+        )
     }
 
     /// Consumes the current token if it matches, returns true if consumed.
@@ -245,7 +261,12 @@ impl<'a> Parser<'a> {
 
     /// Consumes the current token if it's a `Char` matching `ch`.
     fn test_next_char(&mut self, ch: u8) -> LuaResult<bool> {
-        self.test_next(&Token::Char(ch))
+        if self.check_char(ch) {
+            self.advance()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Expects the current token to match, or returns an error.
@@ -261,23 +282,28 @@ impl<'a> Parser<'a> {
 
     /// Expects a `Char` token with the given byte.
     fn expect_char(&mut self, ch: u8) -> LuaResult<Span> {
-        self.expect(&Token::Char(ch))
+        if self.check_char(ch) {
+            let span = self.span;
+            self.advance()?;
+            Ok(span)
+        } else {
+            Err(self.error_expected(&Token::Char(ch).token2str()))
+        }
     }
 
     /// Expects a `Name` token and returns the name string.
     fn expect_name(&mut self) -> LuaResult<(String, Span)> {
         let span = self.span;
-        match &self.current {
-            Token::Name(_) => {
-                let (tok, _) = self.advance()?;
-                if let Token::Name(name) = tok {
-                    Ok((name, span))
-                } else {
-                    // Unreachable: we checked above
-                    Err(self.error_expected("<name>"))
-                }
-            }
-            _ => Err(self.error_expected("<name>")),
+        if self.current_kind != TokenKind::Name {
+            return Err(self.error_expected("<name>"));
+        }
+
+        let (tok, _) = self.advance()?;
+        if let Token::Name(name) = tok {
+            Ok((name, span))
+        } else {
+            // Unreachable: we checked above.
+            Err(self.error_expected("<name>"))
         }
     }
 
@@ -396,7 +422,7 @@ impl<'a> Parser<'a> {
 
         let mut stmts = Vec::with_capacity(BLOCK_STMT_CAPACITY);
         loop {
-            if self.current.is_block_follow() {
+            if self.is_block_follow() {
                 break;
             }
 
@@ -702,7 +728,7 @@ impl<'a> Parser<'a> {
         // The single optional ';' is consumed by chunk() after the stat.
         self.advance()?; // consume 'return'
 
-        let values = if self.current.is_block_follow() || self.check_char(b';') {
+        let values = if self.is_block_follow() || self.check_char(b';') {
             Vec::new()
         } else {
             self.parse_expr_list()?

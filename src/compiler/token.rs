@@ -108,6 +108,43 @@ pub enum Token {
     Eos,
 }
 
+/// Cheap token classification for parser hot paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    And,
+    Break,
+    Do,
+    Else,
+    ElseIf,
+    End,
+    False,
+    For,
+    Function,
+    If,
+    In,
+    Local,
+    Nil,
+    Not,
+    Or,
+    Repeat,
+    Return,
+    Then,
+    True,
+    Until,
+    While,
+    Concat,
+    Dots,
+    Eq,
+    Ge,
+    Le,
+    Ne,
+    Number,
+    Name,
+    Str,
+    Char(u8),
+    Eos,
+}
+
 /// All 21 reserved words in PUC-Rio order (alphabetical).
 /// Used by tests to validate `lookup_keyword` correctness.
 #[cfg(test)]
@@ -197,6 +234,44 @@ pub(crate) fn lookup_keyword(bytes: &[u8]) -> Option<Token> {
 }
 
 impl Token {
+    #[must_use]
+    pub fn kind(&self) -> TokenKind {
+        match self {
+            Self::And => TokenKind::And,
+            Self::Break => TokenKind::Break,
+            Self::Do => TokenKind::Do,
+            Self::Else => TokenKind::Else,
+            Self::ElseIf => TokenKind::ElseIf,
+            Self::End => TokenKind::End,
+            Self::False => TokenKind::False,
+            Self::For => TokenKind::For,
+            Self::Function => TokenKind::Function,
+            Self::If => TokenKind::If,
+            Self::In => TokenKind::In,
+            Self::Local => TokenKind::Local,
+            Self::Nil => TokenKind::Nil,
+            Self::Not => TokenKind::Not,
+            Self::Or => TokenKind::Or,
+            Self::Repeat => TokenKind::Repeat,
+            Self::Return => TokenKind::Return,
+            Self::Then => TokenKind::Then,
+            Self::True => TokenKind::True,
+            Self::Until => TokenKind::Until,
+            Self::While => TokenKind::While,
+            Self::Concat => TokenKind::Concat,
+            Self::Dots => TokenKind::Dots,
+            Self::Eq => TokenKind::Eq,
+            Self::Ge => TokenKind::Ge,
+            Self::Le => TokenKind::Le,
+            Self::Ne => TokenKind::Ne,
+            Self::Number(_) => TokenKind::Number,
+            Self::Name(_) => TokenKind::Name,
+            Self::Str(_) => TokenKind::Str,
+            Self::Char(ch) => TokenKind::Char(*ch),
+            Self::Eos => TokenKind::Eos,
+        }
+    }
+
     /// Returns the unquoted token name for error messages.
     ///
     /// Matches PUC-Rio's `luaX_token2str`: returns the raw string without
@@ -397,6 +472,15 @@ mod tests {
         assert_eq!(format!("{}", Token::Name("x".into())), "x");
         assert_eq!(format!("{}", Token::Char(b'+')), "+");
         assert_eq!(format!("{}", Token::Eos), "<eof>");
+    }
+
+    #[test]
+    fn token_kind_erases_payload_but_preserves_syntax_kind() {
+        assert_eq!(Token::Name("x".into()).kind(), TokenKind::Name);
+        assert_eq!(Token::Number(1.5).kind(), TokenKind::Number);
+        assert_eq!(Token::Str(b"hi".to_vec()).kind(), TokenKind::Str);
+        assert_eq!(Token::Char(b'(').kind(), TokenKind::Char(b'('));
+        assert_eq!(Token::ElseIf.kind(), TokenKind::ElseIf);
     }
 
     #[test]
