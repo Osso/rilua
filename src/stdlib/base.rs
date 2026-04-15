@@ -979,24 +979,21 @@ pub fn lua_loadstring(state: &mut LuaState) -> LuaResult<u32> {
         return Err(bad_argument("loadstring", 1, "string expected"));
     };
 
-    let source = state
-        .gc
-        .string_arena
-        .get(src_ref)
-        .map(|s| s.data().to_vec())
-        .unwrap_or_default();
-
-    let compile_result = if let Val::Str(r) = name_val {
-        compile_with_source_chunk_name(
-            &source,
-            state
+    let compile_result = {
+        let source = state
+            .gc
+            .string_arena
+            .get(src_ref)
+            .map_or_else(<&[u8]>::default, crate::vm::string::LuaString::data);
+        let explicit_name = match name_val {
+            Val::Str(r) => state
                 .gc
                 .string_arena
                 .get(r)
                 .map(crate::vm::string::LuaString::data),
-        )
-    } else {
-        compile_with_source_chunk_name(&source, None)
+            _ => None,
+        };
+        compile_with_source_chunk_name(source, explicit_name)
     };
 
     Ok(push_load_result(state, compile_result))
