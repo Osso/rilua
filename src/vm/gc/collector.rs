@@ -1503,18 +1503,32 @@ impl LuaState {
     ///
     /// Budget = `(GCSTEPSIZE / 100) * gc_stepmul`.
     /// If stepmul is 0, runs with no limit (effectively a full cycle).
-    pub fn gc_step_auto(&mut self) -> LuaResult<()> {
+    fn gc_auto_step_budget(&self) -> i64 {
         let stepmul = i64::from(self.gc.gc_state.gc_stepmul);
-        let budget = if stepmul == 0 {
-            i64::MAX / 2 // no limit
-        } else {
-            (GCSTEPSIZE as i64 / 100) * stepmul
-        };
+        if stepmul == 0 {
+            return i64::MAX / 2;
+        }
 
+        let base_budget = (GCSTEPSIZE as i64 / 100) * stepmul;
+        if self.gc.gc_state.phase == GcPhase::Pause || self.gc.gc_state.gc_debt < GCSTEPSIZE as i64
+        {
+            return base_budget;
+        }
+
+        // Once a cycle is active and a full step of debt is still outstanding,
+        // a single expensive propagate/sweep step can otherwise spill over
+        // many later VM operations. Give auto-steps a modestly larger budget
+        // so iteration-heavy code can pay off in-flight collector work with
+        // fewer checkpoints.
+        base_budget.saturating_mul(2)
+    }
+
+    pub fn gc_step_auto(&mut self) -> LuaResult<()> {
         // Accumulate debt.
         self.gc.gc_state.gc_debt +=
             self.gc.gc_state.total_bytes as i64 - self.gc.gc_state.gc_threshold as i64;
 
+        let budget = self.gc_auto_step_budget();
         self.gc_step(budget)?;
         Ok(())
     }
@@ -1918,6 +1932,35 @@ mod tests {
         assert!(matches!(result, Err(LuaError::Memory)));
         assert_ne!(state.gc.gc_state.phase, GcPhase::Pause);
         assert!(!state.gc.gc_state.gc_running, "gc_running should be reset");
+    }
+
+    #[test]
+    fn gc_auto_step_budget_uses_base_budget_in_pause_phase() {
+        let mut state = LuaState::new();
+        state.gc.gc_state.gc_stepmul = 200;
+        state.gc.gc_state.phase = GcPhase::Pause;
+
+        assert_eq!(state.gc_auto_step_budget(), 2000);
+    }
+
+    #[test]
+    fn gc_auto_step_budget_stays_base_when_active_cycle_debt_is_small() {
+        let mut state = LuaState::new();
+        state.gc.gc_state.gc_stepmul = 200;
+        state.gc.gc_state.phase = GcPhase::Propagate;
+        state.gc.gc_state.gc_debt = (GCSTEPSIZE as i64) - 1;
+
+        assert_eq!(state.gc_auto_step_budget(), 2000);
+    }
+
+    #[test]
+    fn gc_auto_step_budget_scales_up_for_active_cycles_with_backlog() {
+        let mut state = LuaState::new();
+        state.gc.gc_state.gc_stepmul = 200;
+        state.gc.gc_state.phase = GcPhase::Propagate;
+        state.gc.gc_state.gc_debt = GCSTEPSIZE as i64;
+
+        assert_eq!(state.gc_auto_step_budget(), 4000);
     }
 
     #[test]
