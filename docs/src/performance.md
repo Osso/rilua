@@ -396,6 +396,43 @@ Candidate fixes from this stack:
 - Focus on `generate_traceback_raw`, its stack-level walk, and frame-line
   formatting helpers before touching lexer/parser error wording.
 
+#### `events.lua` follow-up (rechecked on 2026-04-15)
+
+The remaining `events.lua` question was whether there was still a real
+gap hidden behind timer noise, and whether `hook_roundtrip_200` was too
+broad to explain it.
+
+Repeated standalone official-test runs say there is no current gap to
+chase:
+
+```sh
+./scripts/benchmark-tests.sh 20 events.lua
+./scripts/benchmark-tests.sh 20 events.lua
+./scripts/benchmark-tests.sh 20 events.lua
+```
+
+All three reruns landed at parity:
+
+- `events.lua`: `2 ms` PUC-Rio vs `2 ms` rilua (`1.00x`) on every 20-run sample
+
+The existing hook benchmark also looks stable on the current tree:
+
+```sh
+cargo bench --bench interpreter -- --noplot hook_roundtrip_200
+```
+
+Criterion reported:
+
+- `debug_api/hook_roundtrip_200`: `312.69 µs .. 325.80 µs`
+- change vs the immediately prior benchmark baseline:
+  `-4.2994% .. +0.1059%` (`p = 0.06`, no change detected)
+
+Read: `events.lua` is already at parity under repeated runs, so there is
+no remaining variance signal that justifies adding a narrower event-only
+Criterion case right now. Keep `hook_roundtrip_200` as the existing
+debug-event probe and only add another microbenchmark if `events.lua`
+opens a real gap again on a future tree.
+
 #### `verybig.lua`
 
 This case mixes execution, hashing, and front-end work:
