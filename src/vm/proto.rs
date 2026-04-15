@@ -47,6 +47,17 @@ pub struct LocalVar {
     pub end_pc: u32,
 }
 
+/// Unpatched string constant emitted by the compiler or undumper.
+#[derive(Debug, Clone)]
+pub struct StringPoolEntry {
+    /// Constant-pool index holding the placeholder `Val::Nil`.
+    pub index: u32,
+    /// Raw string bytes.
+    pub bytes: Vec<u8>,
+    /// Cached Lua hash for `bytes`, reused during GC interning.
+    pub hash: u32,
+}
+
 /// Compiled function prototype.
 ///
 /// Contains everything needed to instantiate a closure at runtime:
@@ -82,7 +93,7 @@ pub struct Proto {
     /// String constants awaiting GC interning. Each entry maps a constant
     /// pool index to the raw string bytes. Populated by the compiler,
     /// consumed by `patch_string_constants` before execution.
-    pub string_pool: Vec<(u32, Vec<u8>)>,
+    pub string_pool: Vec<StringPoolEntry>,
 }
 
 impl Proto {

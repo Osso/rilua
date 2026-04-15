@@ -517,9 +517,9 @@ pub(crate) fn compile_or_undump(source: &[u8], name: &str) -> LuaResult<ProtoRef
 /// interns each string via the GC and replaces the placeholder with
 /// the real `Val::Str` value. Recurses into child protos.
 pub(crate) fn patch_string_constants(proto: &mut Proto, gc: &mut Gc) {
-    for (idx, bytes) in proto.string_pool.drain(..) {
-        let str_ref = gc.intern_string(&bytes);
-        proto.constants[idx as usize] = Val::Str(str_ref);
+    for entry in proto.string_pool.drain(..) {
+        let str_ref = gc.intern_string_hashed(&entry.bytes, entry.hash);
+        proto.constants[entry.index as usize] = Val::Str(str_ref);
     }
     for child in &mut proto.protos {
         patch_string_constants(ProtoRef::make_mut(child), gc);

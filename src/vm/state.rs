@@ -147,6 +147,19 @@ impl Gc {
         r
     }
 
+    /// Interns a string using a caller-provided cached Lua hash.
+    pub fn intern_string_hashed(&mut self, data: &[u8], hash: u32) -> GcRef<LuaString> {
+        let old_count = self.string_arena.len();
+        let r = self
+            .strings
+            .intern_hashed(data, hash, &mut self.string_arena, self.current_white);
+        if self.string_arena.len() > old_count {
+            let est = super::gc::collector::EST_STRING_SIZE + data.len();
+            self.gc_state.track_alloc(est);
+        }
+        r
+    }
+
     /// Allocates a new table in the GC arena.
     pub fn alloc_table(&mut self, table: Table) -> GcRef<Table> {
         let est = super::gc::collector::EST_TABLE_SIZE

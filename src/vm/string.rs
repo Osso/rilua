@@ -191,8 +191,19 @@ impl StringTable {
         arena: &mut Arena<LuaString>,
         current_white: Color,
     ) -> GcRef<LuaString> {
-        let h = lua_hash(data);
-        let bucket_idx = (h as usize) & (self.buckets.len() - 1);
+        let hash = lua_hash(data);
+        self.intern_hashed(data, hash, arena, current_white)
+    }
+
+    /// Interns a string using a caller-provided cached Lua hash.
+    pub fn intern_hashed(
+        &mut self,
+        data: &[u8],
+        hash: u32,
+        arena: &mut Arena<LuaString>,
+        current_white: Color,
+    ) -> GcRef<LuaString> {
+        let bucket_idx = (hash as usize) & (self.buckets.len() - 1);
 
         // Search existing strings in this bucket.
         // Check hash first, then length, then content (cheapest to most
@@ -201,7 +212,7 @@ impl StringTable {
         // all entries in a bucket already share the same bucket index.
         for &r in &self.buckets[bucket_idx] {
             if let Some(s) = arena.get(r)
-                && s.hash == h
+                && s.hash == hash
                 && s.data.len() == data.len()
                 && *s.data == *data
             {
@@ -214,7 +225,7 @@ impl StringTable {
         }
 
         // Not found: create a new interned string.
-        let s = LuaString::new(data, h);
+        let s = LuaString::new(data, hash);
         let r = arena.alloc(s, current_white);
         self.buckets[bucket_idx].push(r);
         self.count += 1;
@@ -479,6 +490,20 @@ mod tests {
 
         let r1 = table.intern(b"hello", &mut arena, Color::White0);
         let r2 = table.intern(b"hello", &mut arena, Color::White0);
+        assert_eq!(r1, r2, "same content should return same GcRef");
+        assert_eq!(table.count(), 1, "should not allocate twice");
+        assert_eq!(arena.len(), 1);
+    }
+
+    #[test]
+    fn intern_hashed_deduplicates() {
+        let mut arena = Arena::new();
+        let mut table = StringTable::new();
+        let hash = lua_hash(b"hello");
+
+        let r1 = table.intern_hashed(b"hello", hash, &mut arena, Color::White0);
+        let r2 = table.intern_hashed(b"hello", hash, &mut arena, Color::White0);
+
         assert_eq!(r1, r2, "same content should return same GcRef");
         assert_eq!(table.count(), 1, "should not allocate twice");
         assert_eq!(arena.len(), 1);

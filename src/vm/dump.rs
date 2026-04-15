@@ -159,8 +159,8 @@ impl<'a> DumpState<'a> {
                     if let Some(bytes) = proto
                         .string_pool
                         .iter()
-                        .find(|(idx, _)| *idx == i as u32)
-                        .map(|(_, b)| b.as_slice())
+                        .find(|entry| entry.index == i as u32)
+                        .map(|entry| entry.bytes.as_slice())
                     {
                         self.dump_byte(LUA_TSTRING);
                         self.dump_string(Some(bytes));
@@ -190,8 +190,8 @@ impl<'a> DumpState<'a> {
                         if let Some(bytes) = proto
                             .string_pool
                             .iter()
-                            .find(|(idx, _)| *idx == i as u32)
-                            .map(|(_, b)| b.as_slice())
+                            .find(|entry| entry.index == i as u32)
+                            .map(|entry| entry.bytes.as_slice())
                         {
                             self.dump_string(Some(bytes));
                         } else {
@@ -360,7 +360,11 @@ mod tests {
         proto.constants.push(Val::Num(3.14));
         // Add string via string_pool (unpatched).
         proto.constants.push(Val::Nil); // placeholder
-        proto.string_pool.push((4, b"hello".to_vec()));
+        proto.string_pool.push(crate::vm::proto::StringPoolEntry {
+            index: 4,
+            bytes: b"hello".to_vec(),
+            hash: crate::vm::string::lua_hash(b"hello"),
+        });
         proto
             .code
             .push(Instruction::abc(OpCode::Return, 0, 1, 0).raw());

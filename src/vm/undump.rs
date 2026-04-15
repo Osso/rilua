@@ -12,7 +12,8 @@
 use crate::error::{LuaError, LuaResult, SyntaxError};
 
 use super::dump::{LUA_SIGNATURE, LUAC_HEADERSIZE, make_header};
-use super::proto::{LocalVar, Proto, ProtoRef};
+use super::proto::{LocalVar, Proto, ProtoRef, StringPoolEntry};
+use super::string::lua_hash;
 use super::value::Val;
 
 // ---------------------------------------------------------------------------
@@ -176,7 +177,12 @@ impl<'a> LoadState<'a> {
                     let bytes = self.load_string()?.unwrap_or_default();
                     // Store as unpatched: placeholder Nil + string_pool entry.
                     proto.constants.push(Val::Nil);
-                    proto.string_pool.push((i as u32, bytes));
+                    let hash = lua_hash(&bytes);
+                    proto.string_pool.push(StringPoolEntry {
+                        index: i as u32,
+                        bytes,
+                        hash,
+                    });
                 }
                 _ => {
                     return Err(self.error("bad constant type"));
@@ -369,7 +375,11 @@ mod tests {
         let mut proto = Proto::new("=test");
         proto.constants.push(Val::Num(42.0));
         proto.constants.push(Val::Nil); // placeholder for string
-        proto.string_pool.push((1, b"hello".to_vec()));
+        proto.string_pool.push(StringPoolEntry {
+            index: 1,
+            bytes: b"hello".to_vec(),
+            hash: lua_hash(b"hello"),
+        });
         proto.constants.push(Val::Bool(true));
         proto
             .code
@@ -383,8 +393,9 @@ mod tests {
         assert_eq!(loaded.constants[0], Val::Num(42.0));
         // String should be in string_pool (index 1).
         assert_eq!(loaded.string_pool.len(), 1);
-        assert_eq!(loaded.string_pool[0].0, 1);
-        assert_eq!(loaded.string_pool[0].1, b"hello");
+        assert_eq!(loaded.string_pool[0].index, 1);
+        assert_eq!(loaded.string_pool[0].bytes, b"hello");
+        assert_eq!(loaded.string_pool[0].hash, lua_hash(b"hello"));
         // Bool should be preserved.
         assert_eq!(loaded.constants[2], Val::Bool(true));
     }

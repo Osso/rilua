@@ -46,9 +46,9 @@ fn format_constant(proto: &Proto, idx: usize, out: &mut String) {
 
     // Check string_pool first: unpatched protos store string constants
     // as Val::Nil placeholders with raw bytes in string_pool.
-    for (sidx, bytes) in &proto.string_pool {
-        if *sidx as usize == idx {
-            format_string(bytes, out);
+    for entry in &proto.string_pool {
+        if entry.index as usize == idx {
+            format_string(&entry.bytes, out);
             return;
         }
     }
@@ -88,10 +88,10 @@ fn format_constant_raw(proto: &Proto, idx: usize, out: &mut String) {
     }
 
     // Check string_pool first (unpatched proto).
-    for (sidx, bytes) in &proto.string_pool {
-        if *sidx as usize == idx {
+    for entry in &proto.string_pool {
+        if entry.index as usize == idx {
             // Print string bytes directly without quoting.
-            out.push_str(&String::from_utf8_lossy(bytes));
+            out.push_str(&String::from_utf8_lossy(&entry.bytes));
             return;
         }
     }

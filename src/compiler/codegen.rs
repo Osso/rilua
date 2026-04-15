@@ -18,7 +18,7 @@ use crate::vm::instructions::{
     MAXINDEXRK, MAXSTACK, NO_JUMP, NO_REG, OpCode, is_k,
 };
 use crate::vm::proto::{
-    LocalVar, Proto, ProtoRef, VARARG_HASARG, VARARG_ISVARARG, VARARG_NEEDSARG,
+    LocalVar, Proto, ProtoRef, StringPoolEntry, VARARG_HASARG, VARARG_ISVARARG, VARARG_NEEDSARG,
 };
 use crate::vm::string::lua_hash;
 use crate::vm::value::Val;
@@ -197,7 +197,7 @@ impl ConstantKey {
 }
 
 struct StringConstantEntry {
-    bytes: Vec<u8>,
+    pool_pos: usize,
     index: u32,
 }
 
@@ -604,11 +604,17 @@ impl Compiler {
     /// Stores `Val::Nil` as a placeholder in the constant pool; the real
     /// `Val::Str` is patched in by `patch_string_constants` before execution.
     pub(crate) fn string_constant(&mut self, s: &[u8]) -> LuaResult<u32> {
-        let hash = lua_hash(s);
         let fs = self.fs_mut();
+        if let Some(last) = fs.proto.string_pool.last()
+            && last.bytes.as_slice() == s
+        {
+            return Ok(last.index);
+        }
+
+        let hash = lua_hash(s);
         if let Some(entries) = fs.string_constant_index.get(&hash) {
             for entry in entries {
-                if entry.bytes.as_slice() == s {
+                if fs.proto.string_pool[entry.pool_pos].bytes.as_slice() == s {
                     return Ok(entry.index);
                 }
             }
@@ -620,12 +626,19 @@ impl Compiler {
         fs.proto.constants.push(Val::Nil);
         #[allow(clippy::cast_possible_truncation)]
         let idx = idx as u32;
-        let bytes = s.to_vec();
-        fs.proto.string_pool.push((idx, bytes.clone()));
+        let pool_pos = fs.proto.string_pool.len();
+        fs.proto.string_pool.push(StringPoolEntry {
+            index: idx,
+            bytes: s.to_vec(),
+            hash,
+        });
         fs.string_constant_index
             .entry(hash)
             .or_default()
-            .push(StringConstantEntry { bytes, index: idx });
+            .push(StringConstantEntry {
+                pool_pos,
+                index: idx,
+            });
         Ok(idx)
     }
 
