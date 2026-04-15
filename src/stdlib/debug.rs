@@ -76,8 +76,6 @@ fn get_thread_offset(state: &LuaState) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-pub(crate) use crate::error::chunkid;
-
 /// Result of resolving a numeric stack level to a call stack position.
 ///
 /// PUC-Rio's `lua_getstack` (ldebug.c:84-103) walks the CI chain and
@@ -288,8 +286,7 @@ fn format_frame_line(
         if let Some(cl) = gc.closures.get(r) {
             match cl {
                 Closure::Lua(lcl) => {
-                    let short_src = chunkid(&lcl.proto.source);
-                    result.push_str(&short_src);
+                    result.push_str(&lcl.proto.short_source);
                     result.push(':');
                     let line = current_line_raw(call_stack, stack, gc, ci_idx);
                     if line > 0 {
@@ -303,7 +300,7 @@ fn format_frame_line(
                         let _ = write!(
                             result,
                             " in function <{}:{}>",
-                            short_src, lcl.proto.line_defined
+                            lcl.proto.short_source, lcl.proto.line_defined
                         );
                     }
                 }
@@ -621,7 +618,7 @@ fn extract_closure_info(
         Closure::Lua(lcl) => ClosureInfo {
             is_lua: true,
             source: lcl.proto.source.clone(),
-            short_src: chunkid(&lcl.proto.source),
+            short_src: lcl.proto.short_source.clone(),
             line_defined: i64::from(lcl.proto.line_defined),
             last_line_defined: i64::from(lcl.proto.last_line_defined),
             what: if lcl.proto.line_defined == 0 {

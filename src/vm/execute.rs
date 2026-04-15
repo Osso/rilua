@@ -13,9 +13,6 @@ mod runtime_ops;
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
 
-use crate::check_interrupted;
-use crate::error::chunkid;
-
 use self::runtime_ops::{
     call_bin_tm, call_tm_res, get_tm_for_val, table_set, val_equal, val_less_equal, val_less_than,
     vm_concat, vm_gettable, vm_settable,
@@ -34,6 +31,7 @@ use super::state::{
 };
 use super::table::Table;
 use super::value::{Userdata, Val, append_lua_number_bytes, lua_number_string_len};
+use crate::check_interrupted;
 
 use crate::platform::{localeconv, strcoll, strtod};
 
@@ -184,9 +182,8 @@ fn runtime_error(proto: &Proto, pc: usize, message: &str) -> LuaError {
     } else {
         0
     };
-    let source = chunkid(&proto.source);
     LuaError::Runtime(RuntimeError {
-        message: format!("{source}:{line}: {message}"),
+        message: format!("{}:{line}: {message}", proto.short_source),
         level: 0,
         traceback: vec![],
     })

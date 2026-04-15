@@ -986,17 +986,20 @@ pub fn lua_loadstring(state: &mut LuaState) -> LuaResult<u32> {
         .map(|s| s.data().to_vec())
         .unwrap_or_default();
 
-    // Chunk name: defaults to the source string itself.
-    let chunk_name = if let Val::Str(r) = name_val {
-        state.gc.string_arena.get(r).map_or_else(
-            || String::from_utf8_lossy(&source).into_owned(),
-            |s| String::from_utf8_lossy(s.data()).into_owned(),
+    let compile_result = if let Val::Str(r) = name_val {
+        compile_with_source_chunk_name(
+            &source,
+            state
+                .gc
+                .string_arena
+                .get(r)
+                .map(crate::vm::string::LuaString::data),
         )
     } else {
-        String::from_utf8_lossy(&source).into_owned()
+        compile_with_source_chunk_name(&source, None)
     };
 
-    load_string_impl(state, &source, &chunk_name)
+    Ok(push_load_result(state, compile_result))
 }
 
 /// Implements Lua's `loadfile([filename])`.
@@ -1043,7 +1046,7 @@ pub fn lua_loadfile(state: &mut LuaState) -> LuaResult<u32> {
         }
     };
 
-    load_string_impl(state, &source.0, &source.1)
+    Ok(load_string_impl(state, &source.0, &source.1))
 }
 
 /// Implements Lua's `dofile([filename])`.
@@ -1183,7 +1186,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
             // Empty input: compile empty source.
-            return load_string_impl(state, b"", &chunk_name);
+            return Ok(load_string_impl(state, b"", &chunk_name));
         }
         Err(e) => {
             // Reader error on first call. Restore state and return nil + msg.
@@ -1199,7 +1202,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
     // Binary chunk detection: first byte is \x1b (LUA_SIGNATURE prefix).
     // The undump module requires the complete binary data upfront.
     if first_chunk.first() == Some(&0x1b) {
-        return load_binary_from_reader(
+        return Ok(load_binary_from_reader(
             state,
             func_val,
             first_chunk,
@@ -1208,7 +1211,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
             saved_ci,
             saved_n_ccalls,
             saved_call_depth,
-        );
+        ));
     }
 
     // Text source: stream through the lexer on demand.
@@ -1273,7 +1276,7 @@ fn load_binary_from_reader(
     saved_ci: usize,
     saved_n_ccalls: u16,
     saved_call_depth: u16,
-) -> LuaResult<u32> {
+) -> u32 {
     const MAX_LOAD_SIZE: usize = 10 * 1024 * 1024;
     let mut collected = first_chunk;
 
@@ -1292,7 +1295,7 @@ fn load_binary_from_reader(
                 state.push(Val::Nil);
                 let msg = state.gc.intern_string(e.to_string().as_bytes());
                 state.push(Val::Str(msg));
-                return Ok(2);
+                return 2;
             }
         }
     }
@@ -1318,44 +1321,60 @@ fn restore_state(
 
 /// Shared implementation for loadstring/loadfile/load: compiles source
 /// and pushes either the function or nil+error.
-#[allow(clippy::unnecessary_wraps)]
-fn load_string_impl(state: &mut LuaState, source: &[u8], name: &str) -> LuaResult<u32> {
-    match crate::compile_or_undump(source, name) {
-        Ok(proto) => {
-            let mut proto =
-                crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-            crate::patch_string_constants(&mut proto, &mut state.gc);
-            let proto = crate::vm::proto::ProtoRef::new(proto);
+fn load_string_impl(state: &mut LuaState, source: &[u8], name: &str) -> u32 {
+    push_load_result(state, crate::compile_or_undump(source, name))
+}
 
-            let num_upvalues = proto.num_upvalues as usize;
-            let mut lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
-            // Binary-loaded functions (string.dump) may have upvalues that
-            // need fresh nil-valued closed slots. Matches PUC-Rio's
-            // luaU_undump which calls luaF_newupval for each nups.
-            for _ in 0..num_upvalues {
-                let uv = crate::vm::closure::Upvalue::new_closed(Val::Nil);
-                let uv_ref = state.gc.alloc_upvalue(uv);
-                lua_cl.upvalues.push(uv_ref);
-            }
-            let closure_ref = state
-                .gc
-                .alloc_closure(crate::vm::closure::Closure::Lua(lua_cl));
-            state.push(Val::Function(closure_ref));
-            Ok(1)
-        }
-        Err(e) => {
-            state.push(Val::Nil);
-            // Use raw bytes for syntax errors to preserve non-UTF-8 bytes
-            // (e.g. \xFF in token names). Falls back to Display for others.
-            let msg_bytes = match &e {
-                crate::error::LuaError::Syntax(syn) => syn.to_lua_bytes(),
-                _ => e.to_string().into_bytes(),
-            };
-            let msg = state.gc.intern_string(&msg_bytes);
-            state.push(Val::Str(msg));
-            Ok(2)
-        }
+fn compile_with_source_chunk_name(
+    source: &[u8],
+    explicit_name: Option<&[u8]>,
+) -> LuaResult<crate::vm::proto::ProtoRef> {
+    let chunk_name =
+        explicit_name.map_or_else(|| String::from_utf8_lossy(source), String::from_utf8_lossy);
+    crate::compile_or_undump(source, chunk_name.as_ref())
+}
+
+fn push_load_result(state: &mut LuaState, result: LuaResult<crate::vm::proto::ProtoRef>) -> u32 {
+    match result {
+        Ok(proto) => push_loaded_chunk(state, proto),
+        Err(error) => push_load_error(state, &error),
     }
+}
+
+fn push_loaded_chunk(state: &mut LuaState, proto: crate::vm::proto::ProtoRef) -> u32 {
+    let mut proto =
+        crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+    crate::patch_string_constants(&mut proto, &mut state.gc);
+    let proto = crate::vm::proto::ProtoRef::new(proto);
+
+    let num_upvalues = proto.num_upvalues as usize;
+    let mut lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
+    // Binary-loaded functions (string.dump) may have upvalues that
+    // need fresh nil-valued closed slots. Matches PUC-Rio's
+    // luaU_undump which calls luaF_newupval for each nups.
+    for _ in 0..num_upvalues {
+        let uv = crate::vm::closure::Upvalue::new_closed(Val::Nil);
+        let uv_ref = state.gc.alloc_upvalue(uv);
+        lua_cl.upvalues.push(uv_ref);
+    }
+    let closure_ref = state
+        .gc
+        .alloc_closure(crate::vm::closure::Closure::Lua(lua_cl));
+    state.push(Val::Function(closure_ref));
+    1
+}
+
+fn push_load_error(state: &mut LuaState, error: &LuaError) -> u32 {
+    state.push(Val::Nil);
+    // Use raw bytes for syntax errors to preserve non-UTF-8 bytes
+    // (e.g. \xFF in token names). Falls back to Display for others.
+    let msg_bytes = match error {
+        crate::error::LuaError::Syntax(syn) => syn.to_lua_bytes(),
+        _ => error.to_string().into_bytes(),
+    };
+    let msg = state.gc.intern_string(&msg_bytes);
+    state.push(Val::Str(msg));
+    2
 }
 
 // ---------------------------------------------------------------------------

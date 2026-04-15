@@ -570,6 +570,19 @@ mod tests {
     }
 
     #[test]
+    fn loadstring_default_chunk_name_uses_source_snippet() {
+        let mut lua = Lua::new().ok().unwrap_or_else(Lua::new_empty);
+        let result = lua.exec(
+            r#"
+            local f, err = loadstring("if then end")
+            assert(f == nil)
+            assert(string.find(err, [[^%[string "if then end"%]:1:]], 1))
+        "#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn lua_set_and_get_global_f64() {
         let mut lua = Lua::new_empty();
         lua.set_global("x", 42.0f64).ok();

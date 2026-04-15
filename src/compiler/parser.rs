@@ -365,9 +365,8 @@ impl<'a> Parser<'a> {
             if b.is_ascii() {
                 None
             } else {
-                let source = chunkid(self.lexer.source_name());
                 let mut raw = Vec::new();
-                raw.extend_from_slice(source.as_bytes());
+                raw.extend_from_slice(chunkid(self.lexer.source_name()).as_bytes());
                 raw.push(b':');
                 raw.extend_from_slice(self.span.line.to_string().as_bytes());
                 raw.extend_from_slice(b": ");

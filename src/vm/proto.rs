@@ -10,6 +10,8 @@
 //! The reference type is `Rc<Proto>` by default, or `Arc<Proto>` when
 //! the `send` feature is enabled (for thread-safe embedding).
 
+use crate::error::chunkid;
+
 use super::value::Val;
 
 /// Reference-counted wrapper for `Proto`.
@@ -78,6 +80,8 @@ pub struct Proto {
     pub upvalue_names: Vec<String>,
     /// Source file name.
     pub source: String,
+    /// Cached short source name used in error messages and tracebacks.
+    pub short_source: String,
     /// Line where the function definition starts.
     pub line_defined: u32,
     /// Line where the function definition ends.
@@ -108,6 +112,7 @@ impl Proto {
             local_vars: Vec::new(),
             upvalue_names: Vec::new(),
             source: source.to_string(),
+            short_source: chunkid(source),
             line_defined: 0,
             last_line_defined: 0,
             num_upvalues: 0,
@@ -127,6 +132,7 @@ mod tests {
     fn proto_new_defaults() {
         let p = Proto::new("test");
         assert_eq!(p.source, "test");
+        assert_eq!(p.short_source, "[string \"test\"]");
         assert!(p.code.is_empty());
         assert!(p.constants.is_empty());
         assert!(p.protos.is_empty());

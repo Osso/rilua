@@ -1,6 +1,6 @@
 //! Runtime helpers extracted from the main execute loop.
 
-use crate::error::{LuaResult, chunkid};
+use crate::error::LuaResult;
 use crate::vm::value::{append_lua_number_bytes, lua_number_string_len};
 
 use super::super::gc::arena::Arena;
@@ -38,8 +38,7 @@ pub(crate) fn get_where(state: &LuaState, level: u32) -> String {
         } else {
             return String::new();
         };
-        let short_src = chunkid(&proto.source);
-        return format!("{short_src}:{line}: ");
+        return format!("{}:{line}: ", proto.short_source);
     }
 
     String::new()
