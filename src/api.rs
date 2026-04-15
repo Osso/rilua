@@ -371,3 +371,17 @@ pub fn state_get_fenv(state: &LuaState, func: &Function) -> LuaResult<Table> {
     };
     Ok(Table(env_ref))
 }
+
+/// Check whether the current call frame runs under secure taint.
+///
+/// Equivalent to the Lua `issecure()` global: returns `true` when no taint
+/// is active on the currently-executing CallInfo, `false` when any addon
+/// taint string is set. Useful for gating "protected" operations (e.g.
+/// frame attribute mutation) from Rust handlers without round-tripping
+/// through Lua.
+pub fn state_is_secure(state: &LuaState) -> bool {
+    state
+        .call_stack
+        .get(state.ci)
+        .is_none_or(|ci| ci.taint.is_none())
+}
