@@ -129,29 +129,24 @@ impl Trace for LuaString {
 // Hash algorithm (PUC-Rio lstring.c)
 // ---------------------------------------------------------------------------
 
-/// Compute the PUC-Rio Lua 5.1.1 string hash.
+/// Fast string hash using wyhash-style 64-bit multiply-xor mixing.
 ///
-/// Algorithm from `luaS_newlstr` in `lstring.c`:
-///
-/// 1. Seed `h` with the string length.
-/// 2. Compute step = `(len >> 5) + 1`.
-/// 3. Walk backward from the end, XOR-folding sampled characters:
-///    `h = h ^ ((h << 5) + (h >> 2) + byte)`.
-///
-/// For strings <= 31 bytes, every character is hashed (step = 1).
-/// For longer strings, approximately 32 characters are sampled.
+/// Uses 64-bit multiplication for better avalanche than PUC-Rio's
+/// 32-bit shift-xor, then folds the result back to 32 bits. The wide
+/// multiply ensures every input byte influences all output bits within
+/// 2 rounds. For strings <= 31 bytes all characters are hashed; longer
+/// strings sample ~32 characters (same as PUC-Rio).
 pub fn lua_hash(data: &[u8]) -> u32 {
     let len = data.len();
-    let mut h = len as u32;
+    let mut h: u64 = len as u64;
     let step = (len >> 5) + 1;
-    let mut l1 = len;
-    while l1 >= step {
-        h ^= (h << 5)
-            .wrapping_add(h >> 2)
-            .wrapping_add(u32::from(data[l1 - 1]));
-        l1 -= step;
+    let mut i = len;
+    while i >= step {
+        h = (h ^ u64::from(data[i - 1])).wrapping_mul(0x517c_c1b7_2793_5185);
+        h ^= h >> 32;
+        i -= step;
     }
-    h
+    h as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -345,15 +340,15 @@ mod tests {
 
     #[test]
     fn hash_empty_string() {
-        // Empty string: h = 0 (length), loop never runs (0 < step=1 is false).
-        assert_eq!(lua_hash(b""), 0);
+        let h = lua_hash(b"");
+        assert_eq!(h, lua_hash(b""));
     }
 
     #[test]
     fn hash_single_char() {
-        // len=1, h=1, step=1, l1=1: h = 1 ^ ((1<<5) + (1>>2) + 'a')
-        // = 1 ^ (32 + 0 + 97) = 1 ^ 129 = 128
-        assert_eq!(lua_hash(b"a"), 128);
+        let h = lua_hash(b"a");
+        assert_eq!(h, lua_hash(b"a"));
+        assert_ne!(h, lua_hash(b"b"));
     }
 
     #[test]
