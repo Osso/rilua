@@ -1190,7 +1190,7 @@ pub fn db_getlocal(state: &mut LuaState) -> LuaResult<u32> {
                 } else {
                     Val::Nil
                 };
-                let name_ref = state.gc.intern_string(b"(*temporary)");
+                let name_ref = state.gc.intern_string_static(b"(*temporary)");
                 state.push(Val::Str(name_ref));
                 state.push(val);
                 return Ok(2);
@@ -1225,7 +1225,7 @@ pub fn db_getlocal(state: &mut LuaState) -> LuaResult<u32> {
         Ok(2)
     } else if local_idx > 0 && stack_idx < limit {
         let val = state.stack_get(stack_idx);
-        let name_ref = state.gc.intern_string(b"(*temporary)");
+        let name_ref = state.gc.intern_string_static(b"(*temporary)");
         state.push(Val::Str(name_ref));
         state.push(val);
         Ok(2)
@@ -1320,7 +1320,7 @@ pub fn db_setlocal(state: &mut LuaState) -> LuaResult<u32> {
                 {
                     thread.stack[stack_idx] = new_val;
                 }
-                state.gc.intern_string(b"(*temporary)")
+                state.gc.intern_string_static(b"(*temporary)")
             } else {
                 return Ok(0);
             };
@@ -1353,7 +1353,7 @@ pub fn db_setlocal(state: &mut LuaState) -> LuaResult<u32> {
         if stack_idx < state.stack.len() {
             state.stack[stack_idx] = new_val;
         }
-        state.gc.intern_string(b"(*temporary)")
+        state.gc.intern_string_static(b"(*temporary)")
     } else {
         return Ok(0);
     };

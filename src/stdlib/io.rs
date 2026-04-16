@@ -320,10 +320,10 @@ pub fn io_type(state: &mut LuaState) -> LuaResult<u32> {
                 .and_then(|ud| ud.downcast_ref::<IoFile>())
                 .is_some_and(|io| !io.file.is_null());
             if is_open {
-                let s = state.gc.intern_string(b"file");
+                let s = state.gc.intern_string_static(b"file");
                 state.push(Val::Str(s));
             } else {
-                let s = state.gc.intern_string(b"closed file");
+                let s = state.gc.intern_string_static(b"closed file");
                 state.push(Val::Str(s));
             }
         }
@@ -613,7 +613,7 @@ fn read_chars(state: &mut LuaState, fp: *mut LibcFile, mut n: usize) -> bool {
 fn test_eof(state: &mut LuaState, fp: *mut LibcFile) -> bool {
     let c = unsafe { getc(fp) };
     unsafe { ungetc(c, fp) };
-    let s = state.gc.intern_string(b"");
+    let s = state.gc.intern_string_static(b"");
     state.push(Val::Str(s));
     c != EOF
 }
@@ -1100,7 +1100,7 @@ fn createmeta(state: &mut LuaState) -> LuaResult<GcRef<Table>> {
     let mt = super::new_metatable(state, FILE_HANDLE)?;
 
     // Set __index = metatable (self-indexing for method lookup).
-    let index_key = state.gc.intern_string(b"__index");
+    let index_key = state.gc.intern_string_static(b"__index");
     let mt_table = state
         .gc
         .tables

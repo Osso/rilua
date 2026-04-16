@@ -63,7 +63,7 @@ fn numeric_slot_index(value: f64) -> Option<i64> {
 }
 
 fn register_debug_functions(state: &mut LuaState) -> LuaResult<()> {
-    let debug_key = state.gc.intern_string(b"debug");
+    let debug_key = state.gc.intern_string_static(b"debug");
     let debug_table = {
         let global = state
             .gc
@@ -153,7 +153,7 @@ fn setobjecttaint(state: &mut LuaState) -> LuaResult<u32> {
 }
 
 fn get_or_create_closure_taint_table(state: &mut LuaState) -> crate::vm::gc::arena::GcRef<Table> {
-    let key = state.gc.intern_string(CLOSURE_TAINT_KEY.as_bytes());
+    let key = state.gc.intern_string_static(CLOSURE_TAINT_KEY.as_bytes());
     if let Some(reg) = state.gc.tables.get(state.registry)
         && let Val::Table(t) = reg.get_str(key, &state.gc.string_arena)
     {
@@ -430,7 +430,7 @@ mod tests {
         assert_table_has_function(&mut state, global_ref, "hooksecurefunc");
         assert_table_has_function(&mut state, global_ref, "secureexecuterange");
 
-        let debug_key = state.gc.intern_string(b"debug");
+        let debug_key = state.gc.intern_string_static(b"debug");
         let debug_table_ref = match state
             .gc
             .tables

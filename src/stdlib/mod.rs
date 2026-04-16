@@ -180,7 +180,7 @@ fn open_base_lib(state: &mut LuaState) -> LuaResult<()> {
 
     // Global values: _G (self-referential) and _VERSION.
     register_global_val(state, "_G", Val::Table(state.global))?;
-    let version_str = state.gc.intern_string(b"Lua 5.1");
+    let version_str = state.gc.intern_string_static(b"Lua 5.1");
     register_global_val(state, "_VERSION", Val::Str(version_str))?;
 
     Ok(())
@@ -244,8 +244,8 @@ fn open_math_lib(state: &mut LuaState) -> LuaResult<()> {
     register_table_fn(state, math_table, "mod", math::math_fmod)?;
 
     // Constants: math.pi and math.huge.
-    let pi_key = state.gc.intern_string(b"pi");
-    let huge_key = state.gc.intern_string(b"huge");
+    let pi_key = state.gc.intern_string_static(b"pi");
+    let huge_key = state.gc.intern_string_static(b"huge");
     let mt = state.gc.tables.get_mut(math_table).ok_or_else(|| {
         LuaError::Runtime(RuntimeError {
             message: "math table not found".into(),
@@ -315,8 +315,8 @@ fn open_string_lib(state: &mut LuaState) -> LuaResult<()> {
     register_table_fn(state, string_table, "dump", string::str_dump)?;
     // LUA_COMPAT_GFIND: string.gfind = string.gmatch (same closure object).
     // PUC-Rio copies the value via lua_getfield/lua_setfield so gfind == gmatch.
-    let gmatch_key = state.gc.intern_string(b"gmatch");
-    let gfind_key = state.gc.intern_string(b"gfind");
+    let gmatch_key = state.gc.intern_string_static(b"gmatch");
+    let gfind_key = state.gc.intern_string_static(b"gfind");
     let gmatch_val = state.gc.tables.get(string_table).map_or(Val::Nil, |t| {
         t.get(Val::Str(gmatch_key), &state.gc.string_arena)
     });
@@ -330,7 +330,7 @@ fn open_string_lib(state: &mut LuaState) -> LuaResult<()> {
     // Create a metatable for the string type: { __index = string_table }.
     // This enables method syntax: ("hello"):upper() resolves via __index.
     let mt = state.gc.alloc_table(Table::new());
-    let index_key = state.gc.intern_string(b"__index");
+    let index_key = state.gc.intern_string_static(b"__index");
     let mt_table = state.gc.tables.get_mut(mt).ok_or_else(|| {
         LuaError::Runtime(RuntimeError {
             message: "string metatable not found".into(),

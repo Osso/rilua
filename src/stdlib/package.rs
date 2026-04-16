@@ -755,7 +755,7 @@ pub fn ll_module(state: &mut LuaState) -> LuaResult<u32> {
 
     // Check if the table already has _NAME (already initialized).
     let has_name = {
-        let name_key = state.gc.intern_string(b"_NAME");
+        let name_key = state.gc.intern_string_static(b"_NAME");
         let mt = state
             .gc
             .tables
@@ -856,7 +856,7 @@ pub fn ll_seeall(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     // Set __index = _G.
-    let index_key = state.gc.intern_string(b"__index");
+    let index_key = state.gc.intern_string_static(b"__index");
     let global = state.global;
     let mt_table = state
         .gc
@@ -888,9 +888,9 @@ pub fn ll_loadlib(state: &mut LuaState) -> LuaResult<u32> {
     state.push(Val::Nil);
     let msg = state
         .gc
-        .intern_string(b"dynamic libraries not enabled; check your Lua installation");
+        .intern_string_static(b"dynamic libraries not enabled; check your Lua installation");
     state.push(Val::Str(msg));
-    let absent = state.gc.intern_string(b"absent");
+    let absent = state.gc.intern_string_static(b"absent");
     state.push(Val::Str(absent));
     Ok(3)
 }
@@ -1240,7 +1240,7 @@ pub fn open_package_lib(state: &mut LuaState) -> LuaResult<()> {
     set_field(state, pkg_table, "loaded", Val::Table(loaded_table))?;
     // Also put in registry.
     {
-        let key_ref = state.gc.intern_string(LOADED_KEY.as_bytes());
+        let key_ref = state.gc.intern_string_static(LOADED_KEY.as_bytes());
         let registry = state.registry;
         let reg_t = state
             .gc

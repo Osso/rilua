@@ -192,7 +192,7 @@ pub fn str_sub(state: &mut LuaState) -> LuaResult<u32> {
         let r = state.gc.intern_string(&s[start - 1..end]);
         state.push(Val::Str(r));
     } else {
-        let r = state.gc.intern_string(b"");
+        let r = state.gc.intern_string_static(b"");
         state.push(Val::Str(r));
     }
     Ok(1)
@@ -212,7 +212,7 @@ pub fn str_rep(state: &mut LuaState) -> LuaResult<u32> {
     let n = check_int(state, "string.rep", 1)?;
 
     if n <= 0 {
-        let r = state.gc.intern_string(b"");
+        let r = state.gc.intern_string_static(b"");
         state.push(Val::Str(r));
     } else {
         let total = s.len().saturating_mul(n as usize);

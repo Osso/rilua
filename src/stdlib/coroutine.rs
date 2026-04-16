@@ -202,13 +202,15 @@ pub(crate) fn auxresume(
 
     match co_status {
         ThreadStatus::Dead => {
-            let r = state.gc.intern_string(b"cannot resume dead coroutine");
+            let r = state
+                .gc
+                .intern_string_static(b"cannot resume dead coroutine");
             return Err(Val::Str(r));
         }
         ThreadStatus::Running | ThreadStatus::Normal => {
             let r = state
                 .gc
-                .intern_string(b"cannot resume non-suspended coroutine");
+                .intern_string_static(b"cannot resume non-suspended coroutine");
             return Err(Val::Str(r));
         }
         ThreadStatus::Initial | ThreadStatus::Suspended => {
@@ -336,7 +338,7 @@ pub(crate) fn auxresume(
             let Some(resumer) = state.saved_threads.pop() else {
                 let r = state
                     .gc
-                    .intern_string(b"internal error: missing resumer state");
+                    .intern_string_static(b"internal error: missing resumer state");
                 return Err(Val::Str(r));
             };
             state.save_and_restore_by_ref(co_ref, ThreadStatus::Dead, resumer);
@@ -357,7 +359,7 @@ pub(crate) fn auxresume(
             let Some(resumer) = state.saved_threads.pop() else {
                 let r = state
                     .gc
-                    .intern_string(b"internal error: missing resumer state");
+                    .intern_string_static(b"internal error: missing resumer state");
                 return Err(Val::Str(r));
             };
             state.save_and_restore_by_ref(co_ref, ThreadStatus::Suspended, resumer);
@@ -377,7 +379,7 @@ pub(crate) fn auxresume(
             let Some(resumer) = state.saved_threads.pop() else {
                 let r = state
                     .gc
-                    .intern_string(b"internal error: missing resumer state");
+                    .intern_string_static(b"internal error: missing resumer state");
                 return Err(Val::Str(r));
             };
             state.save_and_restore_by_ref(co_ref, ThreadStatus::Dead, resumer);
@@ -571,19 +573,19 @@ pub fn co_status(state: &mut LuaState) -> LuaResult<u32> {
 
     // Check if this coroutine is the currently running one.
     if state.current_thread == Some(co_ref) {
-        let s = state.gc.intern_string(b"running");
+        let s = state.gc.intern_string_static(b"running");
         state.push(Val::Str(s));
         return Ok(1);
     }
 
-    let status_str = match state.gc.threads.get(co_ref).map(|t| t.status) {
-        Some(ThreadStatus::Running) => "running",
-        Some(ThreadStatus::Initial) | Some(ThreadStatus::Suspended) => "suspended",
-        Some(ThreadStatus::Normal) => "normal",
-        Some(ThreadStatus::Dead) | None => "dead",
+    let status_str: &'static [u8] = match state.gc.threads.get(co_ref).map(|t| t.status) {
+        Some(ThreadStatus::Running) => b"running",
+        Some(ThreadStatus::Initial) | Some(ThreadStatus::Suspended) => b"suspended",
+        Some(ThreadStatus::Normal) => b"normal",
+        Some(ThreadStatus::Dead) | None => b"dead",
     };
 
-    let s = state.gc.intern_string(status_str.as_bytes());
+    let s = state.gc.intern_string_static(status_str);
     state.push(Val::Str(s));
     Ok(1)
 }

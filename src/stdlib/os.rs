@@ -334,7 +334,7 @@ fn os_date_table(state: &mut LuaState, tm: &Tm) -> LuaResult<u32> {
 
     // isdst: only set if non-negative (undefined = -1 means skip).
     if tm.tm_isdst >= 0 {
-        let k = Val::Str(state.gc.intern_string(b"isdst"));
+        let k = Val::Str(state.gc.intern_string_static(b"isdst"));
         let v = Val::Bool(tm.tm_isdst != 0);
         let t = state
             .gc

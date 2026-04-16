@@ -70,14 +70,14 @@ fn check_args(name: &str, state: &LuaState, min: usize) -> LuaResult<()> {
 ///
 /// Unlike the TMS-based lookup, this works for any string key
 /// (e.g., `__tostring`, `__metatable`).
-fn get_metafield(gc: &mut crate::vm::state::Gc, val: Val, name: &[u8]) -> Option<Val> {
+fn get_metafield(gc: &mut crate::vm::state::Gc, val: Val, name: &'static [u8]) -> Option<Val> {
     let mt = match val {
         Val::Table(r) => gc.tables.get(r).and_then(Table::metatable)?,
         Val::Userdata(r) => gc.userdata.get(r).and_then(Userdata::metatable)?,
         _ => gc.type_metatables[metatable::type_tag(val)]?,
     };
 
-    let key_ref = gc.intern_string(name);
+    let key_ref = gc.intern_string_static(name);
     let table = gc.tables.get(mt)?;
     let result = table.get_str(key_ref, &gc.string_arena);
     if result.is_nil() { None } else { Some(result) }
@@ -146,7 +146,7 @@ pub fn lua_type(state: &mut LuaState) -> LuaResult<u32> {
     check_args("type", state, 1)?;
     let val = arg(state, 0);
     let name = val.type_name();
-    let r = state.gc.intern_string(name.as_bytes());
+    let r = state.gc.intern_string_static(name.as_bytes());
     state.push(Val::Str(r));
     Ok(1)
 }
@@ -195,16 +195,13 @@ fn val_to_str(state: &mut LuaState, val: Val) -> Val {
     match val {
         Val::Str(_) => val,
         Val::Nil => {
-            let r = state.gc.intern_string(b"nil");
+            // Hot: every tostring(nil) and string concat with nil hits this.
+            let r = state.gc.intern_string_static(b"nil");
             Val::Str(r)
         }
         Val::Bool(b) => {
-            let s = if b {
-                b"true".as_ref()
-            } else {
-                b"false".as_ref()
-            };
-            let r = state.gc.intern_string(s);
+            let s: &'static [u8] = if b { b"true" } else { b"false" };
+            let r = state.gc.intern_string_static(s);
             Val::Str(r)
         }
         Val::Num(_) => {
@@ -537,7 +534,7 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
             let handler_ret = if handler_result.is_ok() {
                 state.stack_get(handler_pos)
             } else {
-                let msg = state.gc.intern_string(b"error in error handling");
+                let msg = state.gc.intern_string_static(b"error in error handling");
                 Val::Str(msg)
             };
 
@@ -588,7 +585,8 @@ pub fn lua_setmetatable(state: &mut LuaState) -> LuaResult<u32> {
 
     // Check for __metatable protection.
     if let Some(existing_mt) = state.gc.tables.get(table_ref).and_then(Table::metatable) {
-        let key_ref = state.gc.intern_string(b"__metatable");
+        // Hot: every setmetatable / getmetatable call probes this key.
+        let key_ref = state.gc.intern_string_static(b"__metatable");
         let has_protection = state
             .gc
             .tables
@@ -887,7 +885,8 @@ pub fn lua_pairs(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     // Push the `next` function. We look it up from globals.
-    let next_key = state.gc.intern_string(b"next");
+    // Hot: pairs() is one of the most-called Lua iterators.
+    let next_key = state.gc.intern_string_static(b"next");
     let next_fn = state
         .gc
         .tables
@@ -1014,7 +1013,7 @@ pub fn lua_loadfile(state: &mut LuaState) -> LuaResult<u32> {
         let mut buf = Vec::new();
         if std::io::stdin().read_to_end(&mut buf).is_err() {
             state.push(Val::Nil);
-            let msg = state.gc.intern_string(b"cannot read stdin");
+            let msg = state.gc.intern_string_static(b"cannot read stdin");
             state.push(Val::Str(msg));
             return Ok(2);
         }
