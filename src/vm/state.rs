@@ -225,6 +225,22 @@ impl Gc {
             return r;
         }
         let r = self.intern_string(data);
+        // If we land here mid-GC, `mark_gc_roots` (which protects
+        // static-cache entries) has already run for this cycle. `r` is
+        // the pre-flip current-white, so the atomic flip makes it
+        // other-white = dead, and sweep frees the slot — leaving the
+        // cache pointing at a freed object. Colour it black during the
+        // mark / sweep / finalize phases so it survives the in-flight
+        // cycle; later cycles catch it through `mark_gc_roots`. Outside
+        // those phases the normal current-white alloc colour is alive.
+        use super::gc::Color;
+        use super::gc::collector::GcPhase;
+        if matches!(
+            self.gc_state.phase,
+            GcPhase::Propagate | GcPhase::SweepString | GcPhase::Sweep | GcPhase::Finalize,
+        ) {
+            self.string_arena.set_color(r, Color::Black);
+        }
         self.static_intern_cache.insert(key, r);
         r
     }
@@ -1380,6 +1396,54 @@ mod tests {
         assert_eq!(r1, r2);
         // Only one new string interned (deduplication).
         assert_eq!(state.gc.string_arena.len(), before + 1);
+    }
+
+    #[test]
+    fn intern_string_static_mid_cycle_survives_sweep() {
+        // Regression: if `intern_string_static` inserts during a GC cycle,
+        // `mark_gc_roots` (which protects static-cache entries) has already
+        // run for this cycle. Without a fix, the newly-interned string is
+        // still the pre-flip current-white, gets swept at cycle end, and
+        // the cache is left pointing at a freed slot. Subsequent plain
+        // `intern_string` for the same content then allocates a *new*
+        // ref, breaking callers that wrote through the static path and
+        // read through the plain path (or vice versa).
+        let mut state = LuaState::new();
+
+        // Step the GC into Propagate so the next intern happens mid-cycle.
+        state.gc_step(1).expect("gc step into propagate");
+        assert_eq!(
+            state.gc.gc_state.phase,
+            super::super::gc::collector::GcPhase::Propagate,
+            "setup expects GC to be mid-cycle",
+        );
+
+        // Mid-cycle intern. Leave the ref reachable only through the
+        // static_intern_cache — no other root holds it — so only the
+        // in-flight-cycle protection keeps it alive.
+        let cached_ref = state.gc.intern_string_static(b"midcycle_key");
+
+        // Finish the cycle naturally via incremental steps so the Atomic
+        // flip happens. `full_gc` aborts and short-circuits to SweepString
+        // without the flip, which accidentally preserves new mid-cycle
+        // allocations and hides the bug.
+        let mut steps = 0;
+        while state.gc.gc_state.phase
+            != super::super::gc::collector::GcPhase::Pause
+        {
+            state.gc_step(1024).expect("incremental step");
+            steps += 1;
+            assert!(steps < 1000, "gc should finish within 1000 steps");
+        }
+        assert!(
+            state.gc.string_arena.get(cached_ref).is_some(),
+            "mid-cycle static intern must survive the incremental cycle",
+        );
+        let replayed_ref = state.gc.intern_string(b"midcycle_key");
+        assert_eq!(
+            cached_ref, replayed_ref,
+            "plain intern must dedup to the same ref as the cached static ref",
+        );
     }
 
     #[test]
