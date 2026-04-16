@@ -18,7 +18,9 @@
 //! to `GcRef<LuaString>`. It starts at 32 buckets (`MINSTRTABSIZE`)
 //! and doubles when the load factor exceeds 1.0.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use super::gc::Color;
 use super::gc::arena::{Arena, GcRef};
@@ -332,6 +334,42 @@ impl Default for StringTable {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Static intern cache (pointer-keyed fast path)
+// ---------------------------------------------------------------------------
+
+/// Identity hasher for `usize` pointer keys.
+///
+/// Pointer addresses are already well-distributed across bucket space;
+/// rehashing them with SipHash would dominate the lookup cost we are
+/// trying to avoid. `write_usize` stores the address directly; other
+/// `write_*` calls are unused because the only key type is `usize`.
+#[derive(Default)]
+pub struct IdentityHasher(u64);
+
+impl Hasher for IdentityHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, _bytes: &[u8]) {
+        // Only `write_usize` is exercised for `HashMap<usize, _>` keys.
+    }
+
+    #[inline]
+    fn write_usize(&mut self, n: usize) {
+        self.0 = n as u64;
+    }
+}
+
+/// Pointer-keyed cache mapping a `&'static [u8]` address to its interned
+/// `GcRef<LuaString>`. Entries are GC roots: they are marked during the
+/// mark phase and never swept.
+pub type StaticInternCache =
+    HashMap<usize, GcRef<LuaString>, BuildHasherDefault<IdentityHasher>>;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -667,6 +705,41 @@ mod tests {
 
         assert_eq!(from_literal, from_string);
         assert_eq!(from_string, from_vec);
+    }
+
+    // -- IdentityHasher tests --
+
+    #[test]
+    fn identity_hasher_returns_written_usize() {
+        use std::hash::Hasher;
+        let mut h = IdentityHasher::default();
+        h.write_usize(0xDEAD_BEEF);
+        assert_eq!(h.finish(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn identity_hasher_ignores_byte_writes() {
+        use std::hash::Hasher;
+        let mut h = IdentityHasher::default();
+        h.write(&[1, 2, 3, 4]);
+        assert_eq!(h.finish(), 0, "write() should be a no-op");
+    }
+
+    #[test]
+    fn static_intern_cache_stores_ref() {
+        let mut arena = Arena::new();
+        let mut table = StringTable::new();
+        let mut cache = StaticInternCache::default();
+
+        const KEY: &[u8] = b"static_literal";
+        let key_ptr = KEY.as_ptr() as usize;
+
+        // First insert — simulate what intern_string_static does.
+        let r = table.intern(KEY, &mut arena, Color::White0);
+        cache.insert(key_ptr, r);
+
+        // Second lookup hits cache.
+        assert_eq!(cache.get(&key_ptr).copied(), Some(r));
     }
 
     #[test]

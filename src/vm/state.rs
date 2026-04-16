@@ -26,7 +26,7 @@ use super::gc::Color;
 use super::gc::arena::{Arena, GcRef};
 use super::gc::trace::Trace;
 use super::metatable::{NUM_TYPE_TAGS, TM_N, TM_NAMES};
-use super::string::{LuaString, StringTable};
+use super::string::{LuaString, StaticInternCache, StringTable};
 use super::table::Table;
 use super::value::{Userdata, Val};
 use crate::api::{LuaApi, LuaApiMut};
@@ -134,6 +134,12 @@ pub struct Gc {
     /// Interned metamethod name strings (one per TMS event).
     /// Initialized once during state creation.
     pub tm_names: [Option<GcRef<LuaString>>; TM_N],
+    /// Pointer-keyed intern cache for `&'static [u8]` literals.
+    ///
+    /// Skips hashing + byte compare for known-static strings. Entries
+    /// are marked as GC roots so they survive collection; the cache is
+    /// never implicitly pruned.
+    pub static_intern_cache: StaticInternCache,
     /// GC collection state: gray lists, pacing, memory tracking.
     pub gc_state: super::gc::collector::GcState,
 }
@@ -152,6 +158,7 @@ impl Gc {
             current_white: Color::White0,
             type_metatables: [None; NUM_TYPE_TAGS],
             tm_names: [None; TM_N],
+            static_intern_cache: StaticInternCache::default(),
             gc_state: super::gc::collector::GcState::new(),
         };
         gc.init_tm_names();
@@ -197,6 +204,26 @@ impl Gc {
             let est = super::gc::collector::EST_STRING_SIZE + data.len();
             self.gc_state.track_alloc(est);
         }
+        r
+    }
+
+    /// Interns a `&'static [u8]`, caching by pointer identity.
+    ///
+    /// Fast path: a pointer-keyed `HashMap` lookup skips `lua_hash`,
+    /// bucket traversal, and byte comparison entirely. On a miss, falls
+    /// back to [`Self::intern_string`] and records the pointer for the
+    /// next call.
+    ///
+    /// The cache never shrinks; entries are GC roots (marked during
+    /// `mark_gc_roots`). Intended for frequently-used string literals
+    /// (e.g. script handler names, anchor points, metamethod keys).
+    pub fn intern_string_static(&mut self, data: &'static [u8]) -> GcRef<LuaString> {
+        let key = data.as_ptr() as usize;
+        if let Some(&r) = self.static_intern_cache.get(&key) {
+            return r;
+        }
+        let r = self.intern_string(data);
+        self.static_intern_cache.insert(key, r);
         r
     }
 
