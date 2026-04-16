@@ -182,6 +182,8 @@ impl Gc {
     /// new string is actually created (not on dedup hit). Debt is NOT
     /// accumulated here; PUC-Rio's `gcdept` only changes in `luaC_step`.
     pub fn intern_string(&mut self, data: &[u8]) -> GcRef<LuaString> {
+        #[cfg(feature = "intern-stats")]
+        super::intern_stats::record(data);
         let old_count = self.string_arena.len();
         let r = self
             .strings

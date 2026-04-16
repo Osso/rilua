@@ -16,6 +16,7 @@ default = []
 dynmod = []
 send = []
 rehash-stats = []
+intern-stats = []
 
 [[bin]]
 name = "rilua"
