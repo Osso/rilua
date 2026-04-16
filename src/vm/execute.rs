@@ -1137,7 +1137,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     state.gc_check()?;
                     let narray = fb2int(instr.b()) as usize;
                     let nhash = fb2int(instr.c()) as usize;
-                    let t = state.gc.alloc_table(Table::with_sizes(narray, nhash));
+                    // When the compiler has no size hint (empty `{}`) the
+                    // table commonly gains 1-4 string keys. Preallocate 4
+                    // hash slots to avoid the first rehash on those sets
+                    // (see docs/wiki/investigations/table-rehashing.md in
+                    // wow-ui-sim). Hinted tables keep the compiler's size.
+                    const EMPTY_HINT_MIN_HASH: usize = 4;
+                    let effective_hash = if narray == 0 && nhash == 0 {
+                        EMPTY_HINT_MIN_HASH
+                    } else {
+                        nhash
+                    };
+                    let t = state.gc.alloc_table(Table::with_sizes(narray, effective_hash));
                     state.stack_set(ra, Val::Table(t));
                 }
 
@@ -2281,6 +2292,49 @@ mod tests {
     }
 
     // ----- Table tests -----
+
+    #[test]
+    fn op_newtable_empty_hint_preallocates_hash_to_avoid_first_rehash() {
+        // NewTable(0, 0) is emitted for a bare `{}` literal. The executor
+        // promotes that to a minimum of 4 hash slots so the first string
+        // key insert does not trigger rehash. Keeps non-zero hints intact.
+        let mut state = LuaState::new();
+
+        // fb2int(5) == 5 (values < 8 pass through), so C=5 means nhash=5,
+        // which Table::with_sizes rounds up to 8 slots.
+        let code = vec![
+            Instruction::abc(OpCode::NewTable, 0, 0, 0).raw(), // R(0) = {} (hint 0,0)
+            Instruction::abc(OpCode::NewTable, 1, 0, 5).raw(), // R(1) = hash-hint 5 → 8 slots
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let proto_rc = ProtoRef::new(make_proto(code, vec![]));
+        let env = state.global;
+        let cl = LuaClosure::new(proto_rc, env);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+
+        execute(&mut state).ok();
+
+        let Val::Table(empty) = state.stack_get(state.base) else {
+            panic!("R(0) should be a table");
+        };
+        let Val::Table(hinted) = state.stack_get(state.base + 1) else {
+            panic!("R(1) should be a table");
+        };
+        assert_eq!(
+            state.gc.tables.get(empty).unwrap().hash_size(),
+            4,
+            "empty `{{}}` should pre-allocate 4 hash slots",
+        );
+        assert_eq!(
+            state.gc.tables.get(hinted).unwrap().hash_size(),
+            8,
+            "hinted table should round its hint (5) up to next power of 2",
+        );
+    }
 
     #[test]
     fn op_newtable_and_settable_gettable() {
