@@ -228,6 +228,17 @@ pub trait LuaApiMut: LuaApi {
         Val::Str(str_ref)
     }
 
+    /// Interns a static byte string via the permanent static cache,
+    /// returning `Val::Str`.
+    ///
+    /// Use this when the byte slice has `'static` lifetime and is expected
+    /// to be reused heavily across VM operations or across many embeddings.
+    fn intern_static(&mut self, s: &'static [u8]) -> Val {
+        let state = self.state_mut();
+        let str_ref = state.gc.intern_string_static(s);
+        Val::Str(str_ref)
+    }
+
     // -----------------------------------------------------------------------
     // Table operations
     // -----------------------------------------------------------------------

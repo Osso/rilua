@@ -1559,6 +1559,18 @@ mod tests {
     }
 
     #[test]
+    fn lua_api_with_mut_state_intern_static() {
+        let mut lua = Lua::new_empty();
+        let state = &mut lua.state;
+
+        let val = state.intern_static(b"test");
+        assert!(matches!(val, Val::Str(_)));
+
+        let val2 = state.intern_static(b"test");
+        assert_eq!(val, val2);
+    }
+
+    #[test]
     fn lua_api_with_mut_state_gc_operations() {
         let mut lua = Lua::new_empty();
         let state = &mut lua.state;

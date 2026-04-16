@@ -740,6 +740,16 @@ mod tests {
     }
 
     #[test]
+    fn lua_intern_static() {
+        let mut lua = Lua::new_empty();
+        let val = lua.intern_static(b"hello");
+        assert!(matches!(val, Val::Str(_)));
+
+        let val2 = lua.intern_static(b"hello");
+        assert_eq!(val, val2);
+    }
+
+    #[test]
     fn lua_table_raw_set_via_api() {
         let mut lua = Lua::new_empty();
         let t = lua.create_table();
