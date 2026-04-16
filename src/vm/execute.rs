@@ -1148,7 +1148,9 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     } else {
                         nhash
                     };
-                    let t = state.gc.alloc_table(Table::with_sizes(narray, effective_hash));
+                    let t = state
+                        .gc
+                        .alloc_table(Table::with_sizes(narray, effective_hash));
                     state.stack_set(ra, Val::Table(t));
                 }
 

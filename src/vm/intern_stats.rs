@@ -24,18 +24,14 @@ pub fn snapshot_top(n: usize) -> Vec<(Vec<u8>, u64)> {
     let Ok(map) = counts().lock() else {
         return Vec::new();
     };
-    let mut entries: Vec<(Vec<u8>, u64)> =
-        map.iter().map(|(k, &v)| (k.clone(), v)).collect();
+    let mut entries: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, &v)| (k.clone(), v)).collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1));
     entries.truncate(n);
     entries
 }
 
 pub fn total_calls() -> u64 {
-    counts()
-        .lock()
-        .map(|m| m.values().sum())
-        .unwrap_or(0)
+    counts().lock().map(|m| m.values().sum()).unwrap_or(0)
 }
 
 pub fn unique_strings() -> usize {

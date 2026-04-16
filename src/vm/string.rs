@@ -368,8 +368,7 @@ impl Hasher for IdentityHasher {
 /// Pointer-keyed cache mapping a `&'static [u8]` address to its interned
 /// `GcRef<LuaString>`. Entries are GC roots: they are marked during the
 /// mark phase and never swept.
-pub type StaticInternCache =
-    HashMap<usize, GcRef<LuaString>, BuildHasherDefault<IdentityHasher>>;
+pub type StaticInternCache = HashMap<usize, GcRef<LuaString>, BuildHasherDefault<IdentityHasher>>;
 
 // ---------------------------------------------------------------------------
 // Tests

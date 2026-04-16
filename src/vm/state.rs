@@ -1428,9 +1428,7 @@ mod tests {
         // without the flip, which accidentally preserves new mid-cycle
         // allocations and hides the bug.
         let mut steps = 0;
-        while state.gc.gc_state.phase
-            != super::super::gc::collector::GcPhase::Pause
-        {
+        while state.gc.gc_state.phase != super::super::gc::collector::GcPhase::Pause {
             state.gc_step(1024).expect("incremental step");
             steps += 1;
             assert!(steps < 1000, "gc should finish within 1000 steps");
