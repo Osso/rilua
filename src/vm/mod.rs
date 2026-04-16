@@ -10,6 +10,8 @@ pub mod instructions;
 pub mod listing;
 pub mod metatable;
 pub mod proto;
+#[cfg(feature = "rehash-stats")]
+pub mod rehash_stats;
 pub mod state;
 pub mod string;
 pub mod table;

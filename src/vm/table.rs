@@ -596,6 +596,16 @@ impl Table {
         // Phase 5: resize with new configuration.
         // Hash needs to hold (total_use - na) entries.
         let nh_size = total_use - na;
+        #[cfg(feature = "rehash-stats")]
+        {
+            let old_hash_size = self.hash_size();
+            let new_hash_size = if nh_size == 0 {
+                0
+            } else {
+                1u32 << ceil_log2(nh_size as usize)
+            };
+            super::rehash_stats::record(old_hash_size, new_hash_size, self.backing().is_some());
+        }
         self.resize(na_size as usize, nh_size as usize, strings)
     }
 

@@ -15,6 +15,7 @@ keywords = ["lua", "interpreter", "scripting", "wow", "vm"]
 default = []
 dynmod = []
 send = []
+rehash-stats = []
 
 [[bin]]
 name = "rilua"
