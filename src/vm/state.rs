@@ -214,7 +214,10 @@ impl Gc {
     /// Fast path: a pointer-keyed `HashMap` lookup skips `lua_hash`,
     /// bucket traversal, and byte comparison entirely. On a miss, falls
     /// back to [`Self::intern_string`] and records the pointer for the
-    /// next call.
+    /// next call. If the same bytes were interned earlier through the
+    /// non-static path, the fallback returns that existing `GcRef`; a
+    /// later distinct static pointer with identical bytes will miss this
+    /// pointer cache once, then cache its own pointer to that same ref.
     ///
     /// The cache never shrinks; entries are GC roots (marked during
     /// `mark_gc_roots`). Intended for frequently-used string literals
@@ -1441,6 +1444,34 @@ mod tests {
         assert_eq!(
             cached_ref, replayed_ref,
             "plain intern must dedup to the same ref as the cached static ref",
+        );
+    }
+
+    #[test]
+    fn intern_string_static_reuses_existing_ref_for_same_content() {
+        let mut state = LuaState::new();
+
+        let plain_ref = state.gc.intern_string(b"shared-key");
+
+        let first_static: &'static [u8] = Box::leak(b"shared-key".to_vec().into_boxed_slice());
+        let first_static_ref = state.gc.intern_string_static(first_static);
+        assert_eq!(
+            first_static_ref, plain_ref,
+            "static path should reuse the ref created by plain interning",
+        );
+        assert_eq!(state.gc.static_intern_cache.len(), 1);
+
+        let second_static: &'static [u8] = Box::leak(b"shared-key".to_vec().into_boxed_slice());
+        assert_ne!(first_static.as_ptr(), second_static.as_ptr());
+        let second_static_ref = state.gc.intern_string_static(second_static);
+        assert_eq!(
+            second_static_ref, plain_ref,
+            "same-content static pointers should still dedup through intern_string",
+        );
+        assert_eq!(
+            state.gc.static_intern_cache.len(),
+            2,
+            "distinct static pointers each pay one cache miss and get their own entry",
         );
     }
 
