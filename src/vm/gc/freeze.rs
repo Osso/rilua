@@ -409,4 +409,55 @@ mod tests {
         // gray — mark_value short-circuits immediately.
         assert_eq!(gray_after, gray_before);
     }
+
+    #[test]
+    fn rawset_on_frozen_table_raises_error() {
+        use crate::api::LuaApiMut;
+        use crate::Lua;
+
+        let mut lua = Lua::new().expect("lua");
+        // Expose a table to Lua, freeze it from the Rust side, then
+        // confirm rawset raises.
+        lua.exec("_G.__frozen = {}").expect("seed frozen table");
+        let frozen_ref = match lua.get_global_val("__frozen") {
+            Val::Table(r) => r,
+            other => panic!("expected table, got {other:?}"),
+        };
+        assert!(lua.state_mut().gc.pin_object(Val::Table(frozen_ref)));
+        lua.state_mut()
+            .gc
+            .tables
+            .set_flag(frozen_ref, crate::vm::gc::arena::Flag::Frozen);
+
+        let result = lua.exec("rawset(__frozen, 'x', 1)");
+        assert!(
+            matches!(&result, Err(err) if format!("{err}").contains("frozen table")),
+            "expected frozen-table error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn settable_on_frozen_table_raises_error() {
+        use crate::api::LuaApiMut;
+        use crate::Lua;
+
+        let mut lua = Lua::new().expect("lua");
+        lua.exec("_G.__frozen = {}").expect("seed frozen table");
+        let frozen_ref = match lua.get_global_val("__frozen") {
+            Val::Table(r) => r,
+            other => panic!("expected table, got {other:?}"),
+        };
+        lua.state_mut()
+            .gc
+            .tables
+            .set_flag(frozen_ref, crate::vm::gc::arena::Flag::Frozen);
+
+        // Lua-level assignment should go through the settable path and
+        // hit the frozen gate.
+        let result = lua.exec("__frozen.foo = 1");
+        assert!(
+            matches!(&result, Err(err) if format!("{err}").contains("frozen table")),
+            "expected frozen-table error, got {result:?}"
+        );
+    }
 }

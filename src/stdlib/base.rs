@@ -683,6 +683,12 @@ pub fn lua_rawset(state: &mut LuaState) -> LuaResult<u32> {
         return Err(bad_argument("rawset", 1, "table expected"));
     };
 
+    if state.gc.tables.is_frozen(table_ref) {
+        return Err(crate::error::runtime_error(
+            "attempt to modify a frozen table",
+        ));
+    }
+
     // Need to split the borrow: get table mutably, string_arena immutably.
     // Since these are different arenas in gc, we access them via the public fields.
     let table = state

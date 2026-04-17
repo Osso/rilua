@@ -351,6 +351,7 @@ pub(super) fn table_set(
     key: Val,
     value: Val,
 ) -> LuaResult<()> {
+    ensure_table_not_frozen(state, table_ref)?;
     let table = state
         .gc
         .tables
@@ -649,17 +650,40 @@ fn handle_table_settable(
     value: Val,
 ) -> LuaResult<SettableStep> {
     if !table_get(state, table_ref, key)?.is_nil() {
+        ensure_table_not_frozen(state, table_ref)?;
         raw_set_existing_slot(state, table_ref, key, value)?;
         return Ok(SettableStep::Done);
     }
 
     match get_table_newindex_tm(state, table_ref)? {
         None => {
+            ensure_table_not_frozen(state, table_ref)?;
             raw_set_new_slot(state, table_ref, key, value)?;
             Ok(SettableStep::Done)
         }
         Some(tm_val) => resolve_settable_tm(state, current, key, value, tm_val),
     }
+}
+
+/// Gate a table write on the Frozen flag.
+///
+/// Frozen tables are expected to be pinned as part of the Track 2
+/// freeze-after-bootstrap plan; writing into one would silently break
+/// the invariant that every reachable descendant is also frozen. We
+/// raise a Lua error so the caller notices at the write site rather
+/// than discovering the broken invariant through a later GC crash.
+///
+/// The metamethod path through `resolve_settable_tm` is NOT gated —
+/// the metamethod may legitimately redirect writes to a mutable
+/// shadow table.
+#[inline]
+fn ensure_table_not_frozen(state: &LuaState, table_ref: GcRef<Table>) -> LuaResult<()> {
+    if state.gc.tables.is_frozen(table_ref) {
+        return Err(runtime_error_simple(
+            "attempt to modify a frozen table",
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
