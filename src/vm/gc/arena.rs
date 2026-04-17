@@ -51,6 +51,29 @@ fn byte_to_color(b: u8) -> Option<Color> {
 }
 
 // ---------------------------------------------------------------------------
+// Flag byte encoding
+// ---------------------------------------------------------------------------
+
+/// Per-entry boolean flags stored in a parallel `Vec<u8>`. Independent of
+/// the color byte so the GC sweep doesn't have to mask/unmask them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flag {
+    /// Object is pinned for the lifetime of the VM. Set after bootstrap
+    /// on `_G` / `__secureenv` trees so the mark phase can skip traversal
+    /// of stable-root tables entirely.
+    Frozen,
+}
+
+const FLAG_FROZEN: u8 = 1 << 0;
+
+#[inline]
+fn flag_mask(f: Flag) -> u8 {
+    match f {
+        Flag::Frozen => FLAG_FROZEN,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GcRef<T>
 // ---------------------------------------------------------------------------
 
@@ -158,6 +181,9 @@ pub struct Arena<T> {
     /// Parallel color array. `colors[i]` holds the color byte for
     /// `entries[i]`. `COLOR_FREE` (0) for free slots.
     colors: Vec<u8>,
+    /// Parallel flag array. `flags[i]` is a bitset of [`Flag`] values
+    /// for `entries[i]`. `0` for free slots and newly-allocated entries.
+    flags: Vec<u8>,
     free_head: Option<u32>,
     len: u32,
 }
@@ -168,6 +194,7 @@ impl<T> Arena<T> {
         Self {
             entries: Vec::new(),
             colors: Vec::new(),
+            flags: Vec::new(),
             free_head: None,
             len: 0,
         }
@@ -210,6 +237,7 @@ impl<T> Arena<T> {
             let generation = entry.generation;
             entry.state = EntryState::Occupied { value };
             self.colors[free_idx as usize] = color_byte;
+            self.flags[free_idx as usize] = 0;
 
             GcRef {
                 index: free_idx,
@@ -223,6 +251,7 @@ impl<T> Arena<T> {
                 state: EntryState::Occupied { value },
             });
             self.colors.push(color_byte);
+            self.flags.push(0);
 
             GcRef {
                 index,
@@ -284,6 +313,7 @@ impl<T> Arena<T> {
         self.free_head = Some(r.index);
         self.len -= 1;
         self.colors[r.index as usize] = COLOR_FREE;
+        self.flags[r.index as usize] = 0;
 
         match old_state {
             EntryState::Occupied { value } => Some(value),
@@ -321,6 +351,62 @@ impl<T> Arena<T> {
         }
         self.colors[r.index as usize] = color_to_byte(new_color);
         true
+    }
+
+    /// Returns `true` if the entry carries the given flag. Returns
+    /// `false` for stale refs, free slots, or entries without the flag.
+    #[inline]
+    pub fn has_flag(&self, r: GcRef<T>, f: Flag) -> bool {
+        let Some(entry) = self.entries.get(r.index as usize) else {
+            return false;
+        };
+        if entry.generation != r.generation {
+            return false;
+        }
+        if self.colors[r.index as usize] == COLOR_FREE {
+            return false;
+        }
+        self.flags[r.index as usize] & flag_mask(f) != 0
+    }
+
+    /// Sets the given flag on the entry. Returns `true` on success,
+    /// `false` for stale refs or free slots.
+    #[inline]
+    pub fn set_flag(&mut self, r: GcRef<T>, f: Flag) -> bool {
+        let Some(entry) = self.entries.get(r.index as usize) else {
+            return false;
+        };
+        if entry.generation != r.generation {
+            return false;
+        }
+        if self.colors[r.index as usize] == COLOR_FREE {
+            return false;
+        }
+        self.flags[r.index as usize] |= flag_mask(f);
+        true
+    }
+
+    /// Clears the given flag on the entry. Returns `true` on success,
+    /// `false` for stale refs or free slots.
+    #[inline]
+    pub fn clear_flag(&mut self, r: GcRef<T>, f: Flag) -> bool {
+        let Some(entry) = self.entries.get(r.index as usize) else {
+            return false;
+        };
+        if entry.generation != r.generation {
+            return false;
+        }
+        if self.colors[r.index as usize] == COLOR_FREE {
+            return false;
+        }
+        self.flags[r.index as usize] &= !flag_mask(f);
+        true
+    }
+
+    /// Convenience: returns `true` if the entry is frozen.
+    #[inline]
+    pub fn is_frozen(&self, r: GcRef<T>) -> bool {
+        self.has_flag(r, Flag::Frozen)
     }
 
     /// Iterates over all occupied entries.
@@ -361,10 +447,11 @@ impl<T> Arena<T> {
         let mut local_len = self.len;
         let mut freed = 0u32;
 
-        for (i, (entry, color_byte)) in self
+        for (i, ((entry, color_byte), flag_byte)) in self
             .entries
             .iter_mut()
             .zip(self.colors.iter_mut())
+            .zip(self.flags.iter_mut())
             .enumerate()
         {
             if *color_byte == COLOR_FREE {
@@ -379,6 +466,7 @@ impl<T> Arena<T> {
                 local_free_head = Some(i as u32);
                 local_len -= 1;
                 *color_byte = COLOR_FREE;
+                *flag_byte = 0;
                 freed += 1;
             } else {
                 *color_byte = new_byte;
@@ -419,11 +507,16 @@ impl<T> Arena<T> {
 
         let entries = &mut self.entries[start_usize..];
         let colors = &mut self.colors[start_usize..];
+        let flags = &mut self.flags[start_usize..];
 
         // Iterator-based loop over zip of entries and colors eliminates
         // per-access bounds checks. Only Occupied entries count toward
         // max_count. Free entries are skipped at near-zero cost.
-        for (entry, color_byte) in entries.iter_mut().zip(colors.iter_mut()) {
+        for ((entry, color_byte), flag_byte) in entries
+            .iter_mut()
+            .zip(colors.iter_mut())
+            .zip(flags.iter_mut())
+        {
             if occupied_seen >= max_count {
                 break;
             }
@@ -442,6 +535,7 @@ impl<T> Arena<T> {
                 local_free_head = Some(abs_index);
                 local_len -= 1;
                 *color_byte = COLOR_FREE;
+                *flag_byte = 0;
                 freed += 1;
             } else {
                 *color_byte = new_byte;
@@ -730,6 +824,94 @@ mod tests {
         set.insert(r2);
         set.insert(r1_copy); // duplicate
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn flag_defaults_to_clear() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r = arena.alloc(42, Color::White0);
+        assert!(!arena.has_flag(r, Flag::Frozen));
+        assert!(!arena.is_frozen(r));
+    }
+
+    #[test]
+    fn set_and_clear_flag() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r = arena.alloc(42, Color::White0);
+
+        assert!(arena.set_flag(r, Flag::Frozen));
+        assert!(arena.has_flag(r, Flag::Frozen));
+        assert!(arena.is_frozen(r));
+
+        assert!(arena.clear_flag(r, Flag::Frozen));
+        assert!(!arena.has_flag(r, Flag::Frozen));
+    }
+
+    #[test]
+    fn flag_set_is_idempotent() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r = arena.alloc(42, Color::White0);
+        assert!(arena.set_flag(r, Flag::Frozen));
+        assert!(arena.set_flag(r, Flag::Frozen));
+        assert!(arena.is_frozen(r));
+    }
+
+    #[test]
+    fn flag_rejected_on_stale_ref() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r = arena.alloc(42, Color::White0);
+        arena.free(r);
+        assert!(!arena.has_flag(r, Flag::Frozen));
+        assert!(!arena.set_flag(r, Flag::Frozen));
+        assert!(!arena.clear_flag(r, Flag::Frozen));
+    }
+
+    #[test]
+    fn flag_cleared_on_free_and_realloc() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r1 = arena.alloc(1, Color::White0);
+        assert!(arena.set_flag(r1, Flag::Frozen));
+        arena.free(r1);
+
+        // Slot reuse must not inherit the frozen bit.
+        let r2 = arena.alloc(2, Color::White0);
+        assert_eq!(r2.index(), r1.index());
+        assert!(!arena.is_frozen(r2));
+    }
+
+    #[test]
+    fn sweep_clears_flags_on_freed_entries() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r1 = arena.alloc(1, Color::White0);
+        let r2 = arena.alloc(2, Color::White0);
+        assert!(arena.set_flag(r1, Flag::Frozen));
+        assert!(arena.set_flag(r2, Flag::Frozen));
+
+        // r2 was marked (reset to White1); r1 stays White0 (dead).
+        arena.set_color(r2, Color::White1);
+        let freed = arena.sweep(Color::White0, Color::White1);
+
+        assert_eq!(freed, 1);
+        // r1 was freed — its flag byte must be reset.
+        assert!(!arena.has_flag(r1, Flag::Frozen));
+        // r2 survived — frozen bit retained.
+        assert!(arena.is_frozen(r2));
+    }
+
+    #[test]
+    fn sweep_partial_clears_flags_on_freed_entries() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r1 = arena.alloc(1, Color::White0);
+        let r2 = arena.alloc(2, Color::White0);
+        assert!(arena.set_flag(r1, Flag::Frozen));
+        assert!(arena.set_flag(r2, Flag::Frozen));
+
+        arena.set_color(r2, Color::White1);
+        let (freed, _next, _done) = arena.sweep_partial(Color::White0, Color::White1, 0, 10);
+
+        assert_eq!(freed, 1);
+        assert!(!arena.has_flag(r1, Flag::Frozen));
+        assert!(arena.is_frozen(r2));
     }
 
     #[test]
