@@ -56,20 +56,41 @@ fn byte_to_color(b: u8) -> Option<Color> {
 
 /// Per-entry boolean flags stored in a parallel `Vec<u8>`. Independent of
 /// the color byte so the GC sweep doesn't have to mask/unmask them.
+///
+/// Flags compose: `Pinned | SkipTraverse` together are valid and used by
+/// the bootstrap-time scan-skip optimisation for stable-root trees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flag {
-    /// Object is pinned for the lifetime of the VM. Set after bootstrap
-    /// on `_G` / `__secureenv` trees so the mark phase can skip traversal
-    /// of stable-root tables entirely.
+    /// Object is pinned for the lifetime of the VM. Sweep treats pinned
+    /// entries as kept-alive without requiring they be marked.
+    ///
+    /// Used to anchor long-lived objects (frame backing tables, shared
+    /// metatables) whose mark cost is not worth paying every cycle.
     Frozen,
+    /// Object survives sweep without being marked. Equivalent to Frozen
+    /// in current policy; reserved as a distinct spelling for call sites
+    /// that express "kept alive" intent rather than "fully frozen".
+    Pinned,
+    /// Mark phase skips children when traversing this object. The object
+    /// itself is still marked (so it survives sweep), but its outgoing
+    /// references are not walked.
+    ///
+    /// Combine with `Pinned` on roots whose children are independently
+    /// pinned or otherwise kept alive — e.g. `__rilua_frame_refs` whose
+    /// entries are each pinned at creation.
+    SkipTraverse,
 }
 
 const FLAG_FROZEN: u8 = 1 << 0;
+const FLAG_PINNED: u8 = 1 << 1;
+const FLAG_SKIP_TRAVERSE: u8 = 1 << 2;
 
 #[inline]
 fn flag_mask(f: Flag) -> u8 {
     match f {
         Flag::Frozen => FLAG_FROZEN,
+        Flag::Pinned => FLAG_PINNED,
+        Flag::SkipTraverse => FLAG_SKIP_TRAVERSE,
     }
 }
 
@@ -407,6 +428,20 @@ impl<T> Arena<T> {
     #[inline]
     pub fn is_frozen(&self, r: GcRef<T>) -> bool {
         self.has_flag(r, Flag::Frozen)
+    }
+
+    /// Convenience: returns `true` if the entry is pinned (kept alive
+    /// across sweeps regardless of mark state).
+    #[inline]
+    pub fn is_pinned(&self, r: GcRef<T>) -> bool {
+        self.has_flag(r, Flag::Pinned)
+    }
+
+    /// Convenience: returns `true` if the mark phase should skip
+    /// traversing this object's children.
+    #[inline]
+    pub fn is_skip_traverse(&self, r: GcRef<T>) -> bool {
+        self.has_flag(r, Flag::SkipTraverse)
     }
 
     /// Iterates over all occupied entries.
@@ -845,6 +880,52 @@ mod tests {
 
         assert!(arena.clear_flag(r, Flag::Frozen));
         assert!(!arena.has_flag(r, Flag::Frozen));
+    }
+
+    #[test]
+    fn pinned_and_skip_traverse_flags_independent() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r = arena.alloc(42, Color::White0);
+
+        assert!(arena.set_flag(r, Flag::Pinned));
+        assert!(arena.is_pinned(r));
+        assert!(!arena.is_skip_traverse(r));
+        assert!(!arena.is_frozen(r));
+
+        assert!(arena.set_flag(r, Flag::SkipTraverse));
+        assert!(arena.is_pinned(r));
+        assert!(arena.is_skip_traverse(r));
+
+        // Clearing one does not disturb the other.
+        assert!(arena.clear_flag(r, Flag::Pinned));
+        assert!(!arena.is_pinned(r));
+        assert!(arena.is_skip_traverse(r));
+    }
+
+    #[test]
+    fn frozen_and_pinned_coexist() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r = arena.alloc(42, Color::White0);
+        assert!(arena.set_flag(r, Flag::Frozen));
+        assert!(arena.set_flag(r, Flag::Pinned));
+        assert!(arena.is_frozen(r));
+        assert!(arena.is_pinned(r));
+    }
+
+    #[test]
+    fn all_flags_cleared_on_slot_reuse() {
+        let mut arena: Arena<i32> = Arena::new();
+        let r1 = arena.alloc(1, Color::White0);
+        assert!(arena.set_flag(r1, Flag::Frozen));
+        assert!(arena.set_flag(r1, Flag::Pinned));
+        assert!(arena.set_flag(r1, Flag::SkipTraverse));
+        arena.free(r1);
+
+        let r2 = arena.alloc(2, Color::White0);
+        assert_eq!(r2.index(), r1.index());
+        assert!(!arena.is_frozen(r2));
+        assert!(!arena.is_pinned(r2));
+        assert!(!arena.is_skip_traverse(r2));
     }
 
     #[test]
