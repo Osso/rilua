@@ -39,6 +39,8 @@
 //!
 //! Reference: `lgc.c`, `lgc.h` in PUC-Rio Lua 5.1.1.
 
+use smallvec::SmallVec;
+
 use super::Color;
 use super::arena::GcRef;
 
@@ -433,24 +435,36 @@ impl Gc {
             return;
         }
 
-        // Mark array values by index (no Vec allocation).
+        // Mark array values: collect under one borrow, then release and mark.
+        // SmallVec stack buffer keeps small tables allocation-free.
         if !weak_values {
-            for i in 0..array_len {
-                // Brief borrow per element: extract the Copy Val, then mark.
-                let val = self.tables.get(r).and_then(|t| t.array_get(i));
-                if let Some(val) = val {
-                    self.mark_value(val);
+            let mut array_values: SmallVec<[Val; 32]> = SmallVec::new();
+            if let Some(table) = self.tables.get(r) {
+                for i in 0..array_len {
+                    if let Some(val) = table.array_get(i) {
+                        array_values.push(val);
+                    }
                 }
+            }
+            for val in array_values {
+                self.mark_value(val);
             }
         }
 
-        // Mark hash entries by index (no Vec allocation).
-        for i in 0..hash_count {
-            let kv = self.tables.get(r).and_then(|t| t.hash_node_kv(i));
-            let Some((key, val)) = kv else { continue };
-            if val.is_nil() {
-                continue;
+        // Mark hash entries: same single-borrow pattern for key/value pairs.
+        let mut hash_entries: SmallVec<[(Val, Val); 32]> = SmallVec::new();
+        if let Some(table) = self.tables.get(r) {
+            for i in 0..hash_count {
+                let Some((key, val)) = table.hash_node_kv(i) else {
+                    continue;
+                };
+                if val.is_nil() {
+                    continue;
+                }
+                hash_entries.push((key, val));
             }
+        }
+        for (key, val) in hash_entries {
             if !weak_keys {
                 self.mark_value(key);
             }

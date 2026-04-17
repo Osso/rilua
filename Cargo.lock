@@ -1716,6 +1716,7 @@ dependencies = [
  "criterion",
  "flamegraph",
  "proptest",
+ "smallvec",
 ]
 
 [[package]]

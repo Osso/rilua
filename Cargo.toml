@@ -82,6 +82,9 @@ unnested_or_patterns = { level = "allow", priority = 1 }
 cargo_common_metadata = { level = "allow", priority = 1 }
 redundant_else = { level = "allow", priority = 1 }
 
+[dependencies]
+smallvec = "1"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 flamegraph = "0.6"
