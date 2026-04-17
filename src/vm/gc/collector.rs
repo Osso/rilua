@@ -284,6 +284,10 @@ impl Default for GcState {
 
 impl Gc {
     /// Marks a Val if it is a collectable (GC-managed) type.
+    ///
+    /// Frozen entries are short-circuited: they stay alive via the sweep
+    /// path regardless of mark colour, so there's no need to move them
+    /// onto the gray list or recurse through them.
     #[inline]
     pub fn mark_value(&mut self, val: Val) {
         match val {
@@ -299,6 +303,9 @@ impl Gc {
     /// Marks a string (directly to black -- strings have no children).
     #[inline]
     fn mark_string(&mut self, r: GcRef<LuaString>) {
+        if self.string_arena.is_frozen(r) {
+            return;
+        }
         if let Some(color) = self.string_arena.color(r)
             && color.is_white()
         {
@@ -309,6 +316,9 @@ impl Gc {
     /// Marks a table: white -> gray, added to gray list for traversal.
     #[inline]
     fn mark_table(&mut self, r: GcRef<Table>) {
+        if self.tables.is_frozen(r) {
+            return;
+        }
         if let Some(color) = self.tables.color(r)
             && color.is_white()
         {
@@ -320,6 +330,9 @@ impl Gc {
     /// Marks a closure: white -> gray, added to gray list.
     #[inline]
     fn mark_closure(&mut self, r: GcRef<Closure>) {
+        if self.closures.is_frozen(r) {
+            return;
+        }
         if let Some(color) = self.closures.color(r)
             && color.is_white()
         {
@@ -331,6 +344,9 @@ impl Gc {
     /// Marks a thread: white -> gray, added to gray list.
     #[inline]
     fn mark_thread(&mut self, r: GcRef<LuaThread>) {
+        if self.threads.is_frozen(r) {
+            return;
+        }
         if let Some(color) = self.threads.color(r)
             && color.is_white()
         {
@@ -341,6 +357,9 @@ impl Gc {
 
     /// Marks a userdata: marks metatable and env, then goes black.
     fn mark_userdata(&mut self, r: GcRef<Userdata>) {
+        if self.userdata.is_frozen(r) {
+            return;
+        }
         if let Some(color) = self.userdata.color(r)
             && color.is_white()
         {
@@ -364,6 +383,9 @@ impl Gc {
     /// Marks an upvalue: if closed, marks the stored value.
     #[inline]
     fn mark_upvalue(&mut self, r: GcRef<Upvalue>) {
+        if self.upvalues.is_frozen(r) {
+            return;
+        }
         if let Some(color) = self.upvalues.color(r)
             && color.is_white()
         {
@@ -410,12 +432,14 @@ impl Gc {
     /// Each Val is Copy, so we extract one at a time and release the table
     /// borrow before calling mark_value.
     ///
-    /// Tables flagged with [`Flag::SkipTraverse`] are marked black but their
-    /// children (metatable, array, hash) are not walked. Caller is
-    /// responsible for independently keeping those children alive
-    /// (typically via [`Flag::Pinned`] on each child).
+    /// Tables flagged with [`Flag::SkipTraverse`] or [`Flag::Frozen`] are
+    /// marked black but their children (metatable, array, hash) are not
+    /// walked. For `SkipTraverse` the caller is responsible for
+    /// independently keeping those children alive (typically via
+    /// [`Flag::Pinned`] on each child); for `Frozen` the freeze walk
+    /// already transitively pinned every reachable descendant.
     fn traverse_table(&mut self, r: GcRef<Table>) {
-        if self.tables.is_skip_traverse(r) {
+        if self.tables.is_skip_traverse(r) || self.tables.is_frozen(r) {
             self.tables.set_color(r, Color::Black);
             return;
         }

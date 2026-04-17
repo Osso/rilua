@@ -364,4 +364,49 @@ mod tests {
         let stats = lua.gc.freeze_table(t);
         assert_eq!(stats.total(), 0);
     }
+
+    #[test]
+    fn frozen_root_survives_full_gc_without_children_walk() {
+        // Freeze a root whose only reference to its child tree is
+        // through the root itself. If full_gc honoured Frozen correctly
+        // the child must survive (transitively pinned by the freeze
+        // walk); if sweep and mark did NOT honour Frozen, the whole
+        // tree would be freed because nothing else reaches the root.
+        let mut lua = LuaState::new();
+        let root = lua.gc.tables.alloc(Table::new(), lua.gc.current_white);
+        let child = lua.gc.tables.alloc(Table::new(), lua.gc.current_white);
+        let key = lua.gc.intern_string(b"child");
+        lua.gc
+            .tables
+            .get_mut(root)
+            .unwrap()
+            .raw_set(Val::Str(key), Val::Table(child), &lua.gc.string_arena)
+            .unwrap();
+
+        let stats = lua.gc.freeze_table(root);
+        assert_eq!(stats.tables, 2);
+
+        lua.full_gc().expect("full gc");
+
+        assert!(lua.gc.tables.is_valid(root));
+        assert!(lua.gc.tables.is_valid(child));
+        assert!(lua.gc.tables.is_frozen(root));
+        assert!(lua.gc.tables.is_frozen(child));
+    }
+
+    #[test]
+    fn mark_value_short_circuits_frozen_table() {
+        use crate::vm::gc::arena::Flag;
+        let mut lua = LuaState::new();
+        let t = lua.gc.tables.alloc(Table::new(), lua.gc.current_white);
+        assert!(lua.gc.tables.set_flag(t, Flag::Frozen));
+
+        let gray_before = lua.gc.gc_state.gray.len();
+        lua.gc.mark_value(Val::Table(t));
+        let gray_after = lua.gc.gc_state.gray.len();
+
+        // Frozen entry is neither pushed onto the gray list nor coloured
+        // gray — mark_value short-circuits immediately.
+        assert_eq!(gray_after, gray_before);
+    }
 }

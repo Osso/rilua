@@ -493,11 +493,11 @@ impl<T> Arena<T> {
                 continue;
             }
 
-            // Pinned entries survive sweep regardless of mark state —
-            // reset them to new_white like a normal survivor so the
+            // Pinned and Frozen entries survive sweep regardless of mark
+            // state — reset to new_white like a normal survivor so the
             // next cycle doesn't also see them as dead.
-            let is_pinned = *flag_byte & FLAG_PINNED != 0;
-            if *color_byte == dead_byte && !is_pinned {
+            let is_kept_alive = *flag_byte & (FLAG_PINNED | FLAG_FROZEN) != 0;
+            if *color_byte == dead_byte && !is_kept_alive {
                 entry.state = EntryState::Free {
                     next_free: local_free_head,
                 };
@@ -566,10 +566,10 @@ impl<T> Arena<T> {
                 continue;
             }
 
-            // Pinned entries survive sweep unconditionally — see
-            // `sweep` above for the full rationale.
-            let is_pinned = *flag_byte & FLAG_PINNED != 0;
-            if *color_byte == dead_byte && !is_pinned {
+            // Pinned and Frozen entries survive sweep unconditionally —
+            // see `sweep` above for the full rationale.
+            let is_kept_alive = *flag_byte & (FLAG_PINNED | FLAG_FROZEN) != 0;
+            if *color_byte == dead_byte && !is_kept_alive {
                 entry.state = EntryState::Free {
                     next_free: local_free_head,
                 };
@@ -969,11 +969,13 @@ mod tests {
 
     #[test]
     fn sweep_clears_flags_on_freed_entries() {
+        // Uses Flag::SkipTraverse (pure marker — does not prevent sweep)
+        // to exercise the "flag byte resets on free" contract.
         let mut arena: Arena<i32> = Arena::new();
         let r1 = arena.alloc(1, Color::White0);
         let r2 = arena.alloc(2, Color::White0);
-        assert!(arena.set_flag(r1, Flag::Frozen));
-        assert!(arena.set_flag(r2, Flag::Frozen));
+        assert!(arena.set_flag(r1, Flag::SkipTraverse));
+        assert!(arena.set_flag(r2, Flag::SkipTraverse));
 
         // r2 was marked (reset to White1); r1 stays White0 (dead).
         arena.set_color(r2, Color::White1);
@@ -981,9 +983,9 @@ mod tests {
 
         assert_eq!(freed, 1);
         // r1 was freed — its flag byte must be reset.
-        assert!(!arena.has_flag(r1, Flag::Frozen));
-        // r2 survived — frozen bit retained.
-        assert!(arena.is_frozen(r2));
+        assert!(!arena.has_flag(r1, Flag::SkipTraverse));
+        // r2 survived — skip-traverse bit retained.
+        assert!(arena.is_skip_traverse(r2));
     }
 
     #[test]
@@ -991,15 +993,32 @@ mod tests {
         let mut arena: Arena<i32> = Arena::new();
         let r1 = arena.alloc(1, Color::White0);
         let r2 = arena.alloc(2, Color::White0);
-        assert!(arena.set_flag(r1, Flag::Frozen));
-        assert!(arena.set_flag(r2, Flag::Frozen));
+        assert!(arena.set_flag(r1, Flag::SkipTraverse));
+        assert!(arena.set_flag(r2, Flag::SkipTraverse));
 
         arena.set_color(r2, Color::White1);
         let (freed, _next, _done) = arena.sweep_partial(Color::White0, Color::White1, 0, 10);
 
         assert_eq!(freed, 1);
-        assert!(!arena.has_flag(r1, Flag::Frozen));
-        assert!(arena.is_frozen(r2));
+        assert!(!arena.has_flag(r1, Flag::SkipTraverse));
+        assert!(arena.is_skip_traverse(r2));
+    }
+
+    #[test]
+    fn sweep_keeps_frozen_entries_alive() {
+        let mut arena: Arena<i32> = Arena::new();
+        let frozen = arena.alloc(10, Color::White0);
+        let dead = arena.alloc(20, Color::White0);
+        assert!(arena.set_flag(frozen, Flag::Frozen));
+
+        let freed = arena.sweep(Color::White0, Color::White1);
+
+        // Non-frozen entry freed; frozen entry survives and flips colour.
+        assert_eq!(freed, 1);
+        assert!(!arena.is_valid(dead));
+        assert!(arena.is_valid(frozen));
+        assert_eq!(arena.color(frozen), Some(Color::White1));
+        assert!(arena.is_frozen(frozen));
     }
 
     #[test]
