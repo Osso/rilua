@@ -493,7 +493,11 @@ impl<T> Arena<T> {
                 continue;
             }
 
-            if *color_byte == dead_byte {
+            // Pinned entries survive sweep regardless of mark state —
+            // reset them to new_white like a normal survivor so the
+            // next cycle doesn't also see them as dead.
+            let is_pinned = *flag_byte & FLAG_PINNED != 0;
+            if *color_byte == dead_byte && !is_pinned {
                 entry.state = EntryState::Free {
                     next_free: local_free_head,
                 };
@@ -562,7 +566,10 @@ impl<T> Arena<T> {
                 continue;
             }
 
-            if *color_byte == dead_byte {
+            // Pinned entries survive sweep unconditionally — see
+            // `sweep` above for the full rationale.
+            let is_pinned = *flag_byte & FLAG_PINNED != 0;
+            if *color_byte == dead_byte && !is_pinned {
                 entry.state = EntryState::Free {
                     next_free: local_free_head,
                 };

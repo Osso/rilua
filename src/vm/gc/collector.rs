@@ -409,7 +409,17 @@ impl Gc {
     /// Uses indexed access to avoid allocating Vecs for array/hash contents.
     /// Each Val is Copy, so we extract one at a time and release the table
     /// borrow before calling mark_value.
+    ///
+    /// Tables flagged with [`Flag::SkipTraverse`] are marked black but their
+    /// children (metatable, array, hash) are not walked. Caller is
+    /// responsible for independently keeping those children alive
+    /// (typically via [`Flag::Pinned`] on each child).
     fn traverse_table(&mut self, r: GcRef<Table>) {
+        if self.tables.is_skip_traverse(r) {
+            self.tables.set_color(r, Color::Black);
+            return;
+        }
+
         // Extract metadata in a single borrow.
         let (metatable, array_len, hash_count, weak_keys, weak_values) = {
             let Some(table) = self.tables.get(r) else {

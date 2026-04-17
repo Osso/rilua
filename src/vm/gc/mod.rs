@@ -17,6 +17,7 @@
 pub mod arena;
 pub mod collector;
 pub mod freeze;
+pub mod pin;
 pub mod trace;
 
 /// GC object color for tri-color mark-sweep.
