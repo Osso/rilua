@@ -180,6 +180,13 @@ pub fn getobjname(
             }
         }
 
+        OpCode::GetGlobalSlot => {
+            let bx = instr.bx() as usize;
+            if let Some(Some(name)) = proto.global_slot_names.get(bx) {
+                return Some(("global", String::from_utf8_lossy(name).into_owned()));
+            }
+        }
+
         OpCode::Move => {
             let a = instr.a();
             let b = instr.b();

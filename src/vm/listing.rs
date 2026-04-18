@@ -244,6 +244,15 @@ fn format_code(proto: &Proto, out: &mut String) {
                 out.push_str("\t; ");
                 format_constant_raw(proto, bx as usize, out);
             }
+            OpCode::GetGlobalSlot | OpCode::SetGlobalSlot => {
+                out.push_str("\t; slot ");
+                out.push_str(&bx.to_string());
+                if let Some(Some(name)) = proto.global_slot_names.get(bx as usize) {
+                    out.push_str(" (");
+                    out.push_str(&String::from_utf8_lossy(name));
+                    out.push(')');
+                }
+            }
             OpCode::GetTable | OpCode::OpSelf => {
                 if is_k(c) {
                     out.push_str("\t; ");

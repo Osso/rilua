@@ -925,7 +925,7 @@ fn run_testc_program(
                         Ok(proto) => {
                             let mut proto = crate::vm::proto::ProtoRef::try_unwrap(proto)
                                 .unwrap_or_else(|rc| (*rc).clone());
-                            crate::patch_string_constants(&mut proto, &mut state.gc);
+                            crate::prepare_loaded_proto(state, &mut proto);
                             let proto = crate::vm::proto::ProtoRef::new(proto);
                             let num_upvalues = proto.num_upvalues as usize;
                             let mut lua_cl =
@@ -964,7 +964,7 @@ fn run_testc_program(
                                 Ok(proto) => {
                                     let mut proto = crate::vm::proto::ProtoRef::try_unwrap(proto)
                                         .unwrap_or_else(|rc| (*rc).clone());
-                                    crate::patch_string_constants(&mut proto, &mut state.gc);
+                                    crate::prepare_loaded_proto(state, &mut proto);
                                     let proto = crate::vm::proto::ProtoRef::new(proto);
                                     let num_upvalues = proto.num_upvalues as usize;
                                     let mut lua_cl =
@@ -1490,7 +1490,7 @@ pub fn t_doonnewstack(state: &mut LuaState) -> LuaResult<u32> {
         Ok(proto) => {
             let mut proto =
                 crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-            crate::patch_string_constants(&mut proto, &mut state.gc);
+            crate::prepare_loaded_proto(state, &mut proto);
             let proto = crate::vm::proto::ProtoRef::new(proto);
             let num_upvalues = proto.num_upvalues as usize;
             let mut lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);
@@ -1608,7 +1608,7 @@ pub fn t_doremote(state: &mut LuaState) -> LuaResult<u32> {
         Ok(proto) => {
             let mut proto =
                 crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-            crate::patch_string_constants(&mut proto, &mut remote.gc);
+            crate::prepare_loaded_proto(remote, &mut proto);
             let proto = crate::vm::proto::ProtoRef::new(proto);
             let num_upvalues = proto.num_upvalues as usize;
             let mut lua_cl = crate::vm::closure::LuaClosure::new(proto, remote.global);

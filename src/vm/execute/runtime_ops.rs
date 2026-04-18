@@ -679,9 +679,7 @@ fn handle_table_settable(
 #[inline]
 fn ensure_table_not_frozen(state: &LuaState, table_ref: GcRef<Table>) -> LuaResult<()> {
     if state.gc.tables.is_frozen(table_ref) {
-        return Err(runtime_error_simple(
-            "attempt to modify a frozen table",
-        ));
+        return Err(runtime_error_simple("attempt to modify a frozen table"));
     }
     Ok(())
 }

@@ -1089,7 +1089,7 @@ pub fn lua_dofile(state: &mut LuaState) -> LuaResult<u32> {
     // Patch string constants.
     let mut proto =
         crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-    crate::patch_string_constants(&mut proto, &mut state.gc);
+    crate::prepare_loaded_proto(state, &mut proto);
     let proto = crate::vm::proto::ProtoRef::new(proto);
 
     // Create closure with the current global table as environment.
@@ -1235,7 +1235,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
         Ok(proto) => {
             let mut proto =
                 crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-            crate::patch_string_constants(&mut proto, &mut state.gc);
+            crate::prepare_loaded_proto(state, &mut proto);
             let proto = crate::vm::proto::ProtoRef::new(proto);
 
             let num_upvalues = proto.num_upvalues as usize;
@@ -1346,7 +1346,7 @@ fn push_load_result(state: &mut LuaState, result: LuaResult<crate::vm::proto::Pr
 fn push_loaded_chunk(state: &mut LuaState, proto: crate::vm::proto::ProtoRef) -> u32 {
     let mut proto =
         crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-    crate::patch_string_constants(&mut proto, &mut state.gc);
+    crate::prepare_loaded_proto(state, &mut proto);
     let proto = crate::vm::proto::ProtoRef::new(proto);
 
     let num_upvalues = proto.num_upvalues as usize;

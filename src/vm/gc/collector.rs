@@ -1620,6 +1620,17 @@ impl LuaState {
         for &field in &self.debug_info_field_names {
             self.gc.mark_value(Val::Str(field));
         }
+        if let Some(runtime) = self.global_slots.as_ref() {
+            for &value in &runtime.values {
+                self.gc.mark_value(value);
+            }
+            for &key in &runtime.name_keys {
+                self.gc.mark_value(Val::Str(key));
+            }
+            if let Some(key) = runtime.shadow_registry_key {
+                self.gc.mark_value(Val::Str(key));
+            }
+        }
     }
 
     /// Traverses the main thread's stack, open upvalues, call stack,

@@ -244,12 +244,7 @@ mod tests {
         assert_eq!(stats.total(), 1);
     }
 
-    fn set_table_entry(
-        lua: &mut LuaState,
-        table_ref: GcRef<Table>,
-        key: Val,
-        value: Val,
-    ) {
+    fn set_table_entry(lua: &mut LuaState, table_ref: GcRef<Table>, key: Val, value: Val) {
         lua.gc
             .tables
             .get_mut(table_ref)
@@ -412,8 +407,8 @@ mod tests {
 
     #[test]
     fn rawset_on_frozen_table_raises_error() {
-        use crate::api::LuaApiMut;
         use crate::Lua;
+        use crate::api::LuaApiMut;
 
         let mut lua = Lua::new().expect("lua");
         // Expose a table to Lua, freeze it from the Rust side, then
@@ -438,8 +433,8 @@ mod tests {
 
     #[test]
     fn settable_on_frozen_table_raises_error() {
-        use crate::api::LuaApiMut;
         use crate::Lua;
+        use crate::api::LuaApiMut;
 
         let mut lua = Lua::new().expect("lua");
         lua.exec("_G.__frozen = {}").expect("seed frozen table");

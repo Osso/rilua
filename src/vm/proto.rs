@@ -98,6 +98,12 @@ pub struct Proto {
     /// pool index to the raw string bytes. Populated by the compiler,
     /// consumed by `patch_string_constants` before execution.
     pub string_pool: Vec<StringPoolEntry>,
+    /// Debug-only names for slot-rewritten global opcodes.
+    ///
+    /// Indexed by slot id, populated by the load-time global-slot rewrite
+    /// pass. Not serialized into binary chunks; the loader rebuilds it when
+    /// slot rewriting runs so error messages still resolve rewritten globals.
+    pub global_slot_names: Vec<Option<Vec<u8>>>,
 }
 
 impl Proto {
@@ -120,6 +126,7 @@ impl Proto {
             is_vararg: 0,
             max_stack_size: 2, // minimum per PUC-Rio (register 0 + temps)
             string_pool: Vec::new(),
+            global_slot_names: Vec::new(),
         }
     }
 }
@@ -146,6 +153,7 @@ mod tests {
         assert_eq!(p.is_vararg, 0);
         assert_eq!(p.max_stack_size, 2);
         assert!(p.string_pool.is_empty());
+        assert!(p.global_slot_names.is_empty());
     }
 
     #[test]

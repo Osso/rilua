@@ -320,7 +320,7 @@ pub trait LuaApiMut: LuaApi {
         let proto = crate::compile_or_undump(source, name)?;
         let mut proto = ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
         let state = self.state_mut();
-        crate::patch_string_constants(&mut proto, &mut state.gc);
+        crate::prepare_loaded_proto(state, &mut proto);
         let proto = ProtoRef::new(proto);
 
         let num_upvalues = proto.num_upvalues as usize;

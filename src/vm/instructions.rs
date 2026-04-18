@@ -1,4 +1,5 @@
-//! Opcode definitions: PUC-Rio's 38 register-based opcodes.
+//! Opcode definitions: PUC-Rio's 38 register-based opcodes plus local
+//! extensions used by embedder-side optimizations.
 //!
 //! Instructions are encoded as `u32` values with three formats:
 //! - **iABC**: `[B:9][C:9][A:8][Op:6]`
@@ -175,10 +176,14 @@ pub enum OpCode {
     Closure = 36,
     /// `R(A), R(A+1), ..., R(A+B-1) = vararg` — iABC
     VarArg = 37,
+    /// `R(A) := global_slot[Bx]` with env fallback — iABx
+    GetGlobalSlot = 38,
+    /// `global_slot[Bx] := R(A)` with env fallback — iABx
+    SetGlobalSlot = 39,
 }
 
 /// Total number of opcodes.
-pub const NUM_OPCODES: u32 = 38;
+pub const NUM_OPCODES: u32 = 40;
 
 /// Instruction format (matches PUC-Rio `enum OpMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +265,8 @@ impl OpCode {
             35 => Some(Self::Close),
             36 => Some(Self::Closure),
             37 => Some(Self::VarArg),
+            38 => Some(Self::GetGlobalSlot),
+            39 => Some(Self::SetGlobalSlot),
             _ => None,
         }
     }
@@ -321,6 +328,8 @@ impl OpCode {
             Self::Close => "CLOSE",
             Self::Closure => "CLOSURE",
             Self::VarArg => "VARARG",
+            Self::GetGlobalSlot => "GETGLOBAL_SLOT",
+            Self::SetGlobalSlot => "SETGLOBAL_SLOT",
         }
     }
 
@@ -331,7 +340,12 @@ impl OpCode {
     pub fn mode(self) -> OpMode {
         match self {
             Self::Jmp | Self::ForLoop | Self::ForPrep => OpMode::IAsBx,
-            Self::LoadK | Self::GetGlobal | Self::SetGlobal | Self::Closure => OpMode::IABx,
+            Self::LoadK
+            | Self::GetGlobal
+            | Self::SetGlobal
+            | Self::Closure
+            | Self::GetGlobalSlot
+            | Self::SetGlobalSlot => OpMode::IABx,
             _ => OpMode::IABC,
         }
     }
@@ -346,6 +360,8 @@ impl OpCode {
             Self::LoadK
             | Self::GetGlobal
             | Self::SetGlobal
+            | Self::GetGlobalSlot
+            | Self::SetGlobalSlot
             | Self::SetTable
             | Self::Add
             | Self::Sub
@@ -430,6 +446,7 @@ impl OpCode {
         !matches!(
             self,
             Self::SetGlobal
+                | Self::SetGlobalSlot
                 | Self::SetUpval
                 | Self::SetTable
                 | Self::Jmp
@@ -544,6 +561,11 @@ impl Instruction {
         self.0 = (self.0 & !(MASK_A << POS_A)) | ((a & MASK_A) << POS_A);
     }
 
+    /// Sets the opcode field.
+    pub fn set_opcode(&mut self, op: OpCode) {
+        self.0 = (self.0 & !(MASK_OP << POS_OP)) | ((op as u32) << POS_OP);
+    }
+
     /// Sets the B field.
     pub fn set_b(&mut self, b: u32) {
         self.0 = (self.0 & !(MASK_B << POS_B)) | ((b & MASK_B) << POS_B);
@@ -552,6 +574,11 @@ impl Instruction {
     /// Sets the C field.
     pub fn set_c(&mut self, c: u32) {
         self.0 = (self.0 & !(MASK_C << POS_C)) | ((c & MASK_C) << POS_C);
+    }
+
+    /// Sets the Bx field.
+    pub fn set_bx(&mut self, bx: u32) {
+        self.0 = (self.0 & !(MASK_BX << POS_BX)) | ((bx & MASK_BX) << POS_BX);
     }
 
     /// Sets the sBx field (signed via excess-K).
@@ -593,11 +620,13 @@ mod tests {
         assert_eq!(OpCode::from_u8(0), Some(OpCode::Move));
         assert_eq!(OpCode::from_u8(22), Some(OpCode::Jmp));
         assert_eq!(OpCode::from_u8(37), Some(OpCode::VarArg));
+        assert_eq!(OpCode::from_u8(38), Some(OpCode::GetGlobalSlot));
+        assert_eq!(OpCode::from_u8(39), Some(OpCode::SetGlobalSlot));
     }
 
     #[test]
     fn opcode_from_u8_invalid() {
-        assert_eq!(OpCode::from_u8(38), None);
+        assert_eq!(OpCode::from_u8(40), None);
         assert_eq!(OpCode::from_u8(255), None);
     }
 
@@ -609,6 +638,8 @@ mod tests {
         assert_eq!(OpCode::Return.name(), "RETURN");
         assert_eq!(OpCode::Closure.name(), "CLOSURE");
         assert_eq!(OpCode::VarArg.name(), "VARARG");
+        assert_eq!(OpCode::GetGlobalSlot.name(), "GETGLOBAL_SLOT");
+        assert_eq!(OpCode::SetGlobalSlot.name(), "SETGLOBAL_SLOT");
     }
 
     #[test]
@@ -657,6 +688,8 @@ mod tests {
         assert_eq!(OpCode::Close as u8, 35);
         assert_eq!(OpCode::Closure as u8, 36);
         assert_eq!(OpCode::VarArg as u8, 37);
+        assert_eq!(OpCode::GetGlobalSlot as u8, 38);
+        assert_eq!(OpCode::SetGlobalSlot as u8, 39);
     }
 
     // -- Instruction encoding tests --
@@ -764,6 +797,24 @@ mod tests {
         assert_eq!(instr.sbx(), -42);
     }
 
+    #[test]
+    fn set_opcode() {
+        let mut instr = Instruction::a_bx(OpCode::GetGlobal, 7, 9);
+        instr.set_opcode(OpCode::GetGlobalSlot);
+        assert_eq!(instr.opcode(), OpCode::GetGlobalSlot);
+        assert_eq!(instr.a(), 7);
+        assert_eq!(instr.bx(), 9);
+    }
+
+    #[test]
+    fn set_bx() {
+        let mut instr = Instruction::a_bx(OpCode::GetGlobalSlot, 1, 2);
+        instr.set_bx(77);
+        assert_eq!(instr.opcode(), OpCode::GetGlobalSlot);
+        assert_eq!(instr.a(), 1);
+        assert_eq!(instr.bx(), 77);
+    }
+
     // -- RK helper tests --
 
     #[test]
@@ -823,7 +874,7 @@ mod tests {
         assert_eq!(LUAI_MAXVARS, 200);
         assert_eq!(LUAI_MAXUPVALUES, 60);
         assert_eq!(MAXSTACK, 250);
-        assert_eq!(NUM_OPCODES, 38);
+        assert_eq!(NUM_OPCODES, 40);
     }
 
     // -- Raw encoding --
@@ -882,6 +933,8 @@ mod tests {
             OpCode::Close,
             OpCode::Closure,
             OpCode::VarArg,
+            OpCode::GetGlobalSlot,
+            OpCode::SetGlobalSlot,
         ];
         for (i, &op) in opcodes.iter().enumerate() {
             let instr = Instruction::abc(op, 1, 2, 3);
@@ -899,6 +952,8 @@ mod tests {
         assert_eq!(OpCode::GetGlobal.mode(), OpMode::IABx);
         assert_eq!(OpCode::SetGlobal.mode(), OpMode::IABx);
         assert_eq!(OpCode::Closure.mode(), OpMode::IABx);
+        assert_eq!(OpCode::GetGlobalSlot.mode(), OpMode::IABx);
+        assert_eq!(OpCode::SetGlobalSlot.mode(), OpMode::IABx);
 
         // iAsBx opcodes
         assert_eq!(OpCode::Jmp.mode(), OpMode::IAsBx);
@@ -920,6 +975,7 @@ mod tests {
         assert_eq!(OpCode::LoadBool.b_mode(), OpArgMask::U);
         assert_eq!(OpCode::GetUpval.b_mode(), OpArgMask::U);
         assert_eq!(OpCode::Add.b_mode(), OpArgMask::K);
+        assert_eq!(OpCode::GetGlobalSlot.b_mode(), OpArgMask::K);
         assert_eq!(OpCode::Jmp.b_mode(), OpArgMask::R);
         assert_eq!(OpCode::TForLoop.b_mode(), OpArgMask::N);
         assert_eq!(OpCode::Close.b_mode(), OpArgMask::N);
@@ -947,9 +1003,11 @@ mod tests {
         assert!(OpCode::Add.sets_register_a());
         assert!(OpCode::Call.sets_register_a());
         assert!(OpCode::Closure.sets_register_a());
+        assert!(OpCode::GetGlobalSlot.sets_register_a());
 
         // Instructions that do NOT set register A
         assert!(!OpCode::SetGlobal.sets_register_a());
+        assert!(!OpCode::SetGlobalSlot.sets_register_a());
         assert!(!OpCode::SetUpval.sets_register_a());
         assert!(!OpCode::SetTable.sets_register_a());
         assert!(!OpCode::Jmp.sets_register_a());

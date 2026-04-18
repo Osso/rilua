@@ -374,7 +374,7 @@ fn loader_lua(state: &mut LuaState) -> LuaResult<u32> {
         Ok(proto) => {
             let mut proto =
                 crate::vm::proto::ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-            crate::patch_string_constants(&mut proto, &mut state.gc);
+            crate::prepare_loaded_proto(state, &mut proto);
             let proto = crate::vm::proto::ProtoRef::new(proto);
 
             let lua_cl = crate::vm::closure::LuaClosure::new(proto, state.global);

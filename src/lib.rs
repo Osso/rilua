@@ -400,7 +400,7 @@ impl Lua {
     /// Patches string constants, creates a main closure, and executes it.
     fn run_proto(&mut self, proto: ProtoRef) -> LuaResult<()> {
         let mut proto = ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
-        patch_string_constants(&mut proto, &mut self.state.gc);
+        prepare_loaded_proto(&mut self.state, &mut proto);
         let proto = ProtoRef::new(proto);
 
         let num_upvalues = proto.num_upvalues as usize;
@@ -524,6 +524,84 @@ pub(crate) fn patch_string_constants(proto: &mut Proto, gc: &mut Gc) {
     for child in &mut proto.protos {
         patch_string_constants(ProtoRef::make_mut(child), gc);
     }
+}
+
+pub(crate) fn prepare_loaded_proto(state: &mut LuaState, proto: &mut Proto) {
+    patch_string_constants(proto, &mut state.gc);
+    patch_global_slot_opcodes(state, proto);
+}
+
+fn patch_global_slot_opcodes(state: &LuaState, proto: &mut Proto) {
+    let Some(runtime) = state.global_slots.as_ref() else {
+        return;
+    };
+
+    for pc in 0..proto.code.len() {
+        let mut instr = vm::instructions::Instruction::from_raw(proto.code[pc]);
+        let op = instr.opcode();
+        let slot_op = match op {
+            vm::instructions::OpCode::GetGlobal => vm::instructions::OpCode::GetGlobalSlot,
+            vm::instructions::OpCode::SetGlobal => vm::instructions::OpCode::SetGlobalSlot,
+            vm::instructions::OpCode::GetGlobalSlot | vm::instructions::OpCode::SetGlobalSlot => op,
+            _ => continue,
+        };
+        let bx = instr.bx() as usize;
+        let Some(slot_idx) = resolve_slot_index(runtime, proto, op, bx) else {
+            continue;
+        };
+        populate_slot_debug_name(state, proto, slot_idx as usize);
+        instr.set_opcode(slot_op);
+        instr.set_bx(slot_idx);
+        proto.code[pc] = instr.raw();
+    }
+
+    for child in &mut proto.protos {
+        patch_global_slot_opcodes(state, ProtoRef::make_mut(child));
+    }
+}
+
+fn resolve_slot_index(
+    runtime: &vm::state::GlobalSlotRuntime,
+    proto: &Proto,
+    op: vm::instructions::OpCode,
+    bx: usize,
+) -> Option<u32> {
+    match op {
+        vm::instructions::OpCode::GetGlobal | vm::instructions::OpCode::SetGlobal => {
+            let key_ref = match proto.constants.get(bx) {
+                Some(Val::Str(r)) => *r,
+                _ => return None,
+            };
+            let slot_idx = *runtime.key_to_slot.get(&key_ref)?;
+            if matches!(op, vm::instructions::OpCode::SetGlobal) && slot_idx == 0 {
+                return None;
+            }
+            Some(slot_idx)
+        }
+        vm::instructions::OpCode::GetGlobalSlot | vm::instructions::OpCode::SetGlobalSlot => {
+            Some(bx as u32)
+        }
+        _ => None,
+    }
+}
+
+fn populate_slot_debug_name(state: &LuaState, proto: &mut Proto, slot_idx: usize) {
+    if proto.global_slot_names.len() <= slot_idx {
+        proto.global_slot_names.resize_with(slot_idx + 1, || None);
+    }
+    if proto.global_slot_names[slot_idx].is_some() {
+        return;
+    }
+    let Some(runtime) = state.global_slots.as_ref() else {
+        return;
+    };
+    let Some(key_ref) = runtime.name_keys.get(slot_idx).copied() else {
+        return;
+    };
+    let Some(name) = state.gc.string_arena.get(key_ref) else {
+        return;
+    };
+    proto.global_slot_names[slot_idx] = Some(name.data().to_vec());
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +932,61 @@ mod tests {
         set_interrupted();
         clear_interrupted();
         assert!(!check_interrupted(), "flag should be false after clear");
+    }
+
+    #[test]
+    fn prepare_loaded_proto_rewrites_whitelisted_getglobal_to_slot_opcode() {
+        let mut state = LuaState::new();
+        let g_key = state.gc.intern_string_static(b"_G");
+        let target_key = state.gc.intern_string(b"myvar");
+        state.install_global_slots(
+            vec![Val::Table(state.global), Val::Num(99.0)].into_boxed_slice(),
+            vec![g_key, target_key].into_boxed_slice(),
+            None,
+        );
+
+        let proto = compile_or_undump(b"return myvar", "=(test)").expect("compile chunk");
+        let mut proto = ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+        prepare_loaded_proto(&mut state, &mut proto);
+
+        let ops: Vec<_> = proto
+            .code
+            .iter()
+            .map(|raw| vm::instructions::Instruction::from_raw(*raw).opcode())
+            .collect();
+        assert!(ops.contains(&vm::instructions::OpCode::GetGlobalSlot));
+        assert_eq!(
+            proto
+                .global_slot_names
+                .get(1)
+                .and_then(|name| name.as_ref()),
+            Some(&b"myvar".to_vec())
+        );
+    }
+
+    #[test]
+    fn prepare_loaded_proto_keeps_unknown_getglobal_unpatched() {
+        let mut state = LuaState::new();
+        let g_key = state.gc.intern_string_static(b"_G");
+        let target_key = state.gc.intern_string(b"myvar");
+        state.install_global_slots(
+            vec![Val::Table(state.global), Val::Num(99.0)].into_boxed_slice(),
+            vec![g_key, target_key].into_boxed_slice(),
+            None,
+        );
+
+        let proto = compile_or_undump(b"return unknown_name", "=(test)").expect("compile chunk");
+        let mut proto = ProtoRef::try_unwrap(proto).unwrap_or_else(|rc| (*rc).clone());
+        prepare_loaded_proto(&mut state, &mut proto);
+
+        let ops: Vec<_> = proto
+            .code
+            .iter()
+            .map(|raw| vm::instructions::Instruction::from_raw(*raw).opcode())
+            .collect();
+        assert!(ops.contains(&vm::instructions::OpCode::GetGlobal));
+        assert!(!ops.contains(&vm::instructions::OpCode::GetGlobalSlot));
+        assert!(proto.global_slot_names.is_empty());
     }
 
     /// Compile-time assertion that `Lua` is `Send` when the `send`

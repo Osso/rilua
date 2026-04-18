@@ -208,6 +208,23 @@ fn try_plain_table_get(state: &mut LuaState, table_val: Val, key: Val, result_re
     try_plain_table_get_ref(state, table_ref, key, result_reg)
 }
 
+fn lookup_slot_shadow_table(
+    state: &LuaState,
+    runtime: &super::state::GlobalSlotRuntime,
+) -> Option<GcRef<Table>> {
+    let key = runtime.shadow_registry_key?;
+    let registry = state.gc.tables.get(state.registry)?;
+    match registry.get_str(key, &state.gc.string_arena) {
+        Val::Table(table_ref) => Some(table_ref),
+        _ => None,
+    }
+}
+
+fn get_global_slot_key(state: &LuaState, slot_idx: usize) -> Option<Val> {
+    let runtime = state.global_slots.as_ref()?;
+    runtime.name_keys.get(slot_idx).copied().map(Val::Str)
+}
+
 /// Parse a byte slice as a Lua number (matching PUC-Rio's `luaO_str2d`).
 ///
 /// Uses libc `strtod` for locale-aware decimal parsing. Supports hex
@@ -1114,6 +1131,53 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     vm_settable(state, Val::Table(env), key, val, &proto, pc, base, None)?;
                 }
 
+                OpCode::GetGlobalSlot => {
+                    let slot_idx = instr.bx() as usize;
+                    let Some(runtime) = state.global_slots.as_ref() else {
+                        return Err(runtime_error(&proto, pc, "global slot runtime missing"));
+                    };
+                    let Some(key) = get_global_slot_key(state, slot_idx) else {
+                        return Err(runtime_error(&proto, pc, "global slot runtime missing"));
+                    };
+
+                    if env != runtime.root_global {
+                        if !try_plain_table_get_ref(state, env, key, ra) {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            vm_gettable(state, Val::Table(env), key, ra, &proto, pc, base, None)?;
+                        }
+                        continue;
+                    }
+
+                    if slot_idx == 0 {
+                        state.stack_set(ra, runtime.values[slot_idx]);
+                        continue;
+                    }
+
+                    if let Some(live_ref) = lookup_slot_shadow_table(state, runtime)
+                        && let Some(live_table) = state.gc.tables.get(live_ref)
+                        && !(live_table.array_len() == 0 && live_table.hash_size() == 0)
+                    {
+                        let live_val =
+                            live_table.get_str(runtime.name_keys[slot_idx], &state.gc.string_arena);
+                        if live_val != Val::Nil {
+                            state.stack_set(ra, live_val);
+                            continue;
+                        }
+                    }
+
+                    state.stack_set(ra, runtime.values[slot_idx]);
+                }
+
+                OpCode::SetGlobalSlot => {
+                    let slot_idx = instr.bx() as usize;
+                    let Some(key) = get_global_slot_key(state, slot_idx) else {
+                        return Err(runtime_error(&proto, pc, "global slot runtime missing"));
+                    };
+                    let val = state.stack_get(ra);
+                    state.call_stack[state.ci].saved_pc = pc;
+                    vm_settable(state, Val::Table(env), key, val, &proto, pc, base, None)?;
+                }
+
                 // ----- Table access -----
                 OpCode::GetTable => {
                     let b = instr.b() as usize;
@@ -1974,7 +2038,10 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
 )]
 mod tests {
     use super::*;
+    use crate::vm::gc::arena::GcRef;
     use crate::vm::instructions::{Instruction, OpCode, rk_as_k};
+    use crate::vm::string::LuaString;
+    use crate::vm::table::Table;
 
     /// Helper: create a LuaState with a proto loaded as the current function.
     fn setup_state(proto: Proto) -> LuaState {
@@ -2004,6 +2071,32 @@ mod tests {
         p.max_stack_size = 20;
         p.is_vararg = VARARG_ISVARARG;
         p
+    }
+
+    fn install_slots(
+        state: &mut LuaState,
+        values: Vec<Val>,
+        names: &[GcRef<LuaString>],
+        shadow_key: Option<GcRef<LuaString>>,
+    ) {
+        let mut aligned_names = if values.len() == names.len() + 1 {
+            let mut aligned = Vec::with_capacity(values.len());
+            aligned.push(state.gc.intern_string_static(b"_G"));
+            aligned.extend_from_slice(names);
+            aligned
+        } else {
+            names.to_vec()
+        };
+        assert_eq!(
+            values.len(),
+            aligned_names.len(),
+            "test slot helper requires keys aligned with slot indexes",
+        );
+        state.install_global_slots(
+            values.into_boxed_slice(),
+            std::mem::take(&mut aligned_names).into_boxed_slice(),
+            shadow_key,
+        );
     }
 
     #[test]
@@ -2390,6 +2483,180 @@ mod tests {
 
         execute(&mut state).ok();
         assert_eq!(state.stack_get(state.base + 1), Val::Num(99.0));
+    }
+
+    #[test]
+    fn op_getglobalslot_falls_back_to_custom_env() {
+        let mut state = LuaState::new();
+        let custom_env = state.gc.alloc_table(Table::new());
+        let g_key = state.gc.intern_string_static(b"_G");
+        let key_ref = state.gc.intern_string(b"myvar");
+        state.install_global_slots(
+            vec![Val::Table(state.global), Val::Num(10.0)].into_boxed_slice(),
+            vec![g_key, key_ref].into_boxed_slice(),
+            None,
+        );
+        state
+            .gc
+            .tables
+            .get_mut(custom_env)
+            .expect("missing custom env")
+            .raw_set(Val::Str(key_ref), Val::Num(77.0), &state.gc.string_arena)
+            .expect("custom env raw_set should succeed");
+
+        let code = vec![
+            Instruction::a_bx(OpCode::GetGlobalSlot, 0, 1).raw(),
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let proto_rc = ProtoRef::new(make_proto(code, vec![]));
+        let cl = LuaClosure::new(proto_rc, custom_env);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base), Val::Num(77.0));
+    }
+
+    #[test]
+    fn op_getglobalslot_reads_shadow_override_on_root_env() {
+        let code = vec![
+            Instruction::a_bx(OpCode::GetGlobalSlot, 0, 1).raw(),
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let mut state = setup_state(make_proto(code, vec![]));
+        let shadow_key = state.gc.intern_string_static(b"__slot_shadow");
+        let g_key = state.gc.intern_string_static(b"_G");
+        let key_ref = state.gc.intern_string(b"myvar");
+        let shadow_ref = state.gc.alloc_table(Table::new());
+        state.install_global_slots(
+            vec![Val::Table(state.global), Val::Num(10.0)].into_boxed_slice(),
+            vec![g_key, key_ref].into_boxed_slice(),
+            Some(shadow_key),
+        );
+        state
+            .gc
+            .tables
+            .get_mut(shadow_ref)
+            .expect("missing shadow table")
+            .raw_set(Val::Str(key_ref), Val::Num(77.0), &state.gc.string_arena)
+            .expect("shadow raw_set should succeed");
+        state
+            .gc
+            .tables
+            .get_mut(state.registry)
+            .expect("missing registry")
+            .raw_set(
+                Val::Str(shadow_key),
+                Val::Table(shadow_ref),
+                &state.gc.string_arena,
+            )
+            .expect("registry raw_set should succeed");
+
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base), Val::Num(77.0));
+    }
+
+    #[test]
+    fn op_setglobalslot_writes_through_current_env() {
+        let mut state = LuaState::new();
+        let custom_env = state.gc.alloc_table(Table::new());
+        let g_key = state.gc.intern_string_static(b"_G");
+        let key_ref = state.gc.intern_string(b"myvar");
+        state.install_global_slots(
+            vec![Val::Table(state.global), Val::Nil].into_boxed_slice(),
+            vec![g_key, key_ref].into_boxed_slice(),
+            None,
+        );
+
+        let code = vec![
+            Instruction::a_bx(OpCode::LoadK, 0, 0).raw(),
+            Instruction::a_bx(OpCode::SetGlobalSlot, 0, 1).raw(),
+            Instruction::a_bx(OpCode::GetGlobalSlot, 1, 1).raw(),
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let constants = vec![Val::Num(99.0)];
+        let proto_rc = ProtoRef::new(make_proto(code, constants));
+        let cl = LuaClosure::new(proto_rc, custom_env);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base + 1), Val::Num(99.0));
+    }
+
+    #[test]
+    fn op_getglobal_slot_reads_frozen_value_for_root_env() {
+        let mut state = LuaState::new();
+        let mixin_key = state.gc.intern_string(b"Mixin");
+        let code = vec![
+            Instruction::a_bx(OpCode::GetGlobalSlot, 0, 1).raw(),
+            Instruction::abc(OpCode::Return, 0, 2, 0).raw(),
+        ];
+        let mut proto = make_proto(code, vec![]);
+        proto.global_slot_names.push(Some(b"_G".to_vec()));
+        proto.global_slot_names.push(Some(b"Mixin".to_vec()));
+        let proto_rc = ProtoRef::new(proto);
+        let cl = LuaClosure::new(proto_rc, state.global);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+        let root_global = state.global;
+        install_slots(
+            &mut state,
+            vec![Val::Table(root_global), Val::Num(42.0)],
+            &[mixin_key],
+            None,
+        );
+
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base), Val::Num(42.0));
+    }
+
+    #[test]
+    fn op_getglobal_slot_falls_back_to_closure_env_lookup() {
+        let mut state = LuaState::new();
+        let mixin_key = state.gc.intern_string(b"Mixin");
+        let custom_env = state.gc.alloc_table(Table::new());
+        state
+            .gc
+            .tables
+            .get_mut(custom_env)
+            .expect("custom env")
+            .raw_set(Val::Str(mixin_key), Val::Num(77.0), &state.gc.string_arena)
+            .expect("seed env");
+        let root_global = state.global;
+        install_slots(
+            &mut state,
+            vec![Val::Table(root_global), Val::Num(42.0)],
+            &[mixin_key],
+            None,
+        );
+
+        let code = vec![
+            Instruction::a_bx(OpCode::GetGlobalSlot, 0, 1).raw(),
+            Instruction::abc(OpCode::Return, 0, 2, 0).raw(),
+        ];
+        let mut proto = make_proto(code, vec![]);
+        proto.global_slot_names.push(Some(b"_G".to_vec()));
+        proto.global_slot_names.push(Some(b"Mixin".to_vec()));
+        let proto_rc = ProtoRef::new(proto);
+        let cl = LuaClosure::new(proto_rc, custom_env);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base), Val::Num(77.0));
     }
 
     #[test]

@@ -30,6 +30,7 @@ use super::string::{LuaString, StaticInternCache, StringTable};
 use super::table::Table;
 use super::value::{Userdata, Val};
 use crate::api::{LuaApi, LuaApiMut};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Constants (match PUC-Rio limits)
@@ -101,6 +102,49 @@ pub(crate) enum DebugInfoField {
     NameWhat = 8,
     Func = 9,
     ActiveLines = 10,
+}
+
+/// Per-VM slot runtime for embedder-installed global fast paths.
+pub struct GlobalSlotRuntime {
+    /// Frozen slot values captured from the embedder's bootstrap global table.
+    pub values: Box<[Val]>,
+    /// Pre-interned key for each slot index.
+    pub name_keys: Box<[GcRef<LuaString>]>,
+    /// Reverse lookup used by the load-time rewrite pass.
+    pub key_to_slot: HashMap<GcRef<LuaString>, u32>,
+    /// Global table the slot vector was captured from.
+    pub root_global: GcRef<Table>,
+    /// Optional registry key for a mutable shadow table layered over
+    /// `root_global`.
+    pub shadow_registry_key: Option<GcRef<LuaString>>,
+}
+
+impl GlobalSlotRuntime {
+    fn new(
+        root_global: GcRef<Table>,
+        values: Box<[Val]>,
+        name_keys: Box<[GcRef<LuaString>]>,
+        shadow_registry_key: Option<GcRef<LuaString>>,
+    ) -> Self {
+        assert_eq!(
+            values.len(),
+            name_keys.len(),
+            "global slot values and key tables must share the same slot indexing",
+        );
+        let key_to_slot = name_keys
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, key)| (key, idx as u32))
+            .collect();
+        Self {
+            values,
+            name_keys,
+            key_to_slot,
+            root_global,
+            shadow_registry_key,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +615,9 @@ pub struct LuaState {
     /// Global table (_G). Used by GETGLOBAL/SETGLOBAL.
     pub global: GcRef<Table>,
 
+    /// Optional slot runtime for embedder-installed global fast paths.
+    pub global_slots: Option<GlobalSlotRuntime>,
+
     /// Registry table. Internal storage for the VM.
     pub registry: GcRef<Table>,
 
@@ -713,6 +760,7 @@ impl LuaState {
             call_depth: 0,
             ci_overflow: false,
             global,
+            global_slots: None,
             registry,
             open_upvalues: Vec::new(),
             gc,
@@ -733,6 +781,21 @@ impl LuaState {
     /// Sets application data of type `T`.
     pub fn set_app_data<T: 'static>(&mut self, data: T) {
         self.app_data = Some(Box::new(data));
+    }
+
+    /// Installs the VM-wide global slot runtime used by slot opcodes.
+    pub fn install_global_slots(
+        &mut self,
+        values: Box<[Val]>,
+        name_keys: Box<[GcRef<LuaString>]>,
+        shadow_registry_key: Option<GcRef<LuaString>>,
+    ) {
+        self.global_slots = Some(GlobalSlotRuntime::new(
+            self.global,
+            values,
+            name_keys,
+            shadow_registry_key,
+        ));
     }
 
     /// Returns a reference to application data of type `T`, if set and matching.
