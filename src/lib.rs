@@ -230,12 +230,24 @@ impl Lua {
 
         // Save the base index so we know where results land.
         let save_base = self.state.base;
+        let save_ci = self.state.ci;
         self.state.base = func_idx + 1;
 
         // Call with LUA_MULTRET to get all results.
-        match self.state.precall(func_idx, LUA_MULTRET)? {
-            CallResult::Lua => execute(&mut self.state)?,
-            CallResult::Rust => {}
+        let result = match self.state.precall(func_idx, LUA_MULTRET) {
+            Ok(CallResult::Lua) => execute(&mut self.state),
+            Ok(CallResult::Rust) => Ok(()),
+            Err(err) => Err(err),
+        };
+
+        if let Err(err) = result {
+            self.state.top = func_idx;
+            self.state.base = save_base;
+            self.state.ci = save_ci;
+            if self.state.ci < vm::state::MAXCALLS {
+                self.state.ci_overflow = false;
+            }
+            return Err(err);
         }
 
         // Collect results: they're at func_idx..self.state.top.
@@ -805,6 +817,37 @@ mod tests {
         assert!(results.is_ok());
         let results = results.unwrap_or_default();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn lua_call_function_recovers_after_rust_callback_error() {
+        let mut lua = Lua::new().ok().unwrap_or_else(Lua::new_empty);
+        lua.register_function("fail_from_rust", |_| {
+            Err(LuaError::Runtime(RuntimeError {
+                message: "rust callback failed".to_string(),
+                level: 0,
+                traceback: vec![],
+            }))
+        })
+        .expect("register rust callback");
+
+        let failing = lua
+            .load("fail_from_rust()")
+            .expect("compile failing function");
+        let first_error = lua
+            .call_function(&failing, &[])
+            .expect_err("call should fail");
+        assert!(first_error.to_string().contains("rust callback failed"));
+        assert_eq!(
+            lua.state.ci, 0,
+            "failed Rust callbacks must unwind call frames"
+        );
+
+        let succeeding = lua.load("return 42").expect("compile succeeding function");
+        let results = lua
+            .call_function(&succeeding, &[])
+            .expect("subsequent call should not see stale Rust frame");
+        assert_eq!(results, vec![Val::Num(42.0)]);
     }
 
     #[test]
