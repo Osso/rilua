@@ -4601,6 +4601,23 @@ f(0, 5, 4, 3, 2, 1)
 }
 
 #[test]
+fn vararg_global_assign_multiple_targets() {
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+function f(...)
+  _, db = ...
+  assert(_ == "addon", "_=" .. tostring(_))
+  assert(db.value == 7, "db.value=" .. tostring(db and db.value))
+  print("PASSED")
+end
+f("addon", { value = 7 })
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("PASSED"), "stdout: {stdout}");
+}
+
+#[test]
 fn select_boundary_cases() {
     // select(1) with no extra args should return 0 results (not error).
     // select(-1, 3, 5, 7) should return 7.

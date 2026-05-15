@@ -2483,10 +2483,10 @@ fn adjust_assign(
             compiler.reserve_regs(1)?;
             last.kind = ExprKind::Relocable;
         }
-        // For CALL with extra results, reserve additional registers.
-        // VARARG already reserved its one register above.
-        // Matches PUC-Rio: `if (e->k == VCALL && extra > 1) luaK_reserveregs`
-        if is_call && needed > 1 {
+        // `luaK_setreturns` reserves the first VARARG result register.
+        // Additional multi-return results still need stack slots before
+        // assignment stores consume them in reverse.
+        if needed > 1 {
             #[allow(clippy::cast_possible_truncation)]
             compiler.reserve_regs((needed - 1) as u32)?;
         }
