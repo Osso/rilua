@@ -3509,6 +3509,18 @@ mod tests {
         assert_eq!(f.protos.len(), 1); // g is nested inside f
     }
 
+    #[test]
+    fn compile_wow_generated_function_with_more_than_200_locals() {
+        let mut source = String::from("local function generated()\n");
+        for index in 1..=210 {
+            source.push_str(&format!("local v{index} = {index}\n"));
+        }
+        source.push_str("return v210\nend\nreturn generated()\n");
+
+        let proto = compile(source.as_bytes(), "test").unwrap();
+        assert_eq!(proto.protos.len(), 1);
+    }
+
     // -- int2fb --
 
     #[test]

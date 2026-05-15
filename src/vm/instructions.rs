@@ -66,7 +66,11 @@ pub const NO_JUMP: i32 = -1;
 pub const LFIELDS_PER_FLUSH: u32 = 50;
 
 /// Maximum number of local variables per function.
-pub const LUAI_MAXVARS: u32 = 200;
+///
+/// WoW's Lua accepts generated addon functions with more than stock Lua 5.1's
+/// 200 active-local limit. Keep this below `MAXSTACK` so register indexes stay
+/// encodable.
+pub const LUAI_MAXVARS: u32 = 240;
 
 /// Maximum number of upvalues per function.
 pub const LUAI_MAXUPVALUES: u32 = 60;
@@ -860,7 +864,7 @@ mod tests {
     // -- Constants --
 
     #[test]
-    fn constants_match_puc_rio() {
+    fn constants_match_vm_encoding() {
         assert_eq!(MAXARG_BX, 262_143);
         assert_eq!(MAXARG_SBX, 131_071);
         assert_eq!(MAXARG_A, 255);
@@ -871,7 +875,7 @@ mod tests {
         assert_eq!(NO_REG, 255);
         assert_eq!(NO_JUMP, -1);
         assert_eq!(LFIELDS_PER_FLUSH, 50);
-        assert_eq!(LUAI_MAXVARS, 200);
+        assert_eq!(LUAI_MAXVARS, 240);
         assert_eq!(LUAI_MAXUPVALUES, 60);
         assert_eq!(MAXSTACK, 250);
         assert_eq!(NUM_OPCODES, 40);
