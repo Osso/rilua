@@ -460,6 +460,24 @@ fn next_empty_table() {
 }
 
 #[test]
+fn next_visits_table_inserted_sequence_in_index_order() {
+    let code_str = r#"
+local t = {}
+table.insert(t, "general")
+table.insert(t, "profiles")
+table.insert(t, "plugins")
+local out = {}
+for _, value in next, t do
+  table.insert(out, value)
+end
+print(table.concat(out, ","))
+"#;
+    let (stdout, stderr, code) = run_rilua(code_str);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "general,profiles,plugins\n");
+}
+
+#[test]
 fn pairs_iteration() {
     let (stdout, _, code) = run_rilua(
         "local sum = 0; for k, v in pairs({a=1, b=2, c=3}) do sum = sum + v end; print(sum)",

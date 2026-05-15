@@ -1201,20 +1201,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     state.gc_check()?;
                     let narray = fb2int(instr.b()) as usize;
                     let nhash = fb2int(instr.c()) as usize;
-                    // When the compiler has no size hint (empty `{}`) the
-                    // table commonly gains 1-4 string keys. Preallocate 4
-                    // hash slots to avoid the first rehash on those sets
-                    // (see docs/wiki/investigations/table-rehashing.md in
-                    // wow-ui-sim). Hinted tables keep the compiler's size.
-                    const EMPTY_HINT_MIN_HASH: usize = 4;
-                    let effective_hash = if narray == 0 && nhash == 0 {
-                        EMPTY_HINT_MIN_HASH
-                    } else {
-                        nhash
-                    };
-                    let t = state
-                        .gc
-                        .alloc_table(Table::with_sizes(narray, effective_hash));
+                    let t = state.gc.alloc_table(Table::with_sizes(narray, nhash));
                     state.stack_set(ra, Val::Table(t));
                 }
 
@@ -2389,10 +2376,11 @@ mod tests {
     // ----- Table tests -----
 
     #[test]
-    fn op_newtable_empty_hint_preallocates_hash_to_avoid_first_rehash() {
+    fn op_newtable_respects_compiler_size_hints() {
         // NewTable(0, 0) is emitted for a bare `{}` literal. The executor
-        // promotes that to a minimum of 4 hash slots so the first string
-        // key insert does not trigger rehash. Keeps non-zero hints intact.
+        // must keep that table truly empty so integer appends can grow the
+        // array part instead of being stranded in preallocated hash slots.
+        // Non-zero hints are still preserved.
         let mut state = LuaState::new();
 
         // fb2int(5) == 5 (values < 8 pass through), so C=5 means nhash=5,
@@ -2421,8 +2409,8 @@ mod tests {
         };
         assert_eq!(
             state.gc.tables.get(empty).unwrap().hash_size(),
-            4,
-            "empty `{{}}` should pre-allocate 4 hash slots",
+            0,
+            "empty `{{}}` should not pre-allocate hash slots",
         );
         assert_eq!(
             state.gc.tables.get(hinted).unwrap().hash_size(),
