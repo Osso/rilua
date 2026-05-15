@@ -623,83 +623,7 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'\\') => {
                     self.advance(); // consume backslash
-                    match self.peek() {
-                        Some(b'a') => {
-                            self.advance();
-                            buf.push(0x07);
-                        }
-                        Some(b'b') => {
-                            self.advance();
-                            buf.push(0x08);
-                        }
-                        Some(b'f') => {
-                            self.advance();
-                            buf.push(0x0C);
-                        }
-                        Some(b'n') => {
-                            self.advance();
-                            buf.push(b'\n');
-                        }
-                        Some(b'r') => {
-                            self.advance();
-                            buf.push(b'\r');
-                        }
-                        Some(b't') => {
-                            self.advance();
-                            buf.push(b'\t');
-                        }
-                        Some(b'v') => {
-                            self.advance();
-                            buf.push(0x0B);
-                        }
-                        Some(b'\\') => {
-                            self.advance();
-                            buf.push(b'\\');
-                        }
-                        Some(b'"') => {
-                            self.advance();
-                            buf.push(b'"');
-                        }
-                        Some(b'\'') => {
-                            self.advance();
-                            buf.push(b'\'');
-                        }
-                        Some(b'\n') | Some(b'\r') => {
-                            self.inc_line();
-                            buf.push(b'\n');
-                        }
-                        Some(c) if c.is_ascii_digit() => {
-                            // \ddd decimal escape (up to 3 digits, max 255)
-                            let mut val: u32 = 0;
-                            for _ in 0..3 {
-                                if let Some(d) = self.peek() {
-                                    if d.is_ascii_digit() {
-                                        val = val * 10 + u32::from(d - b'0');
-                                        self.advance();
-                                    } else {
-                                        break;
-                                    }
-                                } else {
-                                    break;
-                                }
-                            }
-                            if val > 255 {
-                                return Err(
-                                    self.syntax_error_near("escape sequence too large", "<string>")
-                                );
-                            }
-                            buf.push(val as u8);
-                        }
-                        Some(c) => {
-                            return Err(self.syntax_error_near(
-                                &format!("invalid escape sequence '\\{}'", char::from(c)),
-                                "<string>",
-                            ));
-                        }
-                        None => {
-                            return Err(self.syntax_error_near("unfinished string", "<eof>"));
-                        }
-                    }
+                    self.read_short_string_escape(&mut buf)?;
                 }
                 Some(c) => {
                     self.advance();
@@ -709,6 +633,119 @@ impl<'a> Lexer<'a> {
         }
 
         Ok(buf)
+    }
+
+    fn read_short_string_escape(&mut self, buf: &mut Vec<u8>) -> LuaResult<()> {
+        match self.peek() {
+            Some(b'a') => self.push_single_byte_escape(buf, 0x07),
+            Some(b'b') => self.push_single_byte_escape(buf, 0x08),
+            Some(b'f') => self.push_single_byte_escape(buf, 0x0C),
+            Some(b'n') => self.push_single_byte_escape(buf, b'\n'),
+            Some(b'r') => self.push_single_byte_escape(buf, b'\r'),
+            Some(b't') => self.push_single_byte_escape(buf, b'\t'),
+            Some(b'v') => self.push_single_byte_escape(buf, 0x0B),
+            Some(b'\\') => self.push_single_byte_escape(buf, b'\\'),
+            Some(b'"') => self.push_single_byte_escape(buf, b'"'),
+            Some(b'\'') => self.push_single_byte_escape(buf, b'\''),
+            Some(b'x') => self.push_hex_escape(buf),
+            Some(b'u') => self.push_unicode_escape(buf),
+            Some(b'\n') | Some(b'\r') => self.push_escaped_newline(buf),
+            Some(byte) if byte.is_ascii_digit() => self.push_decimal_escape(buf),
+            Some(byte) if !byte.is_ascii() => self.push_escaped_utf8_byte(buf),
+            Some(byte) => Err(self.invalid_escape_error(byte)),
+            None => Err(self.syntax_error_near("unfinished string", "<eof>")),
+        }
+    }
+
+    fn push_single_byte_escape(&mut self, buf: &mut Vec<u8>, byte: u8) -> LuaResult<()> {
+        self.advance();
+        buf.push(byte);
+        Ok(())
+    }
+
+    fn push_hex_escape(&mut self, buf: &mut Vec<u8>) -> LuaResult<()> {
+        self.advance();
+        let byte = self.read_hex_escape_byte()?;
+        buf.push(byte);
+        Ok(())
+    }
+
+    fn push_unicode_escape(&mut self, buf: &mut Vec<u8>) -> LuaResult<()> {
+        self.advance();
+        self.read_unicode_escape_char(buf)
+    }
+
+    fn push_escaped_newline(&mut self, buf: &mut Vec<u8>) -> LuaResult<()> {
+        self.inc_line();
+        buf.push(b'\n');
+        Ok(())
+    }
+
+    fn push_decimal_escape(&mut self, buf: &mut Vec<u8>) -> LuaResult<()> {
+        let mut val: u32 = 0;
+        for _ in 0..3 {
+            let Some(digit) = self.peek() else {
+                break;
+            };
+            if !digit.is_ascii_digit() {
+                break;
+            }
+            val = val * 10 + u32::from(digit - b'0');
+            self.advance();
+        }
+        if val > 255 {
+            return Err(self.syntax_error_near("escape sequence too large", "<string>"));
+        }
+        buf.push(val as u8);
+        Ok(())
+    }
+
+    fn push_escaped_utf8_byte(&mut self, buf: &mut Vec<u8>) -> LuaResult<()> {
+        let Some(byte) = self.advance() else {
+            return Err(self.syntax_error_near("unfinished string", "<eof>"));
+        };
+        buf.push(byte);
+        Ok(())
+    }
+
+    fn invalid_escape_error(&self, byte: u8) -> LuaError {
+        self.syntax_error_near(
+            &format!("invalid escape sequence '\\{}'", char::from(byte)),
+            "<string>",
+        )
+    }
+
+    fn read_hex_escape_byte(&mut self) -> LuaResult<u8> {
+        let high = self.read_hex_escape_digit("invalid hex escape")?;
+        let low = self.read_hex_escape_digit("invalid hex escape")?;
+        Ok((high << 4) | low)
+    }
+
+    fn read_unicode_escape_char(&mut self, buf: &mut Vec<u8>) -> LuaResult<()> {
+        let mut codepoint = 0;
+        for _ in 0..4 {
+            codepoint =
+                (codepoint << 4) | u32::from(self.read_hex_escape_digit("invalid unicode escape")?);
+        }
+
+        let Some(ch) = char::from_u32(codepoint) else {
+            return Err(self.syntax_error_near("invalid unicode escape", "<string>"));
+        };
+
+        let mut encoded = [0; 4];
+        buf.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+        Ok(())
+    }
+
+    fn read_hex_escape_digit(&mut self, message: &str) -> LuaResult<u8> {
+        let Some(byte) = self.peek() else {
+            return Err(self.syntax_error_near(message, "<string>"));
+        };
+        let Some(digit) = (byte as char).to_digit(16) else {
+            return Err(self.syntax_error_near(message, "<string>"));
+        };
+        self.advance();
+        Ok(digit as u8)
     }
 
     // -- Long strings and comments --
@@ -993,6 +1030,24 @@ mod tests {
         let source = "\"line1\\\nline2\"";
         let tokens = lex_tokens(source).unwrap();
         assert_eq!(tokens[0], Token::Str(b"line1\nline2".to_vec()));
+    }
+
+    #[test]
+    fn string_hex_escape() {
+        let tokens = lex_tokens(r#""\x1F""#).unwrap();
+        assert_eq!(tokens[0], Token::Str(vec![0x1F]));
+    }
+
+    #[test]
+    fn string_unicode_escape() {
+        let tokens = lex_tokens(r#""\u2013""#).unwrap();
+        assert_eq!(tokens[0], Token::Str("–".as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn string_escaped_utf8_punctuation() {
+        let tokens = lex_tokens("\"\\“quoted\\”\"").unwrap();
+        assert_eq!(tokens[0], Token::Str("“quoted”".as_bytes().to_vec()));
     }
 
     #[test]
