@@ -67,6 +67,21 @@ fn print_no_args() {
     assert_eq!(stdout, "\n");
 }
 
+#[test]
+fn named_arg_parameter_in_vararg_function_keeps_parameter_binding() {
+    let (stdout, _, code) = run_rilua(
+        r##"
+        local function check(arg, argIndex, ...)
+            print(arg, argIndex, select("#", ...), select(1, ...))
+        end
+        check("value", 7, "function")
+        "##,
+    );
+
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "value\t7\t1\tfunction\n");
+}
+
 // ---------------------------------------------------------------------------
 // Variable and expression tests
 // ---------------------------------------------------------------------------

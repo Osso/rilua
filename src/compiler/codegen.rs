@@ -2538,7 +2538,9 @@ fn compile_funcbody(
         let num_params = body.params.len() as u8 + u8::from(need_self);
         compiler.fs_mut().proto.num_params = num_params;
     }
-    if body.has_varargs {
+    if body.has_varargs && body.params.iter().any(|param| param == "arg") {
+        compiler.fs_mut().proto.is_vararg = VARARG_ISVARARG;
+    } else if body.has_varargs {
         // LUA_COMPAT_VARARG: add implicit 'arg' local and set all flags.
         // NEEDSARG is cleared later if the body actually uses '...'.
         compiler.fs_mut().proto.is_vararg = VARARG_HASARG | VARARG_ISVARARG | VARARG_NEEDSARG;
