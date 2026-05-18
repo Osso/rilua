@@ -188,15 +188,14 @@ fn try_plain_table_get_ref(
     let Some(table) = state.gc.tables.get(table_ref) else {
         return false;
     };
-    if table.metatable().is_some() {
-        return false;
-    }
-
     let result = match resolved_key {
         PlainTableKey::Str { key, hash } => table.get_str_hashed(key, hash),
         PlainTableKey::Int(integer_key) => table.get_int(integer_key),
         PlainTableKey::Other(raw_key) => table.get(raw_key, &state.gc.string_arena),
     };
+    if result.is_nil() && table.metatable().is_some() {
+        return false;
+    }
     state.stack_set(result_reg, result);
     true
 }
@@ -2698,6 +2697,66 @@ mod tests {
 
         execute(&mut state).ok();
         assert_eq!(state.stack_get(state.base), Val::Num(77.0));
+    }
+
+    #[test]
+    fn op_getglobal_prefers_direct_value_on_metatable_env() {
+        let mut state = LuaState::new();
+        let key_ref = state.gc.intern_string(b"myvar");
+        let index_key = state.gc.intern_string(b"__index");
+
+        let fallback = state.gc.alloc_table(Table::new());
+        let metatable = state.gc.alloc_table(Table::new());
+
+        state
+            .gc
+            .tables
+            .get_mut(state.global)
+            .expect("missing globals table")
+            .raw_set(Val::Str(key_ref), Val::Num(42.0), &state.gc.string_arena)
+            .expect("global raw_set should succeed");
+        state
+            .gc
+            .tables
+            .get_mut(fallback)
+            .expect("missing fallback table")
+            .raw_set(Val::Str(key_ref), Val::Num(77.0), &state.gc.string_arena)
+            .expect("fallback raw_set should succeed");
+        state
+            .gc
+            .tables
+            .get_mut(metatable)
+            .expect("missing metatable")
+            .raw_set(
+                Val::Str(index_key),
+                Val::Table(fallback),
+                &state.gc.string_arena,
+            )
+            .expect("metatable raw_set should succeed");
+        state
+            .gc
+            .tables
+            .get_mut(state.global)
+            .expect("missing globals table")
+            .set_metatable(Some(metatable));
+
+        let code = vec![
+            Instruction::a_bx(OpCode::GetGlobal, 0, 0).raw(),
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let constants = vec![Val::Str(key_ref)];
+
+        let proto_rc = ProtoRef::new(make_proto(code, constants));
+        let env = state.global;
+        let cl = LuaClosure::new(proto_rc, env);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+
+        execute(&mut state).ok();
+        assert_eq!(state.stack_get(state.base), Val::Num(42.0));
     }
 
     // ----- Len tests -----
