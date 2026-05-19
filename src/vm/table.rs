@@ -33,6 +33,7 @@ use super::value::Val;
 ///
 /// Each node holds a key-value pair and a chain pointer to the next
 /// node in the collision chain. A node with `key == Val::Nil` is free.
+#[derive(Clone, Copy)]
 struct Node {
     key: Val,
     value: Val,
@@ -222,10 +223,7 @@ impl Table {
         } else {
             let log2 = ceil_log2(hash_size);
             let actual_size = 1u32 << log2;
-            let mut nodes = Vec::with_capacity(actual_size as usize);
-            for _ in 0..actual_size {
-                nodes.push(Node::empty());
-            }
+            let nodes = vec![Node::empty(); actual_size as usize];
             Self {
                 array,
                 nodes,
@@ -638,10 +636,7 @@ impl Table {
                 return Err(runtime_error("table overflow"));
             }
             let actual_size = 1u32 << log2;
-            let mut new_nodes = Vec::with_capacity(actual_size as usize);
-            for _ in 0..actual_size {
-                new_nodes.push(Node::empty());
-            }
+            let new_nodes = vec![Node::empty(); actual_size as usize];
             let old = core::mem::replace(&mut self.nodes, new_nodes);
             self.log2_size = log2;
             self.last_free = actual_size;
