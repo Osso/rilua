@@ -294,6 +294,17 @@ impl StringTable {
         self.buckets.len()
     }
 
+    /// Ensures the table can accept `additional` new strings without
+    /// repeated growth.
+    pub fn reserve(&mut self, additional: usize, arena: &Arena<LuaString>) {
+        let needed = self.count.saturating_add(additional);
+        if needed <= self.buckets.len() {
+            return;
+        }
+        let new_size = needed.next_power_of_two().max(MIN_STR_TAB_SIZE);
+        self.rehash(new_size, arena);
+    }
+
     /// Doubles the bucket count and rehashes all entries.
     fn grow(&mut self, arena: &Arena<LuaString>) {
         let new_size = self.buckets.len().saturating_mul(2);
