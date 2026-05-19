@@ -26,11 +26,12 @@ use super::gc::Color;
 use super::gc::arena::{Arena, GcRef};
 use super::gc::trace::Trace;
 use super::metatable::{NUM_TYPE_TAGS, TM_N, TM_NAMES};
-use super::string::{LuaString, StaticInternCache, StringTable};
+use super::string::{IdentityHasher, LuaString, StaticInternCache, StringTable};
 use super::table::Table;
 use super::value::{Userdata, Val};
 use crate::api::{LuaApi, LuaApiMut};
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 
 // ---------------------------------------------------------------------------
 // Constants (match PUC-Rio limits)
@@ -111,7 +112,7 @@ pub struct GlobalSlotRuntime {
     /// Pre-interned key for each slot index.
     pub name_keys: Box<[GcRef<LuaString>]>,
     /// Reverse lookup used by the load-time rewrite pass.
-    pub key_to_slot: HashMap<GcRef<LuaString>, u32>,
+    pub key_to_slot: HashMap<GcRef<LuaString>, u32, BuildHasherDefault<IdentityHasher>>,
     /// Global table the slot vector was captured from.
     pub root_global: GcRef<Table>,
     /// Optional registry key for a mutable shadow table layered over
@@ -136,7 +137,7 @@ impl GlobalSlotRuntime {
             .copied()
             .enumerate()
             .map(|(idx, key)| (key, idx as u32))
-            .collect();
+            .collect::<HashMap<_, _, BuildHasherDefault<IdentityHasher>>>();
         Self {
             values,
             name_keys,

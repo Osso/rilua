@@ -405,6 +405,11 @@ impl Hasher for IdentityHasher {
     fn write_usize(&mut self, n: usize) {
         self.0 = n as u64;
     }
+
+    #[inline]
+    fn write_u32(&mut self, n: u32) {
+        self.0 = self.0.rotate_left(32) ^ u64::from(n);
+    }
 }
 
 /// Pointer-keyed cache mapping a `&'static [u8]` address to its interned
