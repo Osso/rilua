@@ -212,6 +212,15 @@ impl Val {
         matches!(self, Self::Nil)
     }
 
+    /// Returns `true` if this value references a GC-managed object.
+    #[inline]
+    pub fn is_gc_managed(self) -> bool {
+        matches!(
+            self,
+            Self::Str(_) | Self::Table(_) | Self::Function(_) | Self::Userdata(_) | Self::Thread(_)
+        )
+    }
+
     /// Returns the Lua type name as returned by `type()`.
     pub fn type_name(self) -> &'static str {
         match self {
@@ -792,6 +801,42 @@ mod tests {
         assert!(Val::Nil.is_nil());
         assert!(!Val::Bool(false).is_nil());
         assert!(!Val::Num(0.0).is_nil());
+    }
+
+    #[test]
+    fn is_gc_managed_matches_collectable_variants() {
+        use crate::vm::closure::{Closure, RustClosure};
+        use crate::vm::state::{LuaState, LuaThread};
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn dummy(_: &mut LuaState) -> crate::error::LuaResult<u32> {
+            Ok(0)
+        }
+
+        let mut strings: Arena<LuaString> = Arena::new();
+        let mut tables: Arena<Table> = Arena::new();
+        let mut closures: Arena<Closure> = Arena::new();
+        let mut userdata: Arena<Userdata> = Arena::new();
+        let mut threads: Arena<LuaThread> = Arena::new();
+
+        let s = strings.alloc(LuaString::new(b"test", lua_hash(b"test")), Color::White0);
+        let t = tables.alloc(Table::new(), Color::White0);
+        let c = closures.alloc(
+            Closure::Rust(RustClosure::new(dummy, "test")),
+            Color::White0,
+        );
+        let u = userdata.alloc(Userdata::new(Box::new(())), Color::White0);
+        let thread = threads.alloc(LuaThread::new(Val::Function(c), t), Color::White0);
+
+        assert!(!Val::Nil.is_gc_managed());
+        assert!(!Val::Bool(false).is_gc_managed());
+        assert!(!Val::Num(0.0).is_gc_managed());
+        assert!(!Val::LightUserdata(1).is_gc_managed());
+        assert!(Val::Str(s).is_gc_managed());
+        assert!(Val::Table(t).is_gc_managed());
+        assert!(Val::Function(c).is_gc_managed());
+        assert!(Val::Userdata(u).is_gc_managed());
+        assert!(Val::Thread(thread).is_gc_managed());
     }
 
     // -- Userdata --

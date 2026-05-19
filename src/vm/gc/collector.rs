@@ -278,6 +278,37 @@ impl Default for GcState {
     }
 }
 
+fn collect_table_array_mark_values(table: &Table, out: &mut SmallVec<[Val; 32]>) {
+    for &val in table.array_slice() {
+        if val.is_gc_managed() {
+            out.push(val);
+        }
+    }
+}
+
+fn collect_table_hash_mark_values(
+    table: &Table,
+    hash_count: u32,
+    weak_keys: bool,
+    weak_values: bool,
+    out: &mut SmallVec<[Val; 32]>,
+) {
+    for i in 0..hash_count {
+        let Some((key, val)) = table.hash_node_kv(i) else {
+            continue;
+        };
+        if val.is_nil() {
+            continue;
+        }
+        if !weak_keys && key.is_gc_managed() {
+            out.push(key);
+        }
+        if !weak_values && val.is_gc_managed() {
+            out.push(val);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Gc: marking methods
 // ---------------------------------------------------------------------------
@@ -445,13 +476,13 @@ impl Gc {
         }
 
         // Extract metadata in a single borrow.
-        let (metatable, array_len, hash_count, weak_keys, weak_values) = {
+        let (metatable, hash_count, weak_keys, weak_values) = {
             let Some(table) = self.tables.get(r) else {
                 return;
             };
             let mt = table.metatable();
             let (wk, wv) = self.check_weak_mode(mt);
-            (mt, table.array_len(), table.hash_node_count(), wk, wv)
+            (mt, table.hash_node_count(), wk, wv)
         };
 
         self.tables.set_color(r, Color::Black);
@@ -469,42 +500,42 @@ impl Gc {
             return;
         }
 
-        // Mark array values: collect under one borrow, then release and mark.
-        // SmallVec stack buffer keeps small tables allocation-free.
         if !weak_values {
-            let mut array_values: SmallVec<[Val; 32]> = SmallVec::new();
-            if let Some(table) = self.tables.get(r) {
-                for i in 0..array_len {
-                    if let Some(val) = table.array_get(i) {
-                        array_values.push(val);
-                    }
-                }
-            }
-            for val in array_values {
-                self.mark_value(val);
-            }
+            self.mark_table_array_values(r);
         }
 
-        // Mark hash entries: same single-borrow pattern for key/value pairs.
-        let mut hash_entries: SmallVec<[(Val, Val); 32]> = SmallVec::new();
+        self.mark_table_hash_values(r, hash_count, weak_keys, weak_values);
+    }
+
+    fn mark_table_array_values(&mut self, r: GcRef<Table>) {
+        let mut array_values: SmallVec<[Val; 32]> = SmallVec::new();
         if let Some(table) = self.tables.get(r) {
-            for i in 0..hash_count {
-                let Some((key, val)) = table.hash_node_kv(i) else {
-                    continue;
-                };
-                if val.is_nil() {
-                    continue;
-                }
-                hash_entries.push((key, val));
-            }
+            collect_table_array_mark_values(table, &mut array_values);
         }
-        for (key, val) in hash_entries {
-            if !weak_keys {
-                self.mark_value(key);
-            }
-            if !weak_values {
-                self.mark_value(val);
-            }
+        for val in array_values {
+            self.mark_value(val);
+        }
+    }
+
+    fn mark_table_hash_values(
+        &mut self,
+        r: GcRef<Table>,
+        hash_count: u32,
+        weak_keys: bool,
+        weak_values: bool,
+    ) {
+        let mut hash_values: SmallVec<[Val; 32]> = SmallVec::new();
+        if let Some(table) = self.tables.get(r) {
+            collect_table_hash_mark_values(
+                table,
+                hash_count,
+                weak_keys,
+                weak_values,
+                &mut hash_values,
+            );
+        }
+        for val in hash_values {
+            self.mark_value(val);
         }
     }
 
