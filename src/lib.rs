@@ -530,7 +530,7 @@ pub(crate) fn compile_or_undump(source: &[u8], name: &str) -> LuaResult<ProtoRef
 /// the real `Val::Str` value. Recurses into child protos.
 pub(crate) fn patch_string_constants(proto: &mut Proto, gc: &mut Gc) {
     for entry in proto.string_pool.drain(..) {
-        let str_ref = gc.intern_string_hashed(&entry.bytes, entry.hash);
+        let str_ref = gc.intern_string_vec_hashed(entry.bytes, entry.hash);
         proto.constants[entry.index as usize] = Val::Str(str_ref);
     }
     for child in &mut proto.protos {

@@ -253,6 +253,26 @@ impl Gc {
         r
     }
 
+    /// Interns owned string bytes using a caller-provided cached Lua hash.
+    ///
+    /// If the content is new, ownership moves into the interned Lua string.
+    /// If an identical string already exists, the owned buffer is dropped.
+    pub fn intern_string_vec_hashed(&mut self, data: Vec<u8>, hash: u32) -> GcRef<LuaString> {
+        let old_count = self.string_arena.len();
+        let data_len = data.len();
+        let r = self.strings.intern_hashed_owned(
+            data,
+            hash,
+            &mut self.string_arena,
+            self.current_white,
+        );
+        if self.string_arena.len() > old_count {
+            let est = super::gc::collector::EST_STRING_SIZE + data_len;
+            self.gc_state.track_alloc(est);
+        }
+        r
+    }
+
     /// Interns a `&'static [u8]`, caching by pointer identity.
     ///
     /// Fast path: a pointer-keyed `HashMap` lookup skips `lua_hash`,
