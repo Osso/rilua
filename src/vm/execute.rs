@@ -715,6 +715,7 @@ impl LuaState {
     /// `first_result` is the stack index of the first return value.
     /// Returns `true` if the caller is a Lua function (execution should
     /// continue in the caller's frame).
+    #[inline]
     pub fn poscall(&mut self, mut first_result: usize) -> bool {
         // Fire return hook before unwinding (PUC-Rio: luaD_poscall line 346).
         // callrethooks fires LUA_HOOKRET, then LUA_HOOKTAILRET for each
