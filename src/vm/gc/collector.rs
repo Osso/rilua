@@ -288,17 +288,13 @@ fn collect_table_array_mark_values(table: &Table, out: &mut SmallVec<[Val; 32]>)
 
 fn collect_table_hash_mark_values(
     table: &Table,
-    hash_count: u32,
     weak_keys: bool,
     weak_values: bool,
     out: &mut SmallVec<[Val; 32]>,
 ) {
-    for i in 0..hash_count {
-        let Some((key, val)) = table.hash_node_kv(i) else {
-            continue;
-        };
+    table.for_each_hash_node_kv(|key, val| {
         if val.is_nil() {
-            continue;
+            return;
         }
         if !weak_keys && key.is_gc_managed() {
             out.push(key);
@@ -306,7 +302,7 @@ fn collect_table_hash_mark_values(
         if !weak_values && val.is_gc_managed() {
             out.push(val);
         }
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -476,13 +472,13 @@ impl Gc {
         }
 
         // Extract metadata in a single borrow.
-        let (metatable, hash_count, weak_keys, weak_values) = {
+        let (metatable, weak_keys, weak_values) = {
             let Some(table) = self.tables.get(r) else {
                 return;
             };
             let mt = table.metatable();
             let (wk, wv) = self.check_weak_mode(mt);
-            (mt, table.hash_node_count(), wk, wv)
+            (mt, wk, wv)
         };
 
         self.tables.set_color(r, Color::Black);
@@ -504,7 +500,7 @@ impl Gc {
             self.mark_table_array_values(r);
         }
 
-        self.mark_table_hash_values(r, hash_count, weak_keys, weak_values);
+        self.mark_table_hash_values(r, weak_keys, weak_values);
     }
 
     fn mark_table_array_values(&mut self, r: GcRef<Table>) {
@@ -517,22 +513,10 @@ impl Gc {
         }
     }
 
-    fn mark_table_hash_values(
-        &mut self,
-        r: GcRef<Table>,
-        hash_count: u32,
-        weak_keys: bool,
-        weak_values: bool,
-    ) {
+    fn mark_table_hash_values(&mut self, r: GcRef<Table>, weak_keys: bool, weak_values: bool) {
         let mut hash_values: SmallVec<[Val; 32]> = SmallVec::new();
         if let Some(table) = self.tables.get(r) {
-            collect_table_hash_mark_values(
-                table,
-                hash_count,
-                weak_keys,
-                weak_values,
-                &mut hash_values,
-            );
+            collect_table_hash_mark_values(table, weak_keys, weak_values, &mut hash_values);
         }
         for val in hash_values {
             self.mark_value(val);
@@ -1009,7 +993,6 @@ impl Gc {
                 continue;
             };
             let array_len = table.array_len();
-            let hash_count = table.hash_node_count();
             // Mark strings in array part.
             for i in 0..array_len {
                 if let Some(Val::Str(s)) = table.array_get(i) {
@@ -1017,16 +1000,14 @@ impl Gc {
                 }
             }
             // Mark strings in hash part (both keys and values).
-            for i in 0..hash_count {
-                if let Some((key, val)) = table.hash_node_kv(i) {
-                    if let Val::Str(s) = key {
-                        self.string_arena.set_color(s, current_white);
-                    }
-                    if let Val::Str(s) = val {
-                        self.string_arena.set_color(s, current_white);
-                    }
+            table.for_each_hash_node_kv(|key, val| {
+                if let Val::Str(s) = key {
+                    self.string_arena.set_color(s, current_white);
                 }
-            }
+                if let Val::Str(s) = val {
+                    self.string_arena.set_color(s, current_white);
+                }
+            });
         }
 
         // Second pass: clear dead non-string entries.

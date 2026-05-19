@@ -404,6 +404,22 @@ impl Table {
         }
     }
 
+    /// Visits every occupied hash node as `(key, value)`.
+    ///
+    /// Used by GC hot paths that need to scan all hash entries without an
+    /// index lookup for every bucket.
+    #[inline]
+    pub(crate) fn for_each_hash_node_kv<F>(&self, mut visit: F)
+    where
+        F: FnMut(Val, Val),
+    {
+        for node in &self.nodes {
+            if !node.key.is_nil() {
+                visit(node.key, node.value);
+            }
+        }
+    }
+
     /// Returns indices of hash nodes that contain dead references in weak tables.
     ///
     /// For `weak_keys`: a node is dead if its key is dead.
