@@ -161,6 +161,7 @@ enum PlainTableKey {
     Other(Val),
 }
 
+#[inline]
 fn resolve_plain_table_key(key: Val, gc: &Gc) -> PlainTableKey {
     match key {
         Val::Str(string_ref) => {
@@ -178,6 +179,7 @@ fn resolve_plain_table_key(key: Val, gc: &Gc) -> PlainTableKey {
     }
 }
 
+#[inline]
 fn try_plain_table_get_ref(
     state: &mut LuaState,
     table_ref: GcRef<Table>,
@@ -200,6 +202,7 @@ fn try_plain_table_get_ref(
     true
 }
 
+#[inline]
 fn try_plain_table_get(state: &mut LuaState, table_val: Val, key: Val, result_reg: usize) -> bool {
     let Val::Table(table_ref) = table_val else {
         return false;
