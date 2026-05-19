@@ -649,6 +649,11 @@ fn handle_table_settable(
     key: Val,
     value: Val,
 ) -> LuaResult<SettableStep> {
+    if table_has_no_metatable(state, table_ref)? {
+        raw_set_new_slot(state, table_ref, key, value)?;
+        return Ok(SettableStep::Done);
+    }
+
     if !table_get(state, table_ref, key)?.is_nil() {
         ensure_table_not_frozen(state, table_ref)?;
         raw_set_existing_slot(state, table_ref, key, value)?;
@@ -663,6 +668,15 @@ fn handle_table_settable(
         }
         Some(tm_val) => resolve_settable_tm(state, current, key, value, tm_val),
     }
+}
+
+fn table_has_no_metatable(state: &LuaState, table_ref: GcRef<Table>) -> LuaResult<bool> {
+    let table = state
+        .gc
+        .tables
+        .get(table_ref)
+        .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
+    Ok(table.metatable().is_none())
 }
 
 /// Gate a table write on the Frozen flag.

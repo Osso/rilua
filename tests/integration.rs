@@ -312,6 +312,13 @@ fn metamethod_newindex() {
 }
 
 #[test]
+fn plain_table_new_slot_assignment_rawsets_without_metatable() {
+    let (stdout, _, code) = run_rilua("local t = {}; t.x = 42; print(rawget(t, 'x'))");
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
 fn metamethod_call() {
     let (stdout, _, code) = run_rilua(
         "local t = setmetatable({}, {__call = function(self, a, b) return a + b end}); print(t(3, 4))",
