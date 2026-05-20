@@ -1142,7 +1142,7 @@ impl Table {
             return Ok(());
         }
 
-        if self.insert_first_hash_node(key, value) {
+        if self.insert_first_hash_node(key, value, strings) {
             return Ok(());
         }
 
@@ -1187,18 +1187,17 @@ impl Table {
         false
     }
 
-    fn insert_first_hash_node(&mut self, key: Val, value: Val) -> bool {
+    fn insert_first_hash_node(&mut self, key: Val, value: Val, strings: &Arena<LuaString>) -> bool {
         if !self.nodes.is_empty() {
             return false;
         }
 
-        self.nodes.push(Node {
-            key,
-            value,
-            next: None,
-        });
-        self.last_free = 1;
-        self.log2_size = 0;
+        self.nodes = vec![Node::empty(); 2];
+        self.last_free = 2;
+        self.log2_size = 1;
+        let bucket = self.main_position(&key, strings);
+        self.nodes[bucket as usize].key = key;
+        self.nodes[bucket as usize].value = value;
         true
     }
 
@@ -1851,6 +1850,29 @@ mod tests {
         t.raw_set(Val::Str(key), Val::Num(1.0), &str_arena).ok();
         assert_eq!(t.get_str(key, &str_arena), Val::Num(1.0));
         assert!(t.hash_size() > 0);
+        #[cfg(feature = "rehash-stats")]
+        assert_eq!(crate::vm::rehash_stats::snapshot().total, 0);
+    }
+
+    #[test]
+    fn first_two_hash_keys_on_empty_hash_do_not_trigger_rehash() {
+        #[cfg(feature = "rehash-stats")]
+        crate::vm::rehash_stats::reset();
+        let mut str_arena = Arena::new();
+        let mut str_tbl = StringTable::new();
+        let key_a = intern_str(&mut str_arena, &mut str_tbl, b"a");
+        let key_b = intern_str(&mut str_arena, &mut str_tbl, b"b");
+        let mut table = Table::new();
+
+        table
+            .raw_set(Val::Str(key_a), Val::Num(1.0), &str_arena)
+            .expect("first hash key should insert");
+        table
+            .raw_set(Val::Str(key_b), Val::Num(2.0), &str_arena)
+            .expect("second hash key should insert");
+
+        assert_eq!(table.get_str(key_a, &str_arena), Val::Num(1.0));
+        assert_eq!(table.get_str(key_b, &str_arena), Val::Num(2.0));
         #[cfg(feature = "rehash-stats")]
         assert_eq!(crate::vm::rehash_stats::snapshot().total, 0);
     }
