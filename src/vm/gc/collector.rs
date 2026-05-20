@@ -433,12 +433,15 @@ impl Gc {
         }
     }
 
-    /// Marks GC-internal roots: type metatables, tm_names, static intern cache.
+    /// Marks GC-internal roots: type metatables, tm_names, type names, static intern cache.
     fn mark_gc_roots(&mut self) {
         for r in self.type_metatables.into_iter().flatten() {
             self.mark_table(r);
         }
         for r in self.tm_names.into_iter().flatten() {
+            self.mark_string(r);
+        }
+        for r in self.type_name_refs.into_iter().flatten() {
             self.mark_string(r);
         }
         // Copy refs out first to release the borrow on `self`.

@@ -145,8 +145,7 @@ pub fn lua_print(state: &mut LuaState) -> LuaResult<u32> {
 pub fn lua_type(state: &mut LuaState) -> LuaResult<u32> {
     check_args("type", state, 1)?;
     let val = arg(state, 0);
-    let name = val.type_name();
-    let r = state.gc.intern_string_static(name.as_bytes());
+    let r = state.gc.type_name_ref(val);
     state.push(Val::Str(r));
     Ok(1)
 }

@@ -25,7 +25,7 @@ use super::closure::{Closure, Upvalue};
 use super::gc::Color;
 use super::gc::arena::{Arena, GcRef};
 use super::gc::trace::Trace;
-use super::metatable::{NUM_TYPE_TAGS, TM_N, TM_NAMES};
+use super::metatable::{NUM_TYPE_TAGS, TM_N, TM_NAMES, type_tag};
 use super::string::{IdentityHasher, LuaString, StaticInternCache, StringTable};
 use super::table::Table;
 use super::value::{Userdata, Val};
@@ -51,6 +51,10 @@ const BASIC_STACK_SIZE: usize = 2 * LUA_MINSTACK;
 
 /// Initial CallInfo array capacity.
 pub(crate) const BASIC_CI_SIZE: usize = 8;
+
+const TYPE_NAMES: [&str; NUM_TYPE_TAGS] = [
+    "nil", "boolean", "number", "string", "function", "userdata", "thread", "table", "userdata",
+];
 
 // ---------------------------------------------------------------------------
 // Hook mask constants (match PUC-Rio lua.h)
@@ -179,6 +183,8 @@ pub struct Gc {
     /// Interned metamethod name strings (one per TMS event).
     /// Initialized once during state creation.
     pub tm_names: [Option<GcRef<LuaString>>; TM_N],
+    /// Interned Lua type-name strings, indexed by `metatable::type_tag`.
+    pub type_name_refs: [Option<GcRef<LuaString>>; NUM_TYPE_TAGS],
     /// Pointer-keyed intern cache for `&'static [u8]` literals.
     ///
     /// Skips hashing + byte compare for known-static strings. Entries
@@ -203,10 +209,12 @@ impl Gc {
             current_white: Color::White0,
             type_metatables: [None; NUM_TYPE_TAGS],
             tm_names: [None; TM_N],
+            type_name_refs: [None; NUM_TYPE_TAGS],
             static_intern_cache: StaticInternCache::default(),
             gc_state: super::gc::collector::GcState::new(),
         };
         gc.init_tm_names();
+        gc.init_type_name_refs();
         gc
     }
 
@@ -218,6 +226,13 @@ impl Gc {
         for (i, name) in TM_NAMES.iter().enumerate() {
             let r = self.intern_string(name.as_bytes());
             self.tm_names[i] = Some(r);
+        }
+    }
+
+    fn init_type_name_refs(&mut self) {
+        for (i, name) in TYPE_NAMES.iter().enumerate() {
+            let r = self.intern_string(name.as_bytes());
+            self.type_name_refs[i] = Some(r);
         }
     }
 
@@ -367,6 +382,11 @@ impl Gc {
     #[inline]
     pub fn tm_name(&self, event: super::metatable::TMS) -> Option<GcRef<LuaString>> {
         self.tm_names[event as usize]
+    }
+
+    #[inline]
+    pub fn type_name_ref(&self, val: Val) -> GcRef<LuaString> {
+        self.type_name_refs[type_tag(val)].expect("type name refs initialized")
     }
 
     /// Returns the current estimated total allocated bytes.
@@ -1296,9 +1316,12 @@ mod tests {
         let state = LuaState::new();
         // Two tables allocated (global + registry).
         assert_eq!(state.gc.tables.len(), 2);
-        // Startup interns metamethod names plus cached debug hook strings.
-        let startup_strings =
-            TM_N + HOOK_EVENT_NAMES.len() + HOOK_MASK_NAMES.len() + DEBUG_INFO_FIELD_NAMES.len();
+        // Startup interns metamethod names, cached type names, plus cached debug hook strings.
+        let startup_strings = TM_N
+            + (TYPE_NAMES.len() - 1)
+            + HOOK_EVENT_NAMES.len()
+            + HOOK_MASK_NAMES.len()
+            + DEBUG_INFO_FIELD_NAMES.len();
         assert_eq!(state.gc.string_arena.len(), startup_strings as u32);
         assert_eq!(state.gc.closures.len(), 0);
         assert_eq!(state.gc.upvalues.len(), 0);
@@ -1485,6 +1508,39 @@ mod tests {
         assert_eq!(r1, r2);
         // Only one new string interned (deduplication).
         assert_eq!(state.gc.string_arena.len(), before + 1);
+    }
+
+    #[test]
+    fn gc_type_name_ref_returns_preinterned_type_strings() {
+        let state = LuaState::new();
+        let nil_name = state.gc.type_name_ref(Val::Nil);
+        let bool_name = state.gc.type_name_ref(Val::Bool(false));
+        let number_name = state.gc.type_name_ref(Val::Num(0.0));
+        let light_userdata_name = state.gc.type_name_ref(Val::LightUserdata(1));
+
+        assert_eq!(state.gc.string_arena.get(nil_name).unwrap().data(), b"nil");
+        assert_eq!(
+            state.gc.string_arena.get(bool_name).unwrap().data(),
+            b"boolean"
+        );
+        assert_eq!(
+            state.gc.string_arena.get(number_name).unwrap().data(),
+            b"number"
+        );
+        assert_eq!(
+            state
+                .gc
+                .string_arena
+                .get(light_userdata_name)
+                .unwrap()
+                .data(),
+            b"userdata"
+        );
+        assert_eq!(
+            state.gc.type_name_ref(Val::Nil),
+            nil_name,
+            "type-name lookup should reuse the preinterned ref"
+        );
     }
 
     #[test]
