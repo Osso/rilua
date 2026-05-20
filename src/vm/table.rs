@@ -1142,6 +1142,10 @@ impl Table {
             return Ok(());
         }
 
+        if self.insert_first_hash_node(key, value) {
+            return Ok(());
+        }
+
         // Insert new key via Brent's algorithm.
         // Nil assignments to absent keys are observable no-ops. PUC-Rio's
         // luaH_set can still allocate before the caller writes nil, but doing
@@ -1181,6 +1185,21 @@ impl Table {
             cur = self.nodes[i as usize].next;
         }
         false
+    }
+
+    fn insert_first_hash_node(&mut self, key: Val, value: Val) -> bool {
+        if !self.nodes.is_empty() {
+            return false;
+        }
+
+        self.nodes.push(Node {
+            key,
+            value,
+            next: None,
+        });
+        self.last_free = 1;
+        self.log2_size = 0;
+        true
     }
 
     fn dense_array_append_index(&self, key: &Val) -> Option<usize> {
@@ -1815,7 +1834,9 @@ mod tests {
     }
 
     #[test]
-    fn set_on_empty_hash_triggers_rehash() {
+    fn first_hash_key_on_empty_hash_does_not_trigger_rehash() {
+        #[cfg(feature = "rehash-stats")]
+        crate::vm::rehash_stats::reset();
         let strings_arena = Arena::new();
         let mut t = Table::with_sizes(5, 0);
 
@@ -1823,13 +1844,15 @@ mod tests {
         t.raw_set(Val::Num(1.0), Val::Num(10.0), &strings_arena)
             .ok();
 
-        // String key on empty hash triggers auto-rehash.
+        // First string key allocates the initial hash node directly.
         let mut str_arena = Arena::new();
         let mut str_tbl = StringTable::new();
         let key = intern_str(&mut str_arena, &mut str_tbl, b"x");
         t.raw_set(Val::Str(key), Val::Num(1.0), &str_arena).ok();
         assert_eq!(t.get_str(key, &str_arena), Val::Num(1.0));
         assert!(t.hash_size() > 0);
+        #[cfg(feature = "rehash-stats")]
+        assert_eq!(crate::vm::rehash_stats::snapshot().total, 0);
     }
 
     // -- Metatable --
