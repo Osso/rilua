@@ -1129,24 +1129,23 @@ impl Table {
             }
         }
 
-        // Try existing slot in hash part.
-        if !self.nodes.is_empty() {
-            let mp = self.main_position(&key, strings);
-            let mut cur = Some(mp);
-            while let Some(i) = cur {
-                if self.nodes[i as usize].key == key {
-                    self.nodes[i as usize].value = value;
-                    return Ok(());
-                }
-                cur = self.nodes[i as usize].next;
-            }
+        if self.update_existing_hash_slot(key, value, strings) {
+            return Ok(());
+        }
+
+        if value.is_nil() {
+            return Ok(());
+        }
+
+        if self.dense_array_append_index(&key).is_some() {
+            self.array.push(value);
+            return Ok(());
         }
 
         // Insert new key via Brent's algorithm.
-        // Note: PUC-Rio's luaH_set allocates a hash entry even when
-        // the value is nil. This is necessary so nil-assignments to
-        // non-existing keys can fill the hash and trigger rehash,
-        // compacting the table. Skipping would prevent rehash.
+        // Nil assignments to absent keys are observable no-ops. PUC-Rio's
+        // luaH_set can still allocate before the caller writes nil, but doing
+        // so here creates large amounts of table churn during addon startup.
         match self.new_key(key, strings) {
             Ok(node_idx) => {
                 self.nodes[node_idx as usize].value = value;
@@ -1159,6 +1158,40 @@ impl Table {
                 self.raw_set_impl(key, value, strings, false)
             }
             Err(e) => Err(e),
+        }
+    }
+
+    fn update_existing_hash_slot(
+        &mut self,
+        key: Val,
+        value: Val,
+        strings: &Arena<LuaString>,
+    ) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+
+        let mp = self.main_position(&key, strings);
+        let mut cur = Some(mp);
+        while let Some(i) = cur {
+            if self.nodes[i as usize].key == key {
+                self.nodes[i as usize].value = value;
+                return true;
+            }
+            cur = self.nodes[i as usize].next;
+        }
+        false
+    }
+
+    fn dense_array_append_index(&self, key: &Val) -> Option<usize> {
+        let Val::Num(n) = key else {
+            return None;
+        };
+        let array_index = usize::try_from(number_to_int_key(*n)?).ok()?;
+        if array_index == self.array.len() + 1 && array_index <= MAXASIZE {
+            Some(array_index)
+        } else {
+            None
         }
     }
 
@@ -1479,6 +1512,77 @@ mod tests {
 
         assert_eq!(t.get_str(key_a, &strings_arena), Val::Num(1.0));
         assert_eq!(t.get_str(key_b, &strings_arena), Val::Num(2.0));
+    }
+
+    #[test]
+    fn setting_nil_for_absent_string_key_does_not_allocate_hash() {
+        let mut strings_arena = Arena::new();
+        let mut str_table = StringTable::new();
+        let key = intern_str(&mut strings_arena, &mut str_table, b"missing");
+        let mut table = Table::new();
+
+        table
+            .raw_set(Val::Str(key), Val::Nil, &strings_arena)
+            .expect("nil assignment to absent key should be a no-op");
+
+        assert_eq!(table.hash_size(), 0);
+        assert_eq!(table.array_len(), 0);
+        assert_eq!(table.get_str(key, &strings_arena), Val::Nil);
+    }
+
+    #[test]
+    fn setting_nil_for_absent_integer_key_does_not_allocate_array() {
+        let strings_arena = Arena::new();
+        let mut table = Table::new();
+
+        table
+            .raw_set(Val::Num(1.0), Val::Nil, &strings_arena)
+            .expect("nil assignment to absent integer key should be a no-op");
+
+        assert_eq!(table.hash_size(), 0);
+        assert_eq!(table.array_len(), 0);
+        assert_eq!(table.get(Val::Num(1.0), &strings_arena), Val::Nil);
+    }
+
+    #[test]
+    fn setting_nil_still_clears_existing_key() {
+        let mut strings_arena = Arena::new();
+        let mut str_table = StringTable::new();
+        let key = intern_str(&mut strings_arena, &mut str_table, b"present");
+        let mut table = Table::new();
+
+        table
+            .raw_set(Val::Str(key), Val::Bool(true), &strings_arena)
+            .expect("initial assignment should insert key");
+        assert!(table.hash_size() > 0);
+
+        table
+            .raw_set(Val::Str(key), Val::Nil, &strings_arena)
+            .expect("nil assignment to existing key should clear value");
+
+        assert_eq!(table.get_str(key, &strings_arena), Val::Nil);
+    }
+
+    #[cfg(feature = "rehash-stats")]
+    #[test]
+    fn dense_array_append_does_not_trigger_rehash() {
+        crate::vm::rehash_stats::reset();
+        let strings_arena = Arena::new();
+        let mut table = Table::new();
+
+        table
+            .raw_set(Val::Num(1.0), Val::Bool(true), &strings_arena)
+            .expect("first dense array write should succeed");
+        table
+            .raw_set(Val::Num(2.0), Val::Bool(false), &strings_arena)
+            .expect("second dense array write should succeed");
+
+        let stats = crate::vm::rehash_stats::snapshot();
+        assert_eq!(stats.total, 0);
+        assert_eq!(table.array_len(), 2);
+        assert_eq!(table.hash_size(), 0);
+        assert_eq!(table.get_int(1), Val::Bool(true));
+        assert_eq!(table.get_int(2), Val::Bool(false));
     }
 
     #[test]
