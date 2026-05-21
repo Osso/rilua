@@ -15,6 +15,7 @@ use crate::vm::gc::arena::GcRef;
 use crate::vm::state::{
     DebugInfoField, Gc, HookState, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET,
 };
+use crate::vm::string::LuaString;
 use crate::vm::table::Table;
 use crate::vm::value::Val;
 
@@ -1059,7 +1060,7 @@ fn set_table_str(
     value: &str,
 ) -> LuaResult<()> {
     let k = state.debug_info_field_key(key);
-    let v = state.gc.intern_string(value.as_bytes());
+    let v = intern_debug_info_value(state, value);
     let t = state
         .gc
         .tables
@@ -1068,6 +1069,27 @@ fn set_table_str(
     t.raw_set(Val::Str(k), Val::Str(v), &state.gc.string_arena)?;
     state.gc.barrier_back(table_ref);
     Ok(())
+}
+
+fn intern_debug_info_value(state: &mut LuaState, value: &str) -> GcRef<LuaString> {
+    match value {
+        "" => state.gc.intern_string_static(b""),
+        "Lua" => state.gc.intern_string_static(b"Lua"),
+        "main" => state.gc.intern_string_static(b"main"),
+        "C" => state.gc.intern_string_static(b"C"),
+        "tail" => state.gc.intern_string_static(b"tail"),
+        "global" => state.gc.intern_string_static(b"global"),
+        "local" => state.gc.intern_string_static(b"local"),
+        "field" => state.gc.intern_string_static(b"field"),
+        "method" => state.gc.intern_string_static(b"method"),
+        "=(string)" => state.gc.intern_string_static(b"=(string)"),
+        "(string)" => state.gc.intern_string_static(b"(string)"),
+        "=[C]" => state.gc.intern_string_static(b"=[C]"),
+        "[C]" => state.gc.intern_string_static(b"[C]"),
+        "=(tail call)" => state.gc.intern_string_static(b"=(tail call)"),
+        "(tail call)" => state.gc.intern_string_static(b"(tail call)"),
+        _ => state.gc.intern_string(value.as_bytes()),
+    }
 }
 
 /// Helper: set an integer field in a table.
