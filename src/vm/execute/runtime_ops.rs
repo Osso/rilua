@@ -691,7 +691,7 @@ fn table_has_no_metatable(state: &LuaState, table_ref: GcRef<Table>) -> LuaResul
 /// the metamethod may legitimately redirect writes to a mutable
 /// shadow table.
 #[inline]
-fn ensure_table_not_frozen(state: &LuaState, table_ref: GcRef<Table>) -> LuaResult<()> {
+pub(super) fn ensure_table_not_frozen(state: &LuaState, table_ref: GcRef<Table>) -> LuaResult<()> {
     if state.gc.tables.is_frozen(table_ref) {
         return Err(runtime_error_simple("attempt to modify a frozen table"));
     }

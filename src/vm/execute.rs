@@ -14,8 +14,8 @@ mod runtime_ops;
 use crate::error::{LuaError, LuaResult, RuntimeError};
 
 use self::runtime_ops::{
-    call_bin_tm, call_tm_res, get_tm_for_val, table_set, val_equal, val_less_equal, val_less_than,
-    vm_concat, vm_gettable, vm_settable,
+    call_bin_tm, call_tm_res, ensure_table_not_frozen, get_tm_for_val, val_equal, val_less_equal,
+    val_less_than, vm_concat, vm_gettable, vm_settable,
 };
 pub(crate) use self::runtime_ops::{get_where, l_strcmp};
 use super::callinfo::{CallInfo, LUA_MULTRET};
@@ -2016,15 +2016,34 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         return Err(crate::LuaError::Memory);
                     }
 
-                    for i in 1..=n {
-                        let val = state.stack_get(ra + i);
-                        let key = Val::Num((offset + i) as f64);
-                        table_set(state, table_ref, key, val)?;
-                    }
+                    write_setlist_array_values(state, table_ref, ra, offset, n)?;
                 }
             }
         }
     }
+}
+
+fn write_setlist_array_values(
+    state: &mut LuaState,
+    table_ref: GcRef<Table>,
+    ra: usize,
+    offset: usize,
+    count: usize,
+) -> LuaResult<()> {
+    ensure_table_not_frozen(state, table_ref)?;
+    let stack = &state.stack;
+    let table = state
+        .gc
+        .tables
+        .get_mut(table_ref)
+        .ok_or_else(|| RuntimeError::new("invalid table reference"))?;
+
+    for i in 1..=count {
+        let value = stack.get(ra + i).copied().unwrap_or(Val::Nil);
+        table.set_array_slot(offset + i - 1, value);
+    }
+    state.gc.barrier_back(table_ref);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2459,6 +2478,38 @@ mod tests {
 
         execute(&mut state).ok();
         assert_eq!(state.stack_get(state.base + 1), Val::Num(42.0));
+    }
+
+    #[test]
+    fn op_setlist_populates_array_part() {
+        let mut state = LuaState::new();
+        let code = vec![
+            Instruction::abc(OpCode::NewTable, 0, 3, 0).raw(),
+            Instruction::a_bx(OpCode::LoadK, 1, 0).raw(),
+            Instruction::a_bx(OpCode::LoadK, 2, 1).raw(),
+            Instruction::a_bx(OpCode::LoadK, 3, 2).raw(),
+            Instruction::abc(OpCode::SetList, 0, 3, 1).raw(),
+            Instruction::abc(OpCode::Return, 0, 1, 0).raw(),
+        ];
+        let constants = vec![Val::Num(10.0), Val::Num(20.0), Val::Num(30.0)];
+
+        let proto_rc = ProtoRef::new(make_proto(code, constants));
+        let env = state.global;
+        let cl = LuaClosure::new(proto_rc, env);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+
+        execute(&mut state).ok();
+        let Val::Table(table_ref) = state.stack_get(state.base) else {
+            panic!("R(0) should be a table");
+        };
+        let table = state.gc.tables.get(table_ref).expect("table");
+        assert_eq!(table.get_int(1), Val::Num(10.0));
+        assert_eq!(table.get_int(2), Val::Num(20.0));
+        assert_eq!(table.get_int(3), Val::Num(30.0));
     }
 
     // ----- Globals tests -----

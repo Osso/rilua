@@ -381,6 +381,16 @@ impl Table {
         }
     }
 
+    /// Sets an already allocated array slot by zero-based index.
+    #[inline]
+    pub(crate) fn set_array_slot(&mut self, idx: usize, value: Val) {
+        debug_assert!(
+            idx < self.array.len(),
+            "set_array_slot requires allocated array storage",
+        );
+        self.array[idx] = value;
+    }
+
     /// Returns the number of hash nodes (including free slots).
     ///
     /// Used by GC traversal to iterate hash entries by index without
