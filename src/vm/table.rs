@@ -590,6 +590,7 @@ impl Table {
     /// Called from `new_key` when no free hash slots remain. The extra
     /// key (`ek`) is the key about to be inserted; it is counted in the
     /// histogram so the new table is sized to fit it.
+    #[cfg_attr(feature = "rehash-stats", track_caller)]
     fn rehash(&mut self, ek: &Val, strings: &Arena<LuaString>) -> LuaResult<()> {
         let mut nums = [0u32; MAXBITS as usize + 1];
 
@@ -619,6 +620,7 @@ impl Table {
                 1u32 << ceil_log2(nh_size as usize)
             };
             super::rehash_stats::record(old_hash_size, new_hash_size, self.backing().is_some());
+            super::rehash_stats::record_callsite(std::panic::Location::caller());
         }
         self.resize(na_size as usize, nh_size as usize, strings)
     }
@@ -1090,6 +1092,7 @@ impl Table {
     ///
     /// Invalidates the metamethod flags cache if the key is a string
     /// starting with `__`.
+    #[cfg_attr(feature = "rehash-stats", track_caller)]
     pub fn raw_set(&mut self, key: Val, value: Val, strings: &Arena<LuaString>) -> LuaResult<()> {
         // Invalidate metamethod cache for `__` keys.
         if let Val::Str(r) = key
@@ -1104,6 +1107,7 @@ impl Table {
     /// Inner implementation of `raw_set`. The `allow_rehash` flag
     /// prevents infinite recursion: the first call allows rehash, the
     /// retry after rehash does not.
+    #[cfg_attr(feature = "rehash-stats", track_caller)]
     fn raw_set_impl(
         &mut self,
         key: Val,
@@ -1860,19 +1864,22 @@ mod tests {
         crate::vm::rehash_stats::reset();
         let mut str_arena = Arena::new();
         let mut str_tbl = StringTable::new();
-        let key_a = intern_str(&mut str_arena, &mut str_tbl, b"a");
-        let key_b = intern_str(&mut str_arena, &mut str_tbl, b"b");
+        let keys = [
+            intern_str(&mut str_arena, &mut str_tbl, b"a"),
+            intern_str(&mut str_arena, &mut str_tbl, b"b"),
+        ];
         let mut table = Table::new();
 
-        table
-            .raw_set(Val::Str(key_a), Val::Num(1.0), &str_arena)
-            .expect("first hash key should insert");
-        table
-            .raw_set(Val::Str(key_b), Val::Num(2.0), &str_arena)
-            .expect("second hash key should insert");
+        for (index, key) in keys.iter().copied().enumerate() {
+            table
+                .raw_set(Val::Str(key), Val::Num((index + 1) as f64), &str_arena)
+                .expect("initial hash keys should insert");
+        }
 
-        assert_eq!(table.get_str(key_a, &str_arena), Val::Num(1.0));
-        assert_eq!(table.get_str(key_b, &str_arena), Val::Num(2.0));
+        for (index, key) in keys.iter().copied().enumerate() {
+            assert_eq!(table.get_str(key, &str_arena), Val::Num((index + 1) as f64));
+        }
+        assert_eq!(table.hash_size(), 2);
         #[cfg(feature = "rehash-stats")]
         assert_eq!(crate::vm::rehash_stats::snapshot().total, 0);
     }

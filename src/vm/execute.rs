@@ -1197,7 +1197,20 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let key = rk(&state.stack, base, &proto.constants, instr.b());
                     let val = rk(&state.stack, base, &proto.constants, instr.c());
                     state.call_stack[state.ci].saved_pc = pc;
+                    #[cfg(feature = "rehash-stats")]
+                    let rehash_count_before = crate::vm::rehash_stats::total_count();
                     vm_settable(state, table_val, key, val, &proto, pc, base, Some(a))?;
+                    #[cfg(feature = "rehash-stats")]
+                    {
+                        let rehash_count_after = crate::vm::rehash_stats::total_count();
+                        let current_pc = pc.saturating_sub(1);
+                        let line = proto.line_info.get(current_pc).copied().unwrap_or(0);
+                        crate::vm::rehash_stats::record_lua_site(
+                            &proto.source,
+                            line,
+                            rehash_count_after.saturating_sub(rehash_count_before),
+                        );
+                    }
                 }
 
                 OpCode::NewTable => {
