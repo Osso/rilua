@@ -91,6 +91,18 @@ impl<'a> LoadState<'a> {
         Ok(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    /// Reads `n` little-endian u32 values from one contiguous block.
+    fn load_u32_vec(&mut self, n: usize) -> LuaResult<Vec<u32>> {
+        let byte_len = n
+            .checked_mul(4)
+            .ok_or_else(|| self.error("size overflow"))?;
+        let bytes = self.load_block(byte_len)?;
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect())
+    }
+
     /// Reads an 8-byte little-endian size_t (u64).
     fn load_size(&mut self) -> LuaResult<u64> {
         let bytes = self.load_block(8)?;
@@ -145,13 +157,7 @@ impl<'a> LoadState<'a> {
     /// Loads the code section (instruction array).
     fn load_code(&mut self, proto: &mut Proto) -> LuaResult<()> {
         let n = self.load_int()? as usize;
-        proto.code.reserve(n);
-        for _ in 0..n {
-            let bytes = self.load_block(4)?;
-            proto
-                .code
-                .push(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-        }
+        proto.code = self.load_u32_vec(n)?;
         Ok(())
     }
 
@@ -205,10 +211,7 @@ impl<'a> LoadState<'a> {
     fn load_debug(&mut self, proto: &mut Proto) -> LuaResult<()> {
         // Line info.
         let n = self.load_int()? as usize;
-        proto.line_info.reserve(n);
-        for _ in 0..n {
-            proto.line_info.push(self.load_int()? as u32);
-        }
+        proto.line_info = self.load_u32_vec(n)?;
 
         // Local variables.
         let n = self.load_int()? as usize;
