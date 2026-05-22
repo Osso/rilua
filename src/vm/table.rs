@@ -1104,6 +1104,21 @@ impl Table {
     /// starting with `__`.
     #[cfg_attr(feature = "rehash-stats", track_caller)]
     pub fn raw_set(&mut self, key: Val, value: Val, strings: &Arena<LuaString>) -> LuaResult<()> {
+        self.raw_set_with_memory_delta(key, value, strings)
+            .map(|_| ())
+    }
+
+    /// Set a raw key-value pair and return the estimated table-memory growth.
+    ///
+    /// VM opcode paths use this to update GC accounting without estimating
+    /// memory before and after every no-growth assignment.
+    #[cfg_attr(feature = "rehash-stats", track_caller)]
+    pub fn raw_set_with_memory_delta(
+        &mut self,
+        key: Val,
+        value: Val,
+        strings: &Arena<LuaString>,
+    ) -> LuaResult<usize> {
         // Invalidate metamethod cache for `__` keys.
         if let Val::Str(r) = key
             && let Some(s) = strings.get(r)
@@ -1124,7 +1139,7 @@ impl Table {
         value: Val,
         strings: &Arena<LuaString>,
         allow_rehash: bool,
-    ) -> LuaResult<()> {
+    ) -> LuaResult<usize> {
         // Validate key.
         match key {
             Val::Nil => return Err(runtime_error("table index is nil")),
@@ -1139,25 +1154,25 @@ impl Table {
             let idx = (k as u64).wrapping_sub(1);
             if idx < self.array.len() as u64 {
                 self.array[idx as usize] = value;
-                return Ok(());
+                return Ok(0);
             }
         }
 
         if self.update_existing_hash_slot(key, value, strings) {
-            return Ok(());
+            return Ok(0);
         }
 
         if value.is_nil() {
-            return Ok(());
+            return Ok(0);
         }
 
         if self.dense_array_append_index(&key).is_some() {
             self.array.push(value);
-            return Ok(());
+            return Ok(16);
         }
 
         if self.insert_first_hash_node(key, value, strings) {
-            return Ok(());
+            return Ok(64);
         }
 
         // Insert new key via Brent's algorithm.
@@ -1167,13 +1182,15 @@ impl Table {
         match self.new_key(key, strings) {
             Ok(node_idx) => {
                 self.nodes[node_idx as usize].value = value;
-                Ok(())
+                Ok(0)
             }
             Err(_) if allow_rehash => {
                 // Hash is empty or full. Rehash and retry through the
                 // full raw_set path (key may land in array after rehash).
+                let mem_before = self.estimated_memory();
                 self.rehash(&key, strings)?;
-                self.raw_set_impl(key, value, strings, false)
+                self.raw_set_impl(key, value, strings, false)?;
+                Ok(self.estimated_memory().saturating_sub(mem_before))
             }
             Err(e) => Err(e),
         }
@@ -1544,6 +1561,29 @@ mod tests {
 
         assert_eq!(t.get_str(key_a, &strings_arena), Val::Num(1.0));
         assert_eq!(t.get_str(key_b, &strings_arena), Val::Num(2.0));
+    }
+
+    #[test]
+    fn raw_set_reports_memory_delta_only_for_growth() {
+        let mut strings_arena = Arena::new();
+        let mut str_table = StringTable::new();
+        let key = intern_str(&mut strings_arena, &mut str_table, b"tracked");
+        let mut table = Table::new();
+
+        let first_delta = table
+            .raw_set_with_memory_delta(Val::Str(key), Val::Num(1.0), &strings_arena)
+            .expect("first hash write should allocate hash storage");
+        assert_eq!(first_delta, table.estimated_memory());
+
+        let update_delta = table
+            .raw_set_with_memory_delta(Val::Str(key), Val::Num(2.0), &strings_arena)
+            .expect("existing hash write should not allocate");
+        assert_eq!(update_delta, 0);
+
+        let array_delta = table
+            .raw_set_with_memory_delta(Val::Num(1.0), Val::Bool(true), &strings_arena)
+            .expect("dense array append should grow array storage");
+        assert_eq!(array_delta, 16);
     }
 
     #[test]

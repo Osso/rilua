@@ -357,11 +357,9 @@ pub(super) fn table_set(
         .tables
         .get_mut(table_ref)
         .ok_or_else(|| runtime_error_simple("invalid table reference"))?;
-    let mem_before = table.estimated_memory();
-    table.raw_set(key, value, &state.gc.string_arena)?;
-    let mem_after = table.estimated_memory();
-    if mem_after > mem_before {
-        state.gc.gc_state.total_bytes += mem_after - mem_before;
+    let memory_delta = table.raw_set_with_memory_delta(key, value, &state.gc.string_arena)?;
+    if memory_delta > 0 {
+        state.gc.gc_state.total_bytes += memory_delta;
     }
     if state.gc.gc_state.total_bytes > state.gc.gc_state.alloc_limit {
         return Err(crate::LuaError::Memory);
