@@ -469,7 +469,7 @@ impl Gc {
     /// [`Flag::Pinned`] on each child); for `Frozen` the freeze walk
     /// already transitively pinned every reachable descendant.
     fn traverse_table(&mut self, r: GcRef<Table>) {
-        if self.tables.is_skip_traverse(r) || self.tables.is_frozen(r) {
+        if self.tables.is_skip_traverse_or_frozen(r) {
             self.tables.set_color(r, Color::Black);
             return;
         }

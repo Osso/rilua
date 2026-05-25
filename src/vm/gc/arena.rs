@@ -378,6 +378,11 @@ impl<T> Arena<T> {
     /// `false` for stale refs, free slots, or entries without the flag.
     #[inline]
     pub fn has_flag(&self, r: GcRef<T>, f: Flag) -> bool {
+        self.has_any_flag_mask(r, flag_mask(f))
+    }
+
+    #[inline]
+    fn has_any_flag_mask(&self, r: GcRef<T>, mask: u8) -> bool {
         let Some(entry) = self.entries.get(r.index as usize) else {
             return false;
         };
@@ -387,7 +392,7 @@ impl<T> Arena<T> {
         if self.colors[r.index as usize] == COLOR_FREE {
             return false;
         }
-        self.flags[r.index as usize] & flag_mask(f) != 0
+        self.flags[r.index as usize] & mask != 0
     }
 
     /// Sets the given flag on the entry. Returns `true` on success,
@@ -442,6 +447,13 @@ impl<T> Arena<T> {
     #[inline]
     pub fn is_skip_traverse(&self, r: GcRef<T>) -> bool {
         self.has_flag(r, Flag::SkipTraverse)
+    }
+
+    /// Convenience: returns `true` if the mark phase should avoid traversing
+    /// this object's children because it is either skip-traverse or frozen.
+    #[inline]
+    pub fn is_skip_traverse_or_frozen(&self, r: GcRef<T>) -> bool {
+        self.has_any_flag_mask(r, flag_mask(Flag::SkipTraverse) | flag_mask(Flag::Frozen))
     }
 
     /// Iterates over all occupied entries.
@@ -898,10 +910,12 @@ mod tests {
         assert!(arena.is_pinned(r));
         assert!(!arena.is_skip_traverse(r));
         assert!(!arena.is_frozen(r));
+        assert!(!arena.is_skip_traverse_or_frozen(r));
 
         assert!(arena.set_flag(r, Flag::SkipTraverse));
         assert!(arena.is_pinned(r));
         assert!(arena.is_skip_traverse(r));
+        assert!(arena.is_skip_traverse_or_frozen(r));
 
         // Clearing one does not disturb the other.
         assert!(arena.clear_flag(r, Flag::Pinned));
@@ -917,6 +931,7 @@ mod tests {
         assert!(arena.set_flag(r, Flag::Pinned));
         assert!(arena.is_frozen(r));
         assert!(arena.is_pinned(r));
+        assert!(arena.is_skip_traverse_or_frozen(r));
     }
 
     #[test]
