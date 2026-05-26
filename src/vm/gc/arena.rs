@@ -358,19 +358,44 @@ impl<T> Arena<T> {
         byte_to_color(self.colors[r.index as usize])
     }
 
+    #[inline]
+    fn occupied_index(&self, r: GcRef<T>) -> Option<usize> {
+        let index = r.index as usize;
+        let entry = self.entries.get(index)?;
+        if entry.generation != r.generation || self.colors[index] == COLOR_FREE {
+            return None;
+        }
+        Some(index)
+    }
+
     /// Sets the GC color of the object. Returns `true` if successful.
     #[inline]
     pub fn set_color(&mut self, r: GcRef<T>, new_color: Color) -> bool {
-        let Some(entry) = self.entries.get(r.index as usize) else {
+        let Some(index) = self.occupied_index(r) else {
             return false;
         };
-        if entry.generation != r.generation {
+        self.colors[index] = color_to_byte(new_color);
+        true
+    }
+
+    /// Marks a white, non-frozen entry with `new_color`.
+    ///
+    /// Returns `true` when the entry changed color. Stale refs, free slots,
+    /// frozen entries, and non-white entries are left unchanged.
+    #[inline]
+    pub fn mark_white_unfrozen(&mut self, r: GcRef<T>, new_color: Color) -> bool {
+        let Some(index) = self.occupied_index(r) else {
+            return false;
+        };
+        let color = self.colors[index];
+        if self.flags[index] & flag_mask(Flag::Frozen) != 0 {
             return false;
         }
-        if self.colors[r.index as usize] == COLOR_FREE {
+        if !matches!(byte_to_color(color), Some(color) if color.is_white()) {
             return false;
         }
-        self.colors[r.index as usize] = color_to_byte(new_color);
+
+        self.colors[index] = color_to_byte(new_color);
         true
     }
 
@@ -383,32 +408,20 @@ impl<T> Arena<T> {
 
     #[inline]
     fn has_any_flag_mask(&self, r: GcRef<T>, mask: u8) -> bool {
-        let Some(entry) = self.entries.get(r.index as usize) else {
+        let Some(index) = self.occupied_index(r) else {
             return false;
         };
-        if entry.generation != r.generation {
-            return false;
-        }
-        if self.colors[r.index as usize] == COLOR_FREE {
-            return false;
-        }
-        self.flags[r.index as usize] & mask != 0
+        self.flags[index] & mask != 0
     }
 
     /// Sets the given flag on the entry. Returns `true` on success,
     /// `false` for stale refs or free slots.
     #[inline]
     pub fn set_flag(&mut self, r: GcRef<T>, f: Flag) -> bool {
-        let Some(entry) = self.entries.get(r.index as usize) else {
+        let Some(index) = self.occupied_index(r) else {
             return false;
         };
-        if entry.generation != r.generation {
-            return false;
-        }
-        if self.colors[r.index as usize] == COLOR_FREE {
-            return false;
-        }
-        self.flags[r.index as usize] |= flag_mask(f);
+        self.flags[index] |= flag_mask(f);
         true
     }
 
@@ -416,16 +429,10 @@ impl<T> Arena<T> {
     /// `false` for stale refs or free slots.
     #[inline]
     pub fn clear_flag(&mut self, r: GcRef<T>, f: Flag) -> bool {
-        let Some(entry) = self.entries.get(r.index as usize) else {
+        let Some(index) = self.occupied_index(r) else {
             return false;
         };
-        if entry.generation != r.generation {
-            return false;
-        }
-        if self.colors[r.index as usize] == COLOR_FREE {
-            return false;
-        }
-        self.flags[r.index as usize] &= !flag_mask(f);
+        self.flags[index] &= !flag_mask(f);
         true
     }
 
@@ -846,6 +853,24 @@ mod tests {
         assert_eq!(arena.color(r1), Some(Color::White1));
         assert_eq!(arena.color(r2), Some(Color::White1));
         assert_eq!(arena.color(r3), Some(Color::White1));
+    }
+
+    #[test]
+    fn mark_white_unfrozen_marks_only_white_unfrozen_entries() {
+        let mut arena: Arena<i32> = Arena::new();
+        let white = arena.alloc(1, Color::White0);
+        let black = arena.alloc(2, Color::Black);
+        let frozen = arena.alloc(3, Color::White0);
+
+        assert!(arena.set_flag(frozen, Flag::Frozen));
+
+        assert!(arena.mark_white_unfrozen(white, Color::Gray));
+        assert!(!arena.mark_white_unfrozen(black, Color::Gray));
+        assert!(!arena.mark_white_unfrozen(frozen, Color::Gray));
+
+        assert_eq!(arena.color(white), Some(Color::Gray));
+        assert_eq!(arena.color(black), Some(Color::Black));
+        assert_eq!(arena.color(frozen), Some(Color::White0));
     }
 
     #[test]

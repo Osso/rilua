@@ -330,26 +330,13 @@ impl Gc {
     /// Marks a string (directly to black -- strings have no children).
     #[inline]
     fn mark_string(&mut self, r: GcRef<LuaString>) {
-        if self.string_arena.is_frozen(r) {
-            return;
-        }
-        if let Some(color) = self.string_arena.color(r)
-            && color.is_white()
-        {
-            self.string_arena.set_color(r, Color::Black);
-        }
+        self.string_arena.mark_white_unfrozen(r, Color::Black);
     }
 
     /// Marks a table: white -> gray, added to gray list for traversal.
     #[inline]
     fn mark_table(&mut self, r: GcRef<Table>) {
-        if self.tables.is_frozen(r) {
-            return;
-        }
-        if let Some(color) = self.tables.color(r)
-            && color.is_white()
-        {
-            self.tables.set_color(r, Color::Gray);
+        if self.tables.mark_white_unfrozen(r, Color::Gray) {
             self.gc_state.gray.push(GrayItem::Table(r));
         }
     }
@@ -357,13 +344,7 @@ impl Gc {
     /// Marks a closure: white -> gray, added to gray list.
     #[inline]
     fn mark_closure(&mut self, r: GcRef<Closure>) {
-        if self.closures.is_frozen(r) {
-            return;
-        }
-        if let Some(color) = self.closures.color(r)
-            && color.is_white()
-        {
-            self.closures.set_color(r, Color::Gray);
+        if self.closures.mark_white_unfrozen(r, Color::Gray) {
             self.gc_state.gray.push(GrayItem::Closure(r));
         }
     }
@@ -371,65 +352,49 @@ impl Gc {
     /// Marks a thread: white -> gray, added to gray list.
     #[inline]
     fn mark_thread(&mut self, r: GcRef<LuaThread>) {
-        if self.threads.is_frozen(r) {
-            return;
-        }
-        if let Some(color) = self.threads.color(r)
-            && color.is_white()
-        {
-            self.threads.set_color(r, Color::Gray);
+        if self.threads.mark_white_unfrozen(r, Color::Gray) {
             self.gc_state.gray.push(GrayItem::Thread(r));
         }
     }
 
     /// Marks a userdata: marks metatable and env, then goes black.
     fn mark_userdata(&mut self, r: GcRef<Userdata>) {
-        if self.userdata.is_frozen(r) {
+        if !self.userdata.mark_white_unfrozen(r, Color::Black) {
             return;
         }
-        if let Some(color) = self.userdata.color(r)
-            && color.is_white()
-        {
-            let (mt, env) = {
-                if let Some(ud) = self.userdata.get(r) {
-                    (ud.metatable(), ud.env())
-                } else {
-                    return;
-                }
-            };
-            self.userdata.set_color(r, Color::Black);
-            if let Some(mt) = mt {
-                self.mark_table(mt);
+        let (mt, env) = {
+            if let Some(ud) = self.userdata.get(r) {
+                (ud.metatable(), ud.env())
+            } else {
+                return;
             }
-            if let Some(env) = env {
-                self.mark_table(env);
-            }
+        };
+        if let Some(mt) = mt {
+            self.mark_table(mt);
+        }
+        if let Some(env) = env {
+            self.mark_table(env);
         }
     }
 
     /// Marks an upvalue: if closed, marks the stored value.
     #[inline]
     fn mark_upvalue(&mut self, r: GcRef<Upvalue>) {
-        if self.upvalues.is_frozen(r) {
+        if !self.upvalues.mark_white_unfrozen(r, Color::Black) {
             return;
         }
-        if let Some(color) = self.upvalues.color(r)
-            && color.is_white()
-        {
-            let closed_val = {
-                if let Some(uv) = self.upvalues.get(r) {
-                    match &uv.state {
-                        UpvalueState::Closed { value } => Some(*value),
-                        UpvalueState::Open { .. } => None,
-                    }
-                } else {
-                    return;
+        let closed_val = {
+            if let Some(uv) = self.upvalues.get(r) {
+                match &uv.state {
+                    UpvalueState::Closed { value } => Some(*value),
+                    UpvalueState::Open { .. } => None,
                 }
-            };
-            self.upvalues.set_color(r, Color::Black);
-            if let Some(val) = closed_val {
-                self.mark_value(val);
+            } else {
+                return;
             }
+        };
+        if let Some(val) = closed_val {
+            self.mark_value(val);
         }
     }
 
