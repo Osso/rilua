@@ -301,7 +301,10 @@ impl StringTable {
         if needed <= self.buckets.len() {
             return;
         }
-        let new_size = needed.next_power_of_two().max(MIN_STR_TAB_SIZE);
+        let new_size = needed
+            .next_power_of_two()
+            .saturating_mul(2)
+            .max(MIN_STR_TAB_SIZE);
         self.rehash(new_size, arena);
     }
 
@@ -692,6 +695,21 @@ mod tests {
         }
         // Count should not have increased (all were found).
         assert_eq!(table.count(), initial_buckets + 1);
+    }
+
+    #[test]
+    fn reserve_leaves_growth_slack() {
+        let arena = Arena::new();
+        let mut table = StringTable::new();
+        let initial_buckets = table.bucket_count();
+
+        table.reserve(initial_buckets + 1, &arena);
+
+        assert_eq!(
+            table.bucket_count(),
+            initial_buckets * 4,
+            "reserve should avoid immediately rehashing again after a near-capacity hint"
+        );
     }
 
     #[test]
