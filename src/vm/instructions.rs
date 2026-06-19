@@ -65,12 +65,11 @@ pub const NO_JUMP: i32 = -1;
 /// Number of array elements flushed per SETLIST batch.
 pub const LFIELDS_PER_FLUSH: u32 = 50;
 
-/// Maximum number of local variables per function.
+/// Maximum number of debug local-variable entries per function.
 ///
-/// WoW's Lua accepts generated addon functions with more than stock Lua 5.1's
-/// 200 active-local limit. Keep this below `MAXSTACK` so register indexes stay
-/// encodable.
-pub const LUAI_MAXVARS: u32 = 240;
+/// WoW addon files can contain more local declarations than the peak active
+/// register pressure. `MAXSTACK` remains the runtime/register limit.
+pub const LUAI_MAXVARS: u32 = 512;
 
 /// Maximum number of upvalues per function.
 pub const LUAI_MAXUPVALUES: u32 = 60;
@@ -875,7 +874,7 @@ mod tests {
         assert_eq!(NO_REG, 255);
         assert_eq!(NO_JUMP, -1);
         assert_eq!(LFIELDS_PER_FLUSH, 50);
-        assert_eq!(LUAI_MAXVARS, 240);
+        assert_eq!(LUAI_MAXVARS, 512);
         assert_eq!(LUAI_MAXUPVALUES, 60);
         assert_eq!(MAXSTACK, 250);
         assert_eq!(NUM_OPCODES, 40);

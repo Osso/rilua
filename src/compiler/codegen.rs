@@ -3523,6 +3523,36 @@ mod tests {
         assert_eq!(proto.protos.len(), 1);
     }
 
+    #[test]
+    fn compile_more_debug_locals_than_stock_limit_when_stack_stays_below_maxstack() {
+        let mut source = String::new();
+        for index in 1..=260 {
+            source.push_str(&format!("do local v{index} = {index} end\n"));
+        }
+
+        let proto = compile(source.as_bytes(), "test").unwrap();
+
+        assert!(proto.local_vars.len() > 240);
+        assert!(u32::from(proto.max_stack_size) < MAXSTACK);
+    }
+
+    #[test]
+    fn compile_rejects_active_locals_above_maxstack() {
+        let mut source = String::new();
+        for index in 1..=251 {
+            source.push_str(&format!("local v{index} = {index}\n"));
+        }
+
+        let error = compile(source.as_bytes(), "test").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("function or expression too complex"),
+            "{error}"
+        );
+    }
+
     // -- int2fb --
 
     #[test]

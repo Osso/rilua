@@ -128,9 +128,11 @@ impl<'a> Parser<'a> {
 
     // -- Function scope tracking (PUC-Rio: FuncState.nactvar) --
 
-    /// Registers `count` new local variables in the current function scope.
-    /// Returns an error if the total exceeds `LUAI_MAXVARS` (200).
-    /// Matches PUC-Rio's `new_localvar` limit check.
+    /// Registers `count` new local-variable debug entries in the current
+    /// function scope.
+    ///
+    /// This is a total declaration/debug-entry cap. Runtime register pressure is
+    /// checked separately by codegen against `MAXSTACK`.
     fn register_locals(&mut self, count: u32) -> LuaResult<()> {
         if let Some(scope) = self.func_scopes.last_mut() {
             if scope.local_count + count > LUAI_MAXVARS {
