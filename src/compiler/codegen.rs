@@ -14,8 +14,8 @@ use super::lexer::Lexer;
 use super::parser;
 
 use crate::vm::instructions::{
-    BITRK, Instruction, LFIELDS_PER_FLUSH, LUAI_MAXUPVALUES, LUAI_MAXVARS, MAXARG_BX, MAXARG_C,
-    MAXINDEXRK, MAXSTACK, NO_JUMP, NO_REG, OpCode, is_k,
+    BITRK, Instruction, LFIELDS_PER_FLUSH, LUAI_MAXACTIVEVARS, LUAI_MAXUPVALUES, MAXARG_BX,
+    MAXARG_C, MAXINDEXRK, MAXSTACK, NO_JUMP, NO_REG, OpCode, is_k,
 };
 use crate::vm::proto::{
     LocalVar, Proto, ProtoRef, StringPoolEntry, VARARG_HASARG, VARARG_ISVARARG, VARARG_NEEDSARG,
@@ -853,10 +853,12 @@ impl Compiler {
     /// `active_vars`). The variable is not yet activated (visible) until
     /// `activate_locals` is called.
     pub(crate) fn new_local(&mut self, name: &str) -> LuaResult<u16> {
-        let fs = self.fs_mut();
-        if fs.active_vars.len() >= LUAI_MAXVARS as usize {
-            return Err(self.syntax_error("too many local variables"));
+        let line_defined = self.fs().proto.line_defined;
+        if self.fs().active_vars.len() >= LUAI_MAXACTIVEVARS as usize {
+            let message = Self::local_variable_limit_message(line_defined);
+            return Err(self.syntax_error(&message));
         }
+        let fs = self.fs_mut();
         let idx = fs.proto.local_vars.len();
         fs.proto.local_vars.push(LocalVar {
             name: name.to_string(),
@@ -867,6 +869,16 @@ impl Compiler {
         let idx16 = idx as u16;
         fs.active_vars.push(idx16);
         Ok(idx16)
+    }
+
+    fn local_variable_limit_message(line_defined: u32) -> String {
+        if line_defined == 0 {
+            format!("main function has more than {LUAI_MAXACTIVEVARS} local variables")
+        } else {
+            format!(
+                "function at line {line_defined} has more than {LUAI_MAXACTIVEVARS} local variables"
+            )
+        }
     }
 
     /// Activates `n` local variables (makes them visible).
@@ -3512,12 +3524,12 @@ mod tests {
     }
 
     #[test]
-    fn compile_wow_generated_function_with_more_than_200_locals() {
+    fn compile_wow_generated_function_with_more_than_200_debug_locals() {
         let mut source = String::from("local function generated()\n");
         for index in 1..=210 {
-            source.push_str(&format!("local v{index} = {index}\n"));
+            source.push_str(&format!("do local v{index} = {index} end\n"));
         }
-        source.push_str("return v210\nend\nreturn generated()\n");
+        source.push_str("return true\nend\nreturn generated()\n");
 
         let proto = compile(source.as_bytes(), "test").unwrap();
         assert_eq!(proto.protos.len(), 1);
@@ -3537,9 +3549,9 @@ mod tests {
     }
 
     #[test]
-    fn compile_rejects_active_locals_above_maxstack() {
+    fn compile_rejects_active_locals_above_wow_limit() {
         let mut source = String::new();
-        for index in 1..=251 {
+        for index in 1..=201 {
             source.push_str(&format!("local v{index} = {index}\n"));
         }
 
@@ -3548,7 +3560,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("function or expression too complex"),
+                .contains("main function has more than 200 local variables"),
             "{error}"
         );
     }

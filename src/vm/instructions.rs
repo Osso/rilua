@@ -50,6 +50,13 @@ pub const MAXARG_C: u32 = MASK_C;
 /// Maximum stack size per function.
 pub const MAXSTACK: u32 = 250;
 
+/// Maximum number of simultaneously active named locals per function.
+///
+/// WoW rejects the 201st local in a single active scope, while still allowing a
+/// function/chunk to contain more total local debug entries across disjoint
+/// scopes. Temporary registers can also lift `maxstacksize` above this value.
+pub const LUAI_MAXACTIVEVARS: u32 = 200;
+
 /// Bit flag marking a constant index in RK fields.
 pub const BITRK: u32 = 1 << (SIZE_B - 1); // 256
 
@@ -68,7 +75,8 @@ pub const LFIELDS_PER_FLUSH: u32 = 50;
 /// Maximum number of debug local-variable entries per function.
 ///
 /// WoW addon files can contain more local declarations than the peak active
-/// register pressure. `MAXSTACK` remains the runtime/register limit.
+/// named-local pressure. `LUAI_MAXACTIVEVARS` remains the active local limit
+/// and `MAXSTACK` remains the runtime/register limit.
 pub const LUAI_MAXVARS: u32 = 512;
 
 /// Maximum number of upvalues per function.
@@ -874,6 +882,7 @@ mod tests {
         assert_eq!(NO_REG, 255);
         assert_eq!(NO_JUMP, -1);
         assert_eq!(LFIELDS_PER_FLUSH, 50);
+        assert_eq!(LUAI_MAXACTIVEVARS, 200);
         assert_eq!(LUAI_MAXVARS, 512);
         assert_eq!(LUAI_MAXUPVALUES, 60);
         assert_eq!(MAXSTACK, 250);
