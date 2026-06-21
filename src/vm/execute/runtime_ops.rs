@@ -407,6 +407,39 @@ pub(crate) fn propagate_slot_taint(state: &mut LuaState, table_ref: GcRef<Table>
     }
 }
 
+/// Propagate a table slot's taint to the current call frame on read.
+///
+/// WoW taint is not just write metadata: secure code that reads an insecure
+/// global becomes insecure along that execution path. This is the read-side
+/// counterpart to `propagate_slot_taint`.
+pub(crate) fn propagate_slot_read_taint(state: &mut LuaState, table_ref: GcRef<Table>, key: Val) {
+    if !state.taint_mode || state.call_stack[state.ci].taint.is_some() {
+        return;
+    }
+
+    let resolved = match key {
+        Val::Str(r) => state
+            .gc
+            .string_arena
+            .get(r)
+            .map_or(ResolvedKey::Other, |s| ResolvedKey::Str(s.data().to_vec())),
+        Val::Num(n) if n.is_finite() => resolve_numeric_taint_key(n),
+        _ => ResolvedKey::Other,
+    };
+
+    let Some(table) = state.gc.tables.get(table_ref) else {
+        return;
+    };
+    let taint = match resolved {
+        ResolvedKey::Str(bytes) => table.get_slot_taint_str(&bytes),
+        ResolvedKey::Int(k) => table.get_slot_taint_int(k),
+        ResolvedKey::Other => None,
+    };
+    if let Some(taint) = taint {
+        state.call_stack[state.ci].taint = Some(taint.to_string());
+    }
+}
+
 enum ResolvedKey {
     Str(Vec<u8>),
     Int(i64),
@@ -535,6 +568,7 @@ fn handle_table_gettable(
     let result = gettable_fast_result(table, resolved_key, &state.gc.string_arena);
 
     if !result.is_nil() {
+        propagate_slot_read_taint(state, table_ref, key);
         state.stack_set(result_reg, result);
         return Ok(GettableStep::Done);
     }

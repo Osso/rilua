@@ -357,6 +357,7 @@ mod tests {
     use super::*;
 
     use crate::stdlib::{StdLib, open_libs_selective};
+    use crate::{Lua, LuaApiMut};
 
     fn new_state_with_taint_api() -> LuaState {
         let mut state = LuaState::new();
@@ -544,6 +545,43 @@ mod tests {
             1
         );
         assert_eq!(state.stack_get(result_start), Val::Bool(true));
+    }
+
+    #[test]
+    fn reading_tainted_global_taints_lua_execution_path() {
+        let mut lua = Lua::new().expect("failed to create Lua state");
+        lua.state_mut().taint_mode = true;
+
+        lua.exec(
+            r#"
+            debug.setstacktaint("AddonA")
+            TaintedHelper = function()
+                _calleeSecure = issecure()
+                _calleeTaint = debug.getstacktaint()
+            end
+            _slotSecure, _slotOwner = issecurevariable(_G, "TaintedHelper")
+
+            debug.setstacktaint(nil)
+            _beforeSecure = issecure()
+            TaintedHelper()
+            _afterSecure = issecure()
+            "#,
+        )
+        .expect("taint propagation script should execute");
+
+        let slot_secure: bool = lua.global("_slotSecure").expect("slot secure flag");
+        let slot_owner: String = lua.global("_slotOwner").expect("slot owner");
+        let before_secure: bool = lua.global("_beforeSecure").expect("before secure flag");
+        let callee_secure: bool = lua.global("_calleeSecure").expect("callee secure flag");
+        let callee_taint: String = lua.global("_calleeTaint").expect("callee taint");
+        let after_secure: bool = lua.global("_afterSecure").expect("after secure flag");
+
+        assert!(!slot_secure);
+        assert_eq!(slot_owner, "AddonA");
+        assert!(before_secure);
+        assert!(!callee_secure);
+        assert_eq!(callee_taint, "AddonA");
+        assert!(!after_secure);
     }
 
     #[test]

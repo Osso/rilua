@@ -14,8 +14,8 @@ mod runtime_ops;
 use crate::error::{LuaError, LuaResult, RuntimeError};
 
 use self::runtime_ops::{
-    call_bin_tm, call_tm_res, ensure_table_not_frozen, get_tm_for_val, val_equal, val_less_equal,
-    val_less_than, vm_concat, vm_gettable, vm_settable,
+    call_bin_tm, call_tm_res, ensure_table_not_frozen, get_tm_for_val, propagate_slot_read_taint,
+    val_equal, val_less_equal, val_less_than, vm_concat, vm_gettable, vm_settable,
 };
 pub(crate) use self::runtime_ops::{get_where, l_strcmp};
 use super::callinfo::{CallInfo, LUA_MULTRET};
@@ -197,6 +197,9 @@ fn try_plain_table_get_ref(
     };
     if result.is_nil() && table.metatable().is_some() {
         return false;
+    }
+    if !result.is_nil() {
+        propagate_slot_read_taint(state, table_ref, key);
     }
     state.stack_set(result_reg, result);
     true
@@ -1163,6 +1166,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         let live_val =
                             live_table.get_str(runtime.name_keys[slot_idx], &state.gc.string_arena);
                         if live_val != Val::Nil {
+                            propagate_slot_read_taint(state, live_ref, key);
                             state.stack_set(ra, live_val);
                             continue;
                         }
