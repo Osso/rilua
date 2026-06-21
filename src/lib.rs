@@ -835,6 +835,16 @@ mod tests {
     }
 
     #[test]
+    fn global_nil_call_error_matches_retail() {
+        let mut lua = Lua::new().expect("failed to create Lua state");
+        let err = lua
+            .exec("MissingGlobal()")
+            .expect_err("calling a missing global should fail");
+
+        assert_eq!(err.to_string(), "(string):1: attempt to call a nil value");
+    }
+
+    #[test]
     fn lua_call_function_recovers_after_rust_callback_error() {
         let mut lua = Lua::new().ok().unwrap_or_else(Lua::new_empty);
         lua.register_function("fail_from_rust", |_| {
