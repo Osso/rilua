@@ -343,13 +343,140 @@ fn hooksecurefunc(state: &mut LuaState) -> LuaResult<u32> {
 }
 
 // ---------------------------------------------------------------------------
-// secureexecuterange(func, start, end, ...)
+// secureexecuterange(table, callback, ...)
 // ---------------------------------------------------------------------------
 
 fn secureexecuterange(state: &mut LuaState) -> LuaResult<u32> {
     ensure_runtime_tables(state)?;
-    // TODO: loop start..=end calling func with clean taint per index
+    let table = state.stack_get(state.base);
+    let callback = state.stack_get(state.base + 1);
+    let (Val::Table(table_ref), Val::Function(_)) = (table, callback) else {
+        return Ok(0);
+    };
+
+    let extra_args = (state.base + 2..state.top)
+        .map(|idx| state.stack_get(idx))
+        .collect::<Vec<_>>();
+    let entries = collect_secure_range_entries(state, table_ref)?;
+
+    for (key, value) in entries {
+        let mut args = Vec::with_capacity(2 + extra_args.len());
+        args.push(key);
+        args.push(value);
+        args.extend(extra_args.iter().copied());
+        let _ = call_secure_range_callback(state, callback, &args);
+    }
+
     Ok(0)
+}
+
+fn collect_secure_range_entries(
+    state: &LuaState,
+    table_ref: crate::vm::gc::arena::GcRef<Table>,
+) -> LuaResult<Vec<(Val, Val)>> {
+    let table = state
+        .gc
+        .tables
+        .get(table_ref)
+        .ok_or_else(|| runtime_error("secureexecuterange table missing"))?;
+    let mut entries = Vec::new();
+    let mut array_prefix_len = 0;
+
+    for (index, value) in table.array_slice().iter().copied().enumerate() {
+        if value.is_nil() {
+            break;
+        }
+
+        let key = Val::Num((index + 1) as f64);
+        entries.push((key, value));
+        array_prefix_len = index + 1;
+    }
+
+    let mut previous_key = Val::Nil;
+    while let Some((key, value)) = table.next(previous_key, &state.gc.string_arena)? {
+        if !is_array_prefix_key(key, array_prefix_len) {
+            entries.push((key, value));
+        }
+        previous_key = key;
+    }
+
+    Ok(entries)
+}
+
+fn is_array_prefix_key(key: Val, prefix_len: usize) -> bool {
+    let Val::Num(number) = key else {
+        return false;
+    };
+
+    let Some(index) = numeric_slot_index(number) else {
+        return false;
+    };
+
+    index >= 1 && index <= prefix_len as i64
+}
+
+fn call_secure_range_callback(state: &mut LuaState, callback: Val, args: &[Val]) -> LuaResult<()> {
+    let call_base = state.top;
+    let saved_base = state.base;
+    let saved_ci = state.ci;
+    let saved_n_ccalls = state.n_ccalls;
+    let saved_call_depth = state.call_depth;
+    let saved_taint = state
+        .call_stack
+        .get(state.ci)
+        .and_then(|ci| ci.taint.clone());
+
+    state.ensure_stack(1 + args.len());
+    state.stack_set(call_base, callback);
+    for (offset, arg) in args.iter().copied().enumerate() {
+        state.stack_set(call_base + 1 + offset, arg);
+    }
+    state.top = call_base + 1 + args.len();
+
+    if let Some(ci) = state.call_stack.get_mut(state.ci) {
+        ci.taint = None;
+    }
+
+    let result = state.call_function(call_base, 0);
+    restore_secure_range_call_state(
+        state,
+        call_base,
+        saved_base,
+        saved_ci,
+        saved_n_ccalls,
+        saved_call_depth,
+        saved_taint,
+        result.is_err(),
+    );
+    result
+}
+
+fn restore_secure_range_call_state(
+    state: &mut LuaState,
+    call_base: usize,
+    saved_base: usize,
+    saved_ci: usize,
+    saved_n_ccalls: u16,
+    saved_call_depth: u16,
+    saved_taint: Option<String>,
+    failed: bool,
+) {
+    if failed {
+        state.ci = saved_ci;
+        state.base = saved_base;
+        state.n_ccalls = saved_n_ccalls;
+        state.call_depth = saved_call_depth;
+        if state.ci < crate::vm::state::MAXCALLS {
+            state.ci_overflow = false;
+        }
+        state.close_upvalues(call_base);
+        state.error_object = None;
+    }
+
+    state.top = call_base;
+    if let Some(ci) = state.call_stack.get_mut(state.ci) {
+        ci.taint = saved_taint;
+    }
 }
 
 #[cfg(test)]
@@ -417,6 +544,48 @@ mod tests {
         let nargs = state.top.saturating_sub(state.base);
         state.push(Val::Num(nargs as f64));
         Ok(1)
+    }
+
+    fn sum_secure_range_callback(state: &mut LuaState) -> LuaResult<u32> {
+        if state.call_stack[state.ci].taint.is_some() {
+            return Err(runtime_error("secureexecuterange callback was tainted"));
+        }
+
+        let value = state.stack_get(state.base + 1);
+        let Val::Num(amount) = value else {
+            return Err(runtime_error(
+                "secureexecuterange callback expected number value",
+            ));
+        };
+
+        let total_key = state.gc.intern_string_static(b"secure_range_total");
+        let previous_total = state
+            .gc
+            .tables
+            .get(state.global)
+            .map(|global| global.get(Val::Str(total_key), &state.gc.string_arena))
+            .unwrap_or(Val::Nil);
+        let previous_total = match previous_total {
+            Val::Num(total) => total,
+            _ => 0.0,
+        };
+
+        state
+            .gc
+            .tables
+            .get_mut(state.global)
+            .expect("missing global table")
+            .raw_set(
+                Val::Str(total_key),
+                Val::Num(previous_total + amount),
+                &state.gc.string_arena,
+            )?;
+
+        if matches!(state.stack_get(state.base), Val::Num(1.0)) {
+            return Err(runtime_error("keep going"));
+        }
+
+        Ok(0)
     }
 
     #[test]
@@ -630,17 +799,70 @@ mod tests {
     }
 
     #[test]
-    fn taint_stub_functions_remain_permissive_noops() {
+    fn permissive_taint_stub_functions_remain_noops() {
         let mut state = new_state_with_taint_api();
         assert_eq!(
             hooksecurefunc(&mut state).expect("hooksecurefunc failed"),
             0
         );
+        assert_eq!(forceinsecure(&mut state).expect("forceinsecure failed"), 0);
+        assert_eq!(state.call_stack[state.ci].taint.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn secureexecuterange_visits_entries_securely_and_continues_after_errors() {
+        let mut state = new_state_with_taint_api();
+        state.call_stack[state.ci].taint = Some("CallerAddon".to_string());
+
+        let table_ref = state.gc.alloc_table(Table::new());
+        state
+            .gc
+            .tables
+            .get_mut(table_ref)
+            .expect("missing test table")
+            .raw_set(Val::Num(1.0), Val::Num(10.0), &state.gc.string_arena)
+            .expect("failed to set array value");
+        state
+            .gc
+            .tables
+            .get_mut(table_ref)
+            .expect("missing test table")
+            .raw_set(Val::Num(2.0), Val::Num(20.0), &state.gc.string_arena)
+            .expect("failed to set array value");
+        let owner_key = state.gc.intern_string_static(b"owner");
+        state
+            .gc
+            .tables
+            .get_mut(table_ref)
+            .expect("missing test table")
+            .raw_set(Val::Str(owner_key), Val::Num(5.0), &state.gc.string_arena)
+            .expect("failed to set hash value");
+
+        let callback_ref = state.gc.alloc_closure(Closure::Rust(RustClosure::new(
+            sum_secure_range_callback,
+            "sum_secure_range",
+        )));
+
+        set_args(
+            &mut state,
+            &[Val::Table(table_ref), Val::Function(callback_ref)],
+        );
         assert_eq!(
             secureexecuterange(&mut state).expect("secureexecuterange failed"),
             0
         );
-        assert_eq!(forceinsecure(&mut state).expect("forceinsecure failed"), 0);
-        assert_eq!(state.call_stack[state.ci].taint.as_deref(), Some(""));
+
+        let total_key = state.gc.intern_string_static(b"secure_range_total");
+        let total = state
+            .gc
+            .tables
+            .get(state.global)
+            .expect("missing global table")
+            .get(Val::Str(total_key), &state.gc.string_arena);
+        assert_eq!(total, Val::Num(35.0));
+        assert_eq!(
+            state.call_stack[state.ci].taint.as_deref(),
+            Some("CallerAddon")
+        );
     }
 }
