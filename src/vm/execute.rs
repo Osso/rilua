@@ -2671,7 +2671,7 @@ mod tests {
     }
 
     #[test]
-    fn op_getglobal_slot_reads_frozen_value_for_root_env() {
+    fn op_getglobal_slot_reads_frozen_value_with_empty_shadow() {
         let mut state = LuaState::new();
         let mixin_key = state.gc.intern_string(b"Mixin");
         let code = vec![
@@ -2688,12 +2688,25 @@ mod tests {
         state.base = 1;
         state.top = 1;
         state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+        let shadow_key = state.gc.intern_string_static(b"__slot_shadow");
+        let shadow_ref = state.gc.alloc_table(Table::new());
+        state
+            .gc
+            .tables
+            .get_mut(state.registry)
+            .expect("missing registry")
+            .raw_set(
+                Val::Str(shadow_key),
+                Val::Table(shadow_ref),
+                &state.gc.string_arena,
+            )
+            .expect("registry raw_set should succeed");
         let root_global = state.global;
         install_slots(
             &mut state,
             vec![Val::Table(root_global), Val::Num(42.0)],
             &[mixin_key],
-            None,
+            Some(shadow_key),
         );
 
         execute(&mut state).ok();
