@@ -1145,11 +1145,14 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let Some(runtime) = state.global_slots.as_ref() else {
                         return Err(runtime_error(&proto, pc, "global slot runtime missing"));
                     };
+                    let root_global = runtime.root_global;
+                    let snapshot = runtime.values[slot_idx];
+                    let shadow_ref = lookup_slot_shadow_table(state, runtime);
                     let Some(key) = get_global_slot_key(state, slot_idx) else {
                         return Err(runtime_error(&proto, pc, "global slot runtime missing"));
                     };
 
-                    if env != runtime.root_global {
+                    if env != root_global {
                         if !try_plain_table_get_ref(state, env, key, ra) {
                             state.call_stack[state.ci].saved_pc = pc;
                             vm_gettable(state, Val::Table(env), key, ra, &proto, pc, base, None)?;
@@ -1158,16 +1161,31 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     }
 
                     if slot_idx == 0 {
-                        state.stack_set(ra, runtime.values[slot_idx]);
+                        state.stack_set(ra, snapshot);
                         continue;
                     }
 
-                    if let Some(live_ref) = lookup_slot_shadow_table(state, runtime)
-                        && let Some(live_table) = state.gc.tables.get(live_ref)
+                    let Some(live_ref) = shadow_ref else {
+                        if !try_plain_table_get_ref(state, root_global, key, ra) {
+                            state.call_stack[state.ci].saved_pc = pc;
+                            vm_gettable(
+                                state,
+                                Val::Table(root_global),
+                                key,
+                                ra,
+                                &proto,
+                                pc,
+                                base,
+                                None,
+                            )?;
+                        }
+                        continue;
+                    };
+
+                    if let Some(live_table) = state.gc.tables.get(live_ref)
                         && !(live_table.array_len() == 0 && live_table.hash_size() == 0)
                     {
-                        let live_val =
-                            live_table.get_str(runtime.name_keys[slot_idx], &state.gc.string_arena);
+                        let live_val = live_table.get(key, &state.gc.string_arena);
                         if live_val != Val::Nil {
                             propagate_slot_read_taint(state, live_ref, key);
                             state.stack_set(ra, live_val);
@@ -1175,7 +1193,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         }
                     }
 
-                    state.stack_set(ra, runtime.values[slot_idx]);
+                    state.stack_set(ra, snapshot);
                 }
 
                 OpCode::SetGlobalSlot => {

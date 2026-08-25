@@ -1002,6 +1002,109 @@ mod tests {
         assert!(!check_interrupted(), "flag should be false after clear");
     }
 
+    fn lua_with_prepared_global_slot_reader() -> (Lua, Function) {
+        let mut lua = Lua::new().expect("fresh Lua state");
+        lua.set_global_val("myvar", Val::Num(10.0))
+            .expect("seed global");
+
+        let root_global = lua.state.global;
+        let g_key = lua.state.gc.intern_string_static(b"_G");
+        let target_key = lua.state.gc.intern_string(b"myvar");
+        lua.state.install_global_slots(
+            vec![Val::Table(root_global), Val::Num(10.0)].into_boxed_slice(),
+            vec![g_key, target_key].into_boxed_slice(),
+            None,
+        );
+
+        let reader = lua.load("return myvar").expect("prepare slot reader");
+        (lua, reader)
+    }
+
+    fn read_prepared_global(lua: &mut Lua, reader: &Function) -> Val {
+        lua.call_function(reader, &[])
+            .expect("run prepared slot reader")
+            .into_iter()
+            .next()
+            .unwrap_or(Val::Nil)
+    }
+
+    #[test]
+    fn prepared_global_slot_read_sees_bare_reassignment() {
+        let (mut lua, reader) = lua_with_prepared_global_slot_reader();
+
+        lua.exec("myvar = 20").expect("bare reassignment");
+
+        assert_eq!(read_prepared_global(&mut lua, &reader), Val::Num(20.0));
+    }
+
+    #[test]
+    fn prepared_global_slot_read_sees_root_table_reassignment() {
+        let (mut lua, reader) = lua_with_prepared_global_slot_reader();
+
+        lua.exec("_G.myvar = 20").expect("root table reassignment");
+
+        assert_eq!(read_prepared_global(&mut lua, &reader), Val::Num(20.0));
+    }
+
+    #[test]
+    fn prepared_global_slot_read_sees_rawset_reassignment() {
+        let (mut lua, reader) = lua_with_prepared_global_slot_reader();
+
+        lua.exec("rawset(_G, 'myvar', 20)")
+            .expect("rawset reassignment");
+
+        assert_eq!(read_prepared_global(&mut lua, &reader), Val::Num(20.0));
+    }
+
+    #[test]
+    fn prepared_global_slot_read_does_not_resurrect_snapshot_after_nil() {
+        let (mut lua, reader) = lua_with_prepared_global_slot_reader();
+
+        lua.exec("myvar = nil").expect("nil reassignment");
+
+        assert_eq!(read_prepared_global(&mut lua, &reader), Val::Nil);
+    }
+
+    #[test]
+    fn prepared_global_slot_read_preserves_custom_environment() {
+        let (mut lua, reader) = lua_with_prepared_global_slot_reader();
+        let custom_env = lua.create_table();
+        let target_key = lua.state.gc.intern_string(b"myvar");
+        lua.table_raw_set(&custom_env, Val::Str(target_key), Val::Num(77.0))
+            .expect("seed custom environment");
+        lua.set_fenv(&reader, &custom_env)
+            .expect("set reader environment");
+
+        assert_eq!(read_prepared_global(&mut lua, &reader), Val::Num(77.0));
+    }
+
+    #[test]
+    fn prepared_global_slot_read_propagates_root_slot_taint() {
+        let (mut lua, _) = lua_with_prepared_global_slot_reader();
+        lua.exec(
+            r#"
+            debug.settaintmode(true)
+            debug.setstacktaint("TestAddon")
+            myvar = 20
+            debug.setstacktaint(nil)
+            "#,
+        )
+        .expect("write tainted global");
+        let reader = lua
+            .load("local value = myvar; return value, debug.getstacktaint()")
+            .expect("prepare taint reader");
+
+        let values = lua
+            .call_function(&reader, &[])
+            .expect("run prepared taint reader");
+
+        assert_eq!(values.first(), Some(&Val::Num(20.0)));
+        assert_eq!(
+            values.get(1).and_then(|value| lua.val_as_bytes(*value)),
+            Some(b"TestAddon".as_slice())
+        );
+    }
+
     #[test]
     fn prepare_loaded_proto_rewrites_whitelisted_getglobal_to_slot_opcode() {
         let mut state = LuaState::new();
