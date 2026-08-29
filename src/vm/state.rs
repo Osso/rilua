@@ -526,6 +526,12 @@ fn cache_debug_info_field_names(gc: &mut Gc) -> [GcRef<LuaString>; DEBUG_INFO_FI
 // LuaThread (coroutine)
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
+pub(crate) enum GettableOrigin {
+    OrdinaryTable,
+    SyntacticGlobal,
+}
+
 /// A Lua thread (coroutine) with its own stack and call stack.
 ///
 /// Each coroutine has independent per-thread state but shares the GC
@@ -572,6 +578,9 @@ pub struct LuaThread {
     pub global: GcRef<Table>,
     /// Per-thread debug hook state.
     pub hook: HookState,
+    /// True while this thread is resolving a syntactic global lookup through
+    /// a table `__index` metamethod.
+    syntactic_global_lookup: bool,
     /// True if this thread yielded directly from a hook dispatch point
     /// (via `yield_on_hook`). On resume, this skips `poscall` since no
     /// Rust/Lua hook function was called — there is no CI to pop.
@@ -607,6 +616,7 @@ impl LuaThread {
             status: ThreadStatus::Initial,
             global,
             hook: HookState::new(),
+            syntactic_global_lookup: false,
             yielded_in_hook: false,
         }
     }
@@ -702,6 +712,10 @@ pub struct LuaState {
 
     /// Interned `debug.getinfo()` result-table field names.
     pub(crate) debug_info_field_names: [GcRef<LuaString>; DEBUG_INFO_FIELD_NAMES.len()],
+
+    /// True while the current thread is resolving a syntactic global lookup
+    /// through a table `__index` metamethod.
+    syntactic_global_lookup: bool,
 
     /// True if the current thread yielded from a hook dispatch point.
     /// Set by the execute loop when `yield_on_hook` is active, cleared
@@ -812,11 +826,31 @@ impl LuaState {
             hook_event_names,
             hook_mask_names,
             debug_info_field_names,
+            syntactic_global_lookup: false,
             yielded_in_hook: false,
             saved_threads: Vec::new(),
             taint_mode: false,
             app_data: None,
         }
+    }
+
+    /// Returns whether the current table lookup originated from a syntactic
+    /// global-load opcode.
+    #[must_use]
+    pub fn is_syntactic_global_lookup(&self) -> bool {
+        self.syntactic_global_lookup
+    }
+
+    pub(crate) fn with_gettable_provenance<T>(
+        &mut self,
+        origin: GettableOrigin,
+        operation: impl FnOnce(&mut Self) -> crate::LuaResult<T>,
+    ) -> crate::LuaResult<T> {
+        let previous = self.syntactic_global_lookup;
+        self.syntactic_global_lookup = matches!(origin, GettableOrigin::SyntacticGlobal);
+        let result = operation(self);
+        self.syntactic_global_lookup = previous;
+        result
     }
 
     /// Sets application data of type `T`.
@@ -997,6 +1031,7 @@ impl LuaState {
             status: ThreadStatus::Normal,
             global: self.global,
             hook: self.hook.clone(),
+            syntactic_global_lookup: self.syntactic_global_lookup,
             yielded_in_hook: self.yielded_in_hook,
         }
     }
@@ -1026,6 +1061,7 @@ impl LuaState {
             self.error_object = thread.error_object.take();
             self.global = thread.global;
             self.hook = std::mem::take(&mut thread.hook);
+            self.syntactic_global_lookup = thread.syntactic_global_lookup;
             self.yielded_in_hook = thread.yielded_in_hook;
 
             // Reopen upvalues that were closed on suspension.
@@ -1115,6 +1151,7 @@ impl LuaState {
             co_thread.error_object = self.error_object.take();
             co_thread.global = self.global;
             co_thread.hook = std::mem::take(&mut self.hook);
+            co_thread.syntactic_global_lookup = self.syntactic_global_lookup;
             co_thread.yielded_in_hook = self.yielded_in_hook;
             co_thread.status = co_status;
         }
@@ -1132,6 +1169,7 @@ impl LuaState {
         self.error_object = resumer.error_object;
         self.global = resumer.global;
         self.hook = resumer.hook;
+        self.syntactic_global_lookup = resumer.syntactic_global_lookup;
         self.yielded_in_hook = resumer.yielded_in_hook;
 
         // Reopen the resumer's suspended upvalues. These were closed before

@@ -844,6 +844,129 @@ mod tests {
         assert_eq!(err.to_string(), "(string):1: attempt to call a nil value");
     }
 
+    fn new_lua_with_syntactic_global_lookup_probe() -> Lua {
+        let mut lua = Lua::new().expect("failed to create Lua state");
+        lua.register_function("is_syntactic_global_lookup", |state| {
+            let is_global_lookup = state.is_syntactic_global_lookup();
+            state.push(Val::Bool(is_global_lookup));
+            Ok(1)
+        })
+        .expect("register provenance probe");
+        lua
+    }
+
+    #[test]
+    fn syntactic_global_lookup_distinguishes_global_and_explicit_table_access() {
+        let mut lua = new_lua_with_syntactic_global_lookup_probe();
+        lua.exec(
+            r#"
+            local observed = {}
+            setmetatable(_G, {
+                __index = function(_, key)
+                    if key == "BareMissing" then
+                        observed.bare = is_syntactic_global_lookup()
+                    elseif key == "DotMissing" then
+                        observed.dot = is_syntactic_global_lookup()
+                    elseif key == "BracketMissing" then
+                        observed.bracket = is_syntactic_global_lookup()
+                    elseif key == "NestedDynamicOuter" then
+                        observed.dynamicOuter = is_syntactic_global_lookup()
+                        local _ = _G.NestedDynamicInner
+                        observed.dynamicOuterAfter = is_syntactic_global_lookup()
+                    elseif key == "NestedDynamicInner" then
+                        observed.dynamicInner = is_syntactic_global_lookup()
+                    elseif key == "NestedDirectOuter" then
+                        observed.directOuter = is_syntactic_global_lookup()
+                        local _ = NestedDirectInner
+                        observed.directOuterAfter = is_syntactic_global_lookup()
+                    elseif key == "NestedDirectInner" then
+                        observed.directInner = is_syntactic_global_lookup()
+                    end
+                end,
+            })
+
+            local _ = BareMissing
+            local _ = _G.DotMissing
+            local _ = _G["BracketMissing"]
+            local _ = NestedDynamicOuter
+            local _ = NestedDirectOuter
+
+            assert(observed.bare == true)
+            assert(observed.dot == false)
+            assert(observed.bracket == false)
+            assert(observed.dynamicOuter == true)
+            assert(observed.dynamicInner == false)
+            assert(observed.dynamicOuterAfter == true)
+            assert(observed.directOuter == true)
+            assert(observed.directInner == true)
+            assert(observed.directOuterAfter == true)
+            assert(is_syntactic_global_lookup() == false)
+            "#,
+        )
+        .expect("lookup provenance should distinguish opcode origins");
+    }
+
+    #[test]
+    fn syntactic_global_lookup_restores_after_index_error() {
+        let mut lua = new_lua_with_syntactic_global_lookup_probe();
+        lua.exec(
+            r#"
+            setmetatable(_G, {
+                __index = function(_, key)
+                    if key == "ErrorMissing" then
+                        assert(is_syntactic_global_lookup() == true)
+                        error("index failure")
+                    end
+                end,
+            })
+
+            local ok, message = pcall(function()
+                return ErrorMissing
+            end)
+            assert(ok == false)
+            assert(string.find(message, "index failure", 1, true) ~= nil)
+            assert(is_syntactic_global_lookup() == false)
+            "#,
+        )
+        .expect("lookup provenance should restore after an index error");
+    }
+
+    #[test]
+    fn syntactic_global_lookup_isolated_across_coroutine_swap() {
+        let mut lua = new_lua_with_syntactic_global_lookup_probe();
+        lua.exec(
+            r#"
+            local observed = {}
+            setmetatable(_G, {
+                __index = function(_, key)
+                    if key == "CoroutineOuter" then
+                        observed.outerBefore = is_syntactic_global_lookup()
+                        local coroutineHandle = coroutine.create(function()
+                            observed.coroutineStart = is_syntactic_global_lookup()
+                            local _ = CoroutineMissing
+                            observed.coroutineAfter = is_syntactic_global_lookup()
+                        end)
+                        local resumed, resumeError = coroutine.resume(coroutineHandle)
+                        assert(resumed, tostring(resumeError))
+                        observed.outerAfter = is_syntactic_global_lookup()
+                    elseif key == "CoroutineMissing" then
+                        observed.coroutineInside = is_syntactic_global_lookup()
+                    end
+                end,
+            })
+
+            local _ = CoroutineOuter
+            assert(observed.outerBefore == true)
+            assert(observed.coroutineStart == false)
+            assert(observed.coroutineInside == true)
+            assert(observed.coroutineAfter == false)
+            assert(observed.outerAfter == true)
+            assert(is_syntactic_global_lookup() == false)
+            "#,
+        )
+        .expect("lookup provenance should remain isolated across coroutine state swaps");
+    }
+
     #[test]
     fn lua_call_function_recovers_after_rust_callback_error() {
         let mut lua = Lua::new().ok().unwrap_or_else(Lua::new_empty);

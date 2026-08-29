@@ -3,7 +3,7 @@
 use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::vm::value::append_lua_number_bytes;
 
-use super::{LuaState, Table, Val};
+use super::{GettableOrigin, LuaState, Table, Val};
 use crate::vm::gc::arena::GcRef;
 use crate::vm::metatable::{MAXTAGLOOP, TMS, fasttm, gettmbyobj, val_raw_equal};
 
@@ -14,6 +14,12 @@ impl LuaState {
     /// up to `MAXTAGLOOP` depth. Used by stdlib code that needs full Lua
     /// table access semantics (e.g., gsub table replacement).
     pub fn gettable(&mut self, t: Val, key: Val) -> LuaResult<Val> {
+        self.with_gettable_provenance(GettableOrigin::OrdinaryTable, |state| {
+            state.resolve_gettable_chain(t, key)
+        })
+    }
+
+    fn resolve_gettable_chain(&mut self, t: Val, key: Val) -> LuaResult<Val> {
         let mut current = t;
         for _ in 0..MAXTAGLOOP {
             if let Val::Table(table_ref) = current {

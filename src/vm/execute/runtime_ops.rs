@@ -4,6 +4,7 @@ use crate::error::LuaResult;
 use crate::vm::value::{append_lua_number_bytes, lua_number_string_len};
 
 use super::super::gc::arena::Arena;
+use super::super::state::GettableOrigin;
 use super::super::string::LuaString;
 use super::{
     CallResult, Closure, Gc, GcRef, LuaState, MAXTAGLOOP, Proto, TMS, Table, Val, arith_error,
@@ -469,26 +470,29 @@ pub(super) fn vm_gettable(
     pc: usize,
     base: usize,
     obj_reg: Option<usize>,
+    origin: GettableOrigin,
 ) -> LuaResult<()> {
-    let mut current = t;
-    let resolved_key = resolve_gettable_key(key, &state.gc);
-    for _ in 0..MAXTAGLOOP {
-        match gettable_step(
-            state,
-            current,
-            key,
-            resolved_key,
-            result_reg,
-            proto,
-            pc,
-            base,
-            obj_reg,
-        )? {
-            GettableStep::Done => return Ok(()),
-            GettableStep::Continue(next) => current = next,
+    state.with_gettable_provenance(origin, |state| {
+        let mut current = t;
+        let resolved_key = resolve_gettable_key(key, &state.gc);
+        for _ in 0..MAXTAGLOOP {
+            match gettable_step(
+                state,
+                current,
+                key,
+                resolved_key,
+                result_reg,
+                proto,
+                pc,
+                base,
+                obj_reg,
+            )? {
+                GettableStep::Done => return Ok(()),
+                GettableStep::Continue(next) => current = next,
+            }
         }
-    }
-    Err(runtime_error_simple("loop in gettable"))
+        Err(runtime_error_simple("loop in gettable"))
+    })
 }
 
 enum GettableStep {

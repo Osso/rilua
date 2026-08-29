@@ -27,8 +27,8 @@ use super::metatable::{MAXTAGLOOP, TMS, get_comp_tm, gettmbyobj, val_raw_equal};
 use super::proto::ProtoRef;
 use super::proto::{Proto, VARARG_ISVARARG, VARARG_NEEDSARG};
 use super::state::{
-    Gc, HookEvent, LUA_MINSTACK, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE, MASK_RET, MAXCALLS,
-    MAXCCALLS,
+    Gc, GettableOrigin, HookEvent, LUA_MINSTACK, LuaState, MASK_CALL, MASK_COUNT, MASK_LINE,
+    MASK_RET, MAXCALLS, MAXCCALLS,
 };
 use super::string::LuaString;
 use super::table::Table;
@@ -1128,7 +1128,17 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let key = proto.constants[bx];
                     if !try_plain_table_get_ref(state, env, key, ra) {
                         state.call_stack[state.ci].saved_pc = pc;
-                        vm_gettable(state, Val::Table(env), key, ra, &proto, pc, base, None)?;
+                        vm_gettable(
+                            state,
+                            Val::Table(env),
+                            key,
+                            ra,
+                            &proto,
+                            pc,
+                            base,
+                            None,
+                            GettableOrigin::SyntacticGlobal,
+                        )?;
                     }
                 }
 
@@ -1155,7 +1165,17 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     if env != root_global {
                         if !try_plain_table_get_ref(state, env, key, ra) {
                             state.call_stack[state.ci].saved_pc = pc;
-                            vm_gettable(state, Val::Table(env), key, ra, &proto, pc, base, None)?;
+                            vm_gettable(
+                                state,
+                                Val::Table(env),
+                                key,
+                                ra,
+                                &proto,
+                                pc,
+                                base,
+                                None,
+                                GettableOrigin::SyntacticGlobal,
+                            )?;
                         }
                         continue;
                     }
@@ -1177,6 +1197,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                                 pc,
                                 base,
                                 None,
+                                GettableOrigin::SyntacticGlobal,
                             )?;
                         }
                         continue;
@@ -1213,7 +1234,17 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let key = rk(&state.stack, base, &proto.constants, instr.c());
                     if !try_plain_table_get(state, table_val, key, ra) {
                         state.call_stack[state.ci].saved_pc = pc;
-                        vm_gettable(state, table_val, key, ra, &proto, pc, base, Some(b))?;
+                        vm_gettable(
+                            state,
+                            table_val,
+                            key,
+                            ra,
+                            &proto,
+                            pc,
+                            base,
+                            Some(b),
+                            GettableOrigin::OrdinaryTable,
+                        )?;
                     }
                 }
 
@@ -1254,7 +1285,17 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let key = rk(&state.stack, base, &proto.constants, instr.c());
                     if !try_plain_table_get(state, table_val, key, ra) {
                         state.call_stack[state.ci].saved_pc = pc;
-                        vm_gettable(state, table_val, key, ra, &proto, pc, base, Some(b))?;
+                        vm_gettable(
+                            state,
+                            table_val,
+                            key,
+                            ra,
+                            &proto,
+                            pc,
+                            base,
+                            Some(b),
+                            GettableOrigin::OrdinaryTable,
+                        )?;
                     }
                 }
 
@@ -2085,6 +2126,7 @@ fn write_setlist_array_values(
 )]
 mod tests {
     use super::*;
+    use crate::vm::closure::RustClosure;
     use crate::vm::gc::arena::GcRef;
     use crate::vm::instructions::{Instruction, OpCode, rk_as_k};
     use crate::vm::string::LuaString;
@@ -2118,6 +2160,12 @@ mod tests {
         p.max_stack_size = 20;
         p.is_vararg = VARARG_ISVARARG;
         p
+    }
+
+    fn probe_syntactic_global_lookup(state: &mut LuaState) -> LuaResult<u32> {
+        let is_global_lookup = state.is_syntactic_global_lookup();
+        state.push(Val::Bool(is_global_lookup));
+        Ok(1)
     }
 
     fn install_slots(
@@ -2750,6 +2798,62 @@ mod tests {
 
         execute(&mut state).ok();
         assert_eq!(state.stack_get(state.base), Val::Num(77.0));
+    }
+
+    #[test]
+    fn op_getglobal_slot_index_callback_observes_syntactic_global_lookup() {
+        let mut state = LuaState::new();
+        let mixin_key = state.gc.intern_string(b"Mixin");
+        let index_key = state.gc.intern_string_static(b"__index");
+        let metatable = state.gc.alloc_table(Table::new());
+        let callback = state.gc.alloc_closure(Closure::Rust(RustClosure::new(
+            probe_syntactic_global_lookup,
+            "probe_syntactic_global_lookup",
+        )));
+        state
+            .gc
+            .tables
+            .get_mut(metatable)
+            .expect("missing metatable")
+            .raw_set(
+                Val::Str(index_key),
+                Val::Function(callback),
+                &state.gc.string_arena,
+            )
+            .expect("metatable raw_set should succeed");
+        state
+            .gc
+            .tables
+            .get_mut(state.global)
+            .expect("missing global table")
+            .set_metatable(Some(metatable));
+
+        let code = vec![
+            Instruction::a_bx(OpCode::GetGlobalSlot, 0, 1).raw(),
+            Instruction::abc(OpCode::Return, 0, 2, 0).raw(),
+        ];
+        let mut proto = make_proto(code, vec![]);
+        proto.global_slot_names.push(Some(b"_G".to_vec()));
+        proto.global_slot_names.push(Some(b"Mixin".to_vec()));
+        let proto_rc = ProtoRef::new(proto);
+        let cl = LuaClosure::new(proto_rc, state.global);
+        let cl_ref = state.gc.alloc_closure(Closure::Lua(cl));
+        state.stack_set(0, Val::Function(cl_ref));
+        state.base = 1;
+        state.top = 1;
+        state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
+        let root_global = state.global;
+        install_slots(
+            &mut state,
+            vec![Val::Table(root_global), Val::Nil],
+            &[mixin_key],
+            None,
+        );
+
+        execute(&mut state).expect("global slot lookup should use __index");
+
+        assert_eq!(state.stack_get(state.base), Val::Bool(true));
+        assert!(!state.is_syntactic_global_lookup());
     }
 
     #[test]
