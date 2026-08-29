@@ -845,14 +845,7 @@ mod tests {
     }
 
     fn new_lua_with_syntactic_global_lookup_probe() -> Lua {
-        let mut lua = Lua::new().expect("failed to create Lua state");
-        lua.register_function("is_syntactic_global_lookup", |state| {
-            let is_global_lookup = state.is_syntactic_global_lookup();
-            state.push(Val::Bool(is_global_lookup));
-            Ok(1)
-        })
-        .expect("register provenance probe");
-        lua
+        Lua::new().expect("failed to create Lua state")
     }
 
     #[test]
@@ -864,23 +857,23 @@ mod tests {
             setmetatable(_G, {
                 __index = function(_, key)
                     if key == "BareMissing" then
-                        observed.bare = is_syntactic_global_lookup()
+                        observed.bare = debug.isglobalindex()
                     elseif key == "DotMissing" then
-                        observed.dot = is_syntactic_global_lookup()
+                        observed.dot = debug.isglobalindex()
                     elseif key == "BracketMissing" then
-                        observed.bracket = is_syntactic_global_lookup()
+                        observed.bracket = debug.isglobalindex()
                     elseif key == "NestedDynamicOuter" then
-                        observed.dynamicOuter = is_syntactic_global_lookup()
+                        observed.dynamicOuter = debug.isglobalindex()
                         local _ = _G.NestedDynamicInner
-                        observed.dynamicOuterAfter = is_syntactic_global_lookup()
+                        observed.dynamicOuterAfter = debug.isglobalindex()
                     elseif key == "NestedDynamicInner" then
-                        observed.dynamicInner = is_syntactic_global_lookup()
+                        observed.dynamicInner = debug.isglobalindex()
                     elseif key == "NestedDirectOuter" then
-                        observed.directOuter = is_syntactic_global_lookup()
+                        observed.directOuter = debug.isglobalindex()
                         local _ = NestedDirectInner
-                        observed.directOuterAfter = is_syntactic_global_lookup()
+                        observed.directOuterAfter = debug.isglobalindex()
                     elseif key == "NestedDirectInner" then
-                        observed.directInner = is_syntactic_global_lookup()
+                        observed.directInner = debug.isglobalindex()
                     end
                 end,
             })
@@ -900,7 +893,7 @@ mod tests {
             assert(observed.directOuter == true)
             assert(observed.directInner == true)
             assert(observed.directOuterAfter == true)
-            assert(is_syntactic_global_lookup() == false)
+            assert(debug.isglobalindex() == false)
             "#,
         )
         .expect("lookup provenance should distinguish opcode origins");
@@ -914,7 +907,7 @@ mod tests {
             setmetatable(_G, {
                 __index = function(_, key)
                     if key == "ErrorMissing" then
-                        assert(is_syntactic_global_lookup() == true)
+                        assert(debug.isglobalindex() == true)
                         error("index failure")
                     end
                 end,
@@ -925,7 +918,7 @@ mod tests {
             end)
             assert(ok == false)
             assert(string.find(message, "index failure", 1, true) ~= nil)
-            assert(is_syntactic_global_lookup() == false)
+            assert(debug.isglobalindex() == false)
             "#,
         )
         .expect("lookup provenance should restore after an index error");
@@ -940,17 +933,17 @@ mod tests {
             setmetatable(_G, {
                 __index = function(_, key)
                     if key == "CoroutineOuter" then
-                        observed.outerBefore = is_syntactic_global_lookup()
+                        observed.outerBefore = debug.isglobalindex()
                         local coroutineHandle = coroutine.create(function()
-                            observed.coroutineStart = is_syntactic_global_lookup()
+                            observed.coroutineStart = debug.isglobalindex()
                             local _ = CoroutineMissing
-                            observed.coroutineAfter = is_syntactic_global_lookup()
+                            observed.coroutineAfter = debug.isglobalindex()
                         end)
                         local resumed, resumeError = coroutine.resume(coroutineHandle)
                         assert(resumed, tostring(resumeError))
-                        observed.outerAfter = is_syntactic_global_lookup()
+                        observed.outerAfter = debug.isglobalindex()
                     elseif key == "CoroutineMissing" then
-                        observed.coroutineInside = is_syntactic_global_lookup()
+                        observed.coroutineInside = debug.isglobalindex()
                     end
                 end,
             })
@@ -961,7 +954,7 @@ mod tests {
             assert(observed.coroutineInside == true)
             assert(observed.coroutineAfter == false)
             assert(observed.outerAfter == true)
-            assert(is_syntactic_global_lookup() == false)
+            assert(debug.isglobalindex() == false)
             "#,
         )
         .expect("lookup provenance should remain isolated across coroutine state swaps");

@@ -75,6 +75,7 @@ fn register_debug_functions(state: &mut LuaState) -> LuaResult<()> {
             _ => return Ok(()), // debug lib not loaded
         }
     };
+    set_fn(state, debug_table, "isglobalindex", isglobalindex)?;
     set_fn(state, debug_table, "setobjecttaint", setobjecttaint)?;
     set_fn(state, debug_table, "getstacktaint", getstacktaint)?;
     set_fn(state, debug_table, "setstacktaint", setstacktaint)?;
@@ -128,6 +129,15 @@ fn set_global_fn(
         )?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// debug.isglobalindex()
+// ---------------------------------------------------------------------------
+
+fn isglobalindex(state: &mut LuaState) -> LuaResult<u32> {
+    state.push(Val::Bool(state.is_syntactic_global_lookup()));
+    Ok(1)
 }
 
 // ---------------------------------------------------------------------------
