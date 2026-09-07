@@ -17,7 +17,7 @@ pub type EnvironmentTransferHook =
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Lua, LuaApi, LuaApiMut, Val};
+    use crate::{Lua, LuaApiMut, Val};
 
     fn convert_token(
         state: &mut LuaState,
@@ -130,7 +130,10 @@ mod tests {
         target: GcRef<Table>,
         values: Range<usize>,
     ) -> LuaResult<()> {
-        state.exec("setfenv(function() return 13 end, privateEnv)()")?;
+        let function = state.load("setfenv(function() return 13 end, privateEnv)()")?;
+        let top = state.top;
+        state.push(Val::Function(function.gc_ref()));
+        state.call_function(top, 0)?;
         convert_token(state, source, target, values)
     }
 
