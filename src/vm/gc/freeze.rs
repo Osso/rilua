@@ -320,10 +320,11 @@ mod tests {
         let mut lua = LuaState::new();
         let root = lua.gc.tables.alloc(Table::new(), Color::White0);
         let ud_mt = lua.gc.tables.alloc(Table::new(), Color::White0);
-        let ud = lua.gc.userdata.alloc(
-            Userdata::with_metatable(Box::new(()) as UserDataBox, ud_mt),
-            Color::White0,
-        );
+        let data: UserDataBox = Box::new(());
+        let ud = lua
+            .gc
+            .userdata
+            .alloc(Userdata::with_metatable(data, ud_mt), Color::White0);
         let key = lua.gc.intern_string(b"handle");
         set_table_entry(&mut lua, root, Val::Str(key), Val::Userdata(ud));
 

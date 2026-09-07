@@ -60,7 +60,6 @@ impl Gc {
 #[cfg(test)]
 mod tests {
     use crate::vm::gc::Color;
-    use crate::vm::gc::arena::Flag;
     use crate::vm::state::LuaState;
     use crate::vm::table::Table;
     use crate::vm::value::Val;
