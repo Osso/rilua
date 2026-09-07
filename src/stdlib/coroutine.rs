@@ -304,9 +304,6 @@ pub(crate) fn auxresume(
         // The resume args are at state.base..state.top. poscall reads from
         // first_result and places results at the caller's expected position.
         let first_result = state.base;
-        if state.poscall(first_result) {
-            state.top = state.call_stack[state.ci].top;
-        }
 
         // Continue execution from where we left off.
         // Loop to handle all CI levels that were active when yield happened.
@@ -314,6 +311,9 @@ pub(crate) fn auxresume(
         // Each execute() handles one function level (OP_RETURN pops the CI).
         // When ci reaches 0, the coroutine's function has returned normally.
         (|| -> LuaResult<()> {
+            if state.poscall(first_result)? {
+                state.top = state.call_stack[state.ci].top;
+            }
             while state.ci > 0 {
                 execute::execute(state)?;
             }

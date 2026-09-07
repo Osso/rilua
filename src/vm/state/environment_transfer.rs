@@ -14,6 +14,70 @@ use std::ops::Range;
 pub type EnvironmentTransferHook =
     fn(&mut LuaState, GcRef<Table>, GcRef<Table>, Range<usize>) -> LuaResult<()>;
 
+impl LuaState {
+    pub(crate) fn transfer_call_arguments(
+        &mut self,
+        function: crate::Val,
+        start: usize,
+    ) -> LuaResult<()> {
+        if self.environment_transfer_hook.is_none() {
+            return Ok(());
+        }
+        let Some(target) = self.lua_function_environment(function) else {
+            return Ok(());
+        };
+        let source = self.nearest_lua_environment(self.ci);
+        self.transfer_environment_values(source, target, start..self.top)
+    }
+
+    pub(crate) fn transfer_return_values(&mut self, start: usize) -> LuaResult<()> {
+        if self.environment_transfer_hook.is_none() {
+            return Ok(());
+        }
+        let function = self.stack_get(self.call_stack[self.ci].func);
+        let Some(source) = self.lua_function_environment(function) else {
+            return Ok(());
+        };
+        let target = self.nearest_lua_environment(self.ci.saturating_sub(1));
+        self.transfer_environment_values(source, target, start..self.top)
+    }
+
+    fn lua_function_environment(&self, function: crate::Val) -> Option<GcRef<Table>> {
+        let crate::Val::Function(function) = function else {
+            return None;
+        };
+        match self.gc.closures.get(function) {
+            Some(crate::vm::closure::Closure::Lua(closure)) => Some(closure.env),
+            _ => None,
+        }
+    }
+
+    fn nearest_lua_environment(&self, from: usize) -> GcRef<Table> {
+        self.call_stack[..=from]
+            .iter()
+            .rev()
+            .find_map(|frame| self.lua_function_environment(self.stack_get(frame.func)))
+            .unwrap_or(self.global)
+    }
+
+    fn transfer_environment_values(
+        &mut self,
+        source: GcRef<Table>,
+        target: GcRef<Table>,
+        values: Range<usize>,
+    ) -> LuaResult<()> {
+        if source == target || values.is_empty() {
+            return Ok(());
+        }
+        let Some(hook) = self.environment_transfer_hook.take() else {
+            return Ok(());
+        };
+        let result = hook(self, source, target, values);
+        self.environment_transfer_hook = Some(hook);
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

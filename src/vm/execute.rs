@@ -628,6 +628,8 @@ impl LuaState {
             }
         };
 
+        self.transfer_call_arguments(Val::Function(closure_ref), func_idx + 1)?;
+
         // Save caller's PC.
         let saved_pc = self.call_stack[self.ci].saved_pc;
         let _ = saved_pc; // used for restoration in poscall
@@ -712,7 +714,7 @@ impl LuaState {
 
                 // Move results into place.
                 let first_result = self.top - n_results as usize;
-                self.poscall(first_result);
+                self.poscall(first_result)?;
 
                 Ok(CallResult::Rust)
             }
@@ -725,7 +727,7 @@ impl LuaState {
     /// Returns `true` if the caller is a Lua function (execution should
     /// continue in the caller's frame).
     #[inline]
-    pub fn poscall(&mut self, mut first_result: usize) -> bool {
+    pub fn poscall(&mut self, mut first_result: usize) -> LuaResult<bool> {
         // Fire return hook before unwinding (PUC-Rio: luaD_poscall line 346).
         // callrethooks fires LUA_HOOKRET, then LUA_HOOKTAILRET for each
         // elided tail call. The hook may reallocate the stack, so
@@ -740,6 +742,8 @@ impl LuaState {
             }
             first_result = fr_offset;
         }
+
+        self.transfer_return_values(first_result)?;
 
         // Pop the current CallInfo.
         let ci_func = self.call_stack[self.ci].func;
@@ -787,7 +791,7 @@ impl LuaState {
         // decide whether to reset top to the frame's max (fixed results)
         // or leave it as-is (MULTRET, so the next operation can read the
         // actual result count from top).
-        wanted != LUA_MULTRET
+        Ok(wanted != LUA_MULTRET)
     }
 
     /// Adjusts the stack for a vararg function call.
@@ -1895,7 +1899,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     }
                     // else: B==0, use everything up to current top.
 
-                    let fixed_results = state.poscall(first_result);
+                    let fixed_results = state.poscall(first_result)?;
 
                     nexeccalls -= 1;
                     if nexeccalls == 0 {
@@ -2202,7 +2206,7 @@ mod tests {
         state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
         state.push_ci(CallInfo::new(0, 1, 5, 0));
 
-        let fixed = state.poscall(3);
+        let fixed = state.poscall(3).unwrap();
 
         assert!(fixed);
         assert_eq!(state.ci, 0);
@@ -2218,7 +2222,7 @@ mod tests {
         state.call_stack[0] = CallInfo::new(0, 1, 41, LUA_MULTRET);
         state.push_ci(CallInfo::new(0, 1, 5, 1));
 
-        let fixed = state.poscall(3);
+        let fixed = state.poscall(3).unwrap();
 
         assert!(fixed);
         assert_eq!(state.ci, 0);
