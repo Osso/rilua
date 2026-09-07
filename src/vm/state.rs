@@ -19,6 +19,8 @@
 //! Reference: `lstate.h`, `lstate.c` in PUC-Rio Lua 5.1.1.
 
 mod api_ops;
+mod environment_transfer;
+pub use environment_transfer::EnvironmentTransferHook;
 
 use super::callinfo::{CallInfo, LUA_MULTRET};
 use super::closure::{Closure, Upvalue};
@@ -669,6 +671,9 @@ pub struct LuaState {
     /// Optional slot runtime for embedder-installed global fast paths.
     pub global_slots: Option<GlobalSlotRuntime>,
 
+    /// Optional host conversion of direct values crossing Lua environments.
+    pub environment_transfer_hook: Option<EnvironmentTransferHook>,
+
     /// Registry table. Internal storage for the VM.
     pub registry: GcRef<Table>,
 
@@ -816,6 +821,7 @@ impl LuaState {
             ci_overflow: false,
             global,
             global_slots: None,
+            environment_transfer_hook: None,
             registry,
             open_upvalues: Vec::new(),
             gc,
