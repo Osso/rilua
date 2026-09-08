@@ -40,7 +40,13 @@ impl LuaState {
                     Some(tm_val) => current = tm_val,
                 }
             } else {
-                return Ok(Val::Nil);
+                match lookup_tm(self, current, TMS::Index) {
+                    None => return Err(index_error(current)),
+                    Some(method) if matches!(method, Val::Function(_)) => {
+                        return self.call_tm_two_args(method, current, key);
+                    }
+                    Some(index) => current = index,
+                }
             }
         }
 
