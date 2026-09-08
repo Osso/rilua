@@ -19,6 +19,8 @@
 //! Reference: `lstate.h`, `lstate.c` in PUC-Rio Lua 5.1.1.
 
 mod api_ops;
+#[cfg(test)]
+mod api_ops_tests;
 mod environment_transfer;
 pub use environment_transfer::EnvironmentTransferHook;
 
