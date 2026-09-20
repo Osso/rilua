@@ -173,7 +173,7 @@ pub(crate) fn closure_taint(
         return None;
     };
     let stamps = state.gc.tables.get(stamps)?;
-    let value = stamps.raw_get(Val::Num(f64::from(closure.index())), &state.gc.string_arena);
+    let value = stamps.get_int(i64::from(closure.index()));
     decode_taint_name(state, value)
 }
 
