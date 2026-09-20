@@ -4,6 +4,8 @@ fn run(code: &str) {
     let mut lua = Lua::new().unwrap();
     rilua::table_security::register_table_security(&mut lua).unwrap();
     lua.exec("debug.settaintmode(true)").unwrap();
+    lua.exec("function call_tainted(fn) debug.setstacktaint('Addon'); return fn() end")
+        .unwrap();
     lua.exec(code).unwrap();
 }
 
@@ -23,14 +25,12 @@ fn vm_security_rejects_tainted_existing_missing_and_numeric_access() {
             function() protected[1] = 99 end,
         }
         for index, access in ipairs(accessors) do
-            debug.setobjecttaint(access, 'Addon')
-            assert(not pcall(access), 'accessor ' .. index .. ' bypassed security')
+            assert(not pcall(call_tainted, access), 'accessor ' .. index .. ' bypassed security')
         end
         assert(protected.existing == 17 and protected.missing == nil)
         assert(protected[1] == 23)
         local function normal() ordinary.existing = 32; return ordinary.existing end
-        debug.setobjecttaint(normal, 'Addon')
-        assert(normal() == 32)
+        assert(call_tainted(normal) == 32)
     "#);
 }
 
@@ -45,20 +45,16 @@ fn vm_security_checks_proxy_before_metamethod_and_redirected_target() {
         settablesecurity(protected, 0)
         local function read() return protected.x end
         local function write() protected.x = 2 end
-        debug.setobjecttaint(read, 'Addon')
-        debug.setobjecttaint(write, 'Addon')
-        assert(not pcall(read), 'proxy read bypassed security')
-        assert(not pcall(write), 'proxy write bypassed security')
+        assert(not pcall(call_tainted, read), 'proxy read bypassed security')
+        assert(not pcall(call_tainted, write), 'proxy write bypassed security')
         assert(calls == 0)
         local backing = { x = 9 }
         settablesecurity(backing, 0)
         local proxy = setmetatable({}, { __index = backing, __newindex = backing })
         local function redirected_read() return proxy.x end
         local function redirected_write() proxy.y = 2 end
-        debug.setobjecttaint(redirected_read, 'Addon')
-        debug.setobjecttaint(redirected_write, 'Addon')
-        assert(not pcall(redirected_read), 'redirected read bypassed security')
-        assert(not pcall(redirected_write), 'redirected write bypassed security')
+        assert(not pcall(call_tainted, redirected_read), 'redirected read bypassed security')
+        assert(not pcall(call_tainted, redirected_write), 'redirected write bypassed security')
         assert(backing.x == 9 and backing.y == nil)
         local function_proxy = setmetatable({}, {
             __index = function(_, key) return backing[key] end,
@@ -66,10 +62,8 @@ fn vm_security_checks_proxy_before_metamethod_and_redirected_target() {
         })
         local function function_read() return function_proxy.x end
         local function function_write() function_proxy.z = 2 end
-        debug.setobjecttaint(function_read, 'Addon')
-        debug.setobjecttaint(function_write, 'Addon')
-        assert(not pcall(function_read), 'function read bypassed security')
-        assert(not pcall(function_write), 'function write bypassed security')
+        assert(not pcall(call_tainted, function_read), 'function read bypassed security')
+        assert(not pcall(call_tainted, function_write), 'function write bypassed security')
         assert(backing.z == nil)
     "#);
 }
