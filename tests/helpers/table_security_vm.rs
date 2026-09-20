@@ -3,6 +3,7 @@ use rilua::Lua;
 fn run(code: &str) {
     let mut lua = Lua::new().unwrap();
     rilua::table_security::register_table_security(&mut lua).unwrap();
+    lua.exec("debug.settaintmode(true)").unwrap();
     lua.exec(code).unwrap();
 }
 
