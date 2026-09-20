@@ -24,7 +24,13 @@ Raw reads/writes, iteration (including previously captured iterators), unpack, t
 
 Infallible embedding-only `Table::raw_len`, `LuaApi::table_raw_len`, and `LuaApiMut::get_global_val` remain trusted host operations. A host exposing them to Lua must check access first. Direct arena access is likewise trusted; this is not a sandbox against a malicious embedder.
 
-`tests/helpers/table_security_stdlib.rs` covers these stdlib boundaries, secure access, tainted rejection without mutation, secret-key rejection/unwrapping, retained iterators, and Lua-invoked Rust functions using checked handles. Taint fixtures use live `debug.setstacktaint`; closure-object stamping through `pcall` is not established by this proof.
+`tests/helpers/table_security_stdlib.rs` covers these stdlib boundaries, secure access, tainted rejection without mutation, secret-key rejection/unwrapping, retained iterators, and Lua-invoked Rust functions using checked handles. These stdlib fixtures use live `debug.setstacktaint`. Separate `tests/helpers/closure_taint.rs` regressions cover closure-object stamps through ordinary calls, protected/nested calls, tail calls, delayed callbacks, and coroutine entry.
+
+## Closure stamp propagation
+
+Call entry reads the existing `debug.setobjecttaint` registry stamp and applies it to the new Lua or Rust call frame. Tail-call frame reuse preserves callee stamps and an insecure caller's taint. Secure calls temporarily clear the caller chain and restore it on return or error, without removing the callee's own stamp. Clearing an object's stamp with nil restores untainted entry from an untainted caller.
+
+The pre-existing numeric closure-index stamp registry is unchanged; generation reuse and native taint conformance are not established by this change.
 
 ## Proof scope
 
