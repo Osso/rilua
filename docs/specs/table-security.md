@@ -18,6 +18,14 @@ The API documentation gives option values 0–2 and wrap/unwrap descriptions; th
 
 This core supplies validators, not automatic enforcement of every Lua/host operation. Interpreter and standard-library callers must wire the validator separately. Full secret arithmetic/type behavior, native equality of distinct wrappers, automatic wrapping of table contents, and general secret-value VM semantics are not implemented here.
 
+## Lua-facing standard-library boundaries
+
+Raw reads/writes, iteration (including previously captured iterators), unpack, table-library operations, normal/debug metatable access, `secureexecuterange`, and `os.time` date-table reads check the caller before accessing protected tables. Table-library operations recheck after callbacks before further reads or writes. Fallible public table handles and `Lua::table_next` apply the same checks when used by Lua-invoked Rust functions.
+
+Infallible embedding-only `Table::raw_len`, `LuaApi::table_raw_len`, and `LuaApiMut::get_global_val` remain trusted host operations. A host exposing them to Lua must check access first. Direct arena access is likewise trusted; this is not a sandbox against a malicious embedder.
+
+`tests/helpers/table_security_stdlib.rs` covers these stdlib boundaries, secure access, tainted rejection without mutation, secret-key rejection/unwrapping, retained iterators, and Lua-invoked Rust functions using checked handles. Taint fixtures use live `debug.setstacktaint`; closure-object stamping through `pcall` is not established by this proof.
+
 ## Proof scope
 
 `tests/helpers/table_security.rs` exercises opt-in publication, arguments/arity, accumulated restrictions, caller taint, opaque key rejection, unwrap identity, and GC reachability/collection. It belongs to the existing integration binary, not a separate Cargo target.
