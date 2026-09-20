@@ -162,6 +162,21 @@ fn setobjecttaint(state: &mut LuaState) -> LuaResult<u32> {
     Ok(0)
 }
 
+/// Read the existing closure stamp without creating registry state during calls.
+pub(crate) fn closure_taint(
+    state: &mut LuaState,
+    closure: crate::vm::gc::arena::GcRef<crate::vm::closure::Closure>,
+) -> Option<String> {
+    let key = state.gc.intern_string_static(CLOSURE_TAINT_KEY.as_bytes());
+    let registry = state.gc.tables.get(state.registry)?;
+    let Val::Table(stamps) = registry.get_str(key, &state.gc.string_arena) else {
+        return None;
+    };
+    let stamps = state.gc.tables.get(stamps)?;
+    let value = stamps.raw_get(Val::Num(f64::from(closure.index())), &state.gc.string_arena);
+    decode_taint_name(state, value)
+}
+
 fn get_or_create_closure_taint_table(state: &mut LuaState) -> crate::vm::gc::arena::GcRef<Table> {
     let key = state.gc.intern_string_static(CLOSURE_TAINT_KEY.as_bytes());
     if let Some(reg) = state.gc.tables.get(state.registry)

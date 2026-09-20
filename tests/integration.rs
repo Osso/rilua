@@ -7,6 +7,9 @@
 
 use std::process::Command;
 
+#[path = "helpers/closure_taint.rs"]
+mod closure_taint;
+
 #[path = "helpers/table_security.rs"]
 mod table_security;
 #[path = "helpers/table_security_stdlib.rs"]

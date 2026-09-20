@@ -637,6 +637,7 @@ impl LuaState {
         let saved_pc = self.call_stack[self.ci].saved_pc;
         let _ = saved_pc; // used for restoration in poscall
 
+        let closure_taint = crate::stdlib::taint::closure_taint(self, closure_ref);
         let closure = self
             .gc
             .closures
@@ -678,6 +679,7 @@ impl LuaState {
                 // Push new CallInfo.
                 let mut ci = CallInfo::new(func_idx, new_base, ci_top, num_results);
                 ci.is_lua = true;
+                ci.taint = closure_taint;
                 self.push_ci(ci);
                 self.base = new_base;
 
@@ -699,7 +701,8 @@ impl LuaState {
                 self.ensure_stack_len(self.top + LUA_MINSTACK);
 
                 let ci_top = self.top + LUA_MINSTACK;
-                let ci = CallInfo::new(func_idx, func_idx + 1, ci_top, num_results);
+                let mut ci = CallInfo::new(func_idx, func_idx + 1, ci_top, num_results);
+                ci.taint = closure_taint;
                 self.push_ci(ci);
                 self.base = func_idx + 1;
 
