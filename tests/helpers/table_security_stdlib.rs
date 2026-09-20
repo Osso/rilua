@@ -12,7 +12,7 @@ fn protected_tables_reject_tainted_stdlib_access() {
     secure_lua()
         .exec(
             r#"
-        local t = {3, 1, 2, label = 'private'}
+        local t = {3, 1, 2, label = 'private', year = 2026, month = 9, day = 19}
         settablesecurity(t, 0)
         local operations = {
             function() return rawget(t, 1) end,
@@ -26,6 +26,7 @@ fn protected_tables_reject_tainted_stdlib_access() {
             function() return debug.getmetatable(t) end,
             function() debug.setmetatable(t, {}) end,
             function() secureexecuterange(t, function() end) end,
+            function() return os.time(t) end,
             function() return table.getn(t) end,
             function() return table.maxn(t) end,
             function() return table.concat(t, ',') end,
