@@ -3,7 +3,7 @@ use rilua::Lua;
 fn secure_lua() -> Lua {
     let mut lua = Lua::new().unwrap();
     rilua::table_security::register_table_security(&mut lua).unwrap();
-    lua.exec("debug.settaintmode(true)").unwrap();
+    lua.exec("debug.settaintmode(true); function call_tainted(fn) debug.setstacktaint('TestAddon'); return fn() end").unwrap();
     lua
 }
 
@@ -33,8 +33,7 @@ fn protected_tables_reject_tainted_stdlib_access() {
             function() table.foreachi(t, function() end) end,
         }
         for _, operation in ipairs(operations) do
-            debug.setobjecttaint(operation, 'TestAddon')
-            local ok, message = pcall(operation)
+            local ok, message = pcall(call_tainted, operation)
             assert(not ok and string.find(message, 'taint'), tostring(message))
         end
         assert(rawget(t, 1) == 3 and rawget(t, 'label') == 'private')
@@ -78,10 +77,8 @@ fn captured_iterators_recheck_tainted_callers() {
         local function pair()
             return next_pair(t)
         end
-        debug.setobjecttaint(iterate, 'TestAddon')
-        debug.setobjecttaint(pair, 'TestAddon')
-        assert(not pcall(iterate))
-        assert(not pcall(pair))
+        assert(not pcall(call_tainted, iterate))
+        assert(not pcall(call_tainted, pair))
     "#,
         )
         .unwrap();
