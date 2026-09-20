@@ -175,6 +175,8 @@ pub struct Table {
     /// Uses a separate map instead of per-Node storage to avoid bloating
     /// the hot path — most tables never have any tainted keys.
     slot_taint: Option<std::collections::HashMap<TaintKey, String>>,
+    /// Opt-in table access policy; separate from metamethod cache flags.
+    pub(crate) security_flags: u8,
 }
 
 /// Key type for the per-slot taint map.
@@ -199,6 +201,7 @@ impl Table {
             flags: 0,
             backing: None,
             slot_taint: None,
+            security_flags: 0,
         }
     }
 
@@ -219,6 +222,7 @@ impl Table {
                 flags: 0,
                 backing: None,
                 slot_taint: None,
+                security_flags: 0,
             }
         } else {
             let log2 = ceil_log2(hash_size);
@@ -233,6 +237,7 @@ impl Table {
                 flags: 0,
                 backing: None,
                 slot_taint: None,
+                security_flags: 0,
             }
         }
     }

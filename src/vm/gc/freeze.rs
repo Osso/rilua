@@ -204,11 +204,15 @@ impl Gc {
         };
         let metatable = ud.metatable();
         let env = ud.env();
+        let secret = ud.secret_value();
         if let Some(mt) = metatable {
             queue.push(FreezeTarget::Table(mt));
         }
         if let Some(env) = env {
             queue.push(FreezeTarget::Table(env));
+        }
+        if let Some(value) = secret {
+            enqueue_val(value, queue);
         }
     }
 }

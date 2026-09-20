@@ -362,9 +362,9 @@ impl Gc {
         if !self.userdata.mark_white_unfrozen(r, Color::Black) {
             return;
         }
-        let (mt, env) = {
+        let (mt, env, secret) = {
             if let Some(ud) = self.userdata.get(r) {
-                (ud.metatable(), ud.env())
+                (ud.metatable(), ud.env(), ud.secret_value())
             } else {
                 return;
             }
@@ -374,6 +374,9 @@ impl Gc {
         }
         if let Some(env) = env {
             self.mark_table(env);
+        }
+        if let Some(value) = secret {
+            self.mark_value(value);
         }
     }
 
@@ -919,9 +922,9 @@ impl Gc {
         let tmudata: Vec<GcRef<Userdata>> = self.gc_state.tmudata.clone();
         for r in &tmudata {
             // Mark metatable and environment so they survive sweep.
-            let (mt, env) = {
+            let (mt, env, secret) = {
                 if let Some(ud) = self.userdata.get(*r) {
-                    (ud.metatable(), ud.env())
+                    (ud.metatable(), ud.env(), ud.secret_value())
                 } else {
                     continue;
                 }
@@ -932,6 +935,9 @@ impl Gc {
             }
             if let Some(env) = env {
                 self.mark_table(env);
+            }
+            if let Some(value) = secret {
+                self.mark_value(value);
             }
         }
     }

@@ -77,6 +77,8 @@ pub struct Userdata {
     /// iteration order doesn't match allocation order after slot reuse,
     /// we track the allocation sequence explicitly.
     alloc_seq: u64,
+    /// Private, GC-traced payload for opt-in opaque secret wrappers.
+    secret_value: Option<Val>,
 }
 
 impl Userdata {
@@ -88,6 +90,7 @@ impl Userdata {
             env: None,
             finalized: false,
             alloc_seq: 0,
+            secret_value: None,
         }
     }
 
@@ -99,7 +102,19 @@ impl Userdata {
             env: None,
             finalized: false,
             alloc_seq: 0,
+            secret_value: None,
         }
+    }
+
+    pub(crate) fn secret(value: Val) -> Self {
+        Self {
+            secret_value: Some(value),
+            ..Self::new(Box::new(()))
+        }
+    }
+
+    pub(crate) fn secret_value(&self) -> Option<Val> {
+        self.secret_value
     }
 
     /// Returns the allocation sequence number.

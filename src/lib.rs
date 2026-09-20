@@ -32,6 +32,7 @@ pub mod error;
 pub mod handles;
 pub(crate) mod platform;
 pub mod stdlib;
+pub mod table_security;
 pub mod vm;
 
 // Re-exports for public API.
