@@ -7,6 +7,14 @@
 
 use std::process::Command;
 
+#[path = "helpers/table_security.rs"]
+mod table_security;
+#[path = "helpers/table_security_stdlib.rs"]
+mod table_security_stdlib;
+
+#[path = "helpers/table_security_vm.rs"]
+mod table_security_vm;
+
 /// Helper: run `rilua -e <code>` and return (stdout, stderr, exit_code).
 fn run_rilua(code: &str) -> (String, String, i32) {
     let output = Command::new(env!("CARGO_BIN_EXE_rilua"))
