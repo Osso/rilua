@@ -1873,6 +1873,10 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                             // Update saved_pc from the new frame.
                             state.call_stack[prev_ci].saved_pc =
                                 state.call_stack[state.ci].saved_pc;
+                            state.call_stack[prev_ci].taint = state.call_stack[state.ci]
+                                .taint
+                                .clone()
+                                .or_else(|| state.call_stack[prev_ci].taint.clone());
                             state.call_stack[prev_ci].tail_calls += 1;
 
                             // Remove the new frame -- the previous frame

@@ -322,22 +322,19 @@ fn securecall(state: &mut LuaState) -> LuaResult<u32> {
         return Ok(0);
     }
 
-    let saved_taint = state
-        .call_stack
-        .get(state.ci)
-        .and_then(|ci| ci.taint.clone());
-
-    // Clear taint for the duration of the call
-    if let Some(ci) = state.call_stack.get_mut(state.ci) {
-        ci.taint = None;
-    }
+    // Security queries inspect ancestors, so suspend the entire caller chain.
+    // The callee still receives its own closure stamp through precall.
+    let saved_taints: Vec<_> = state.call_stack[..=state.ci]
+        .iter_mut()
+        .map(|frame| frame.taint.take())
+        .collect();
 
     let func_pos = state.base;
     let result = state.call_function(func_pos, LUA_MULTRET);
     let n_results = state.top.saturating_sub(func_pos) as u32;
 
-    if let Some(ci) = state.call_stack.get_mut(state.ci) {
-        ci.taint = saved_taint;
+    for (frame, taint) in state.call_stack.iter_mut().zip(saved_taints) {
+        frame.taint = taint;
     }
 
     result?;
