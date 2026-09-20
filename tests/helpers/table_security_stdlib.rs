@@ -90,12 +90,12 @@ fn captured_iterators_recheck_tainted_callers() {
 #[test]
 fn host_functions_using_handles_cannot_bypass_caller_security() {
     use rilua::vm::state::LuaState;
-    use rilua::{LuaApiMut, LuaResult, Val};
+    use rilua::{FromLua, LuaApiMut, LuaResult, Val};
     fn read(state: &mut LuaState) -> LuaResult<u32> {
         let Val::Table(reference) = state.stack_get(state.base) else {
             panic!("table fixture")
         };
-        let handle = rilua::Table(reference);
+        let handle = rilua::Table::from_lua(Val::Table(reference), state)?;
         let value = handle.raw_get(state, Val::Num(1.0))?;
         state.push(value);
         Ok(1)
@@ -104,14 +104,18 @@ fn host_functions_using_handles_cannot_bypass_caller_security() {
         let Val::Table(reference) = state.stack_get(state.base) else {
             panic!("table fixture")
         };
-        rilua::Table(reference).raw_set(state, Val::Num(1.0), Val::Num(99.0))?;
+        rilua::Table::from_lua(Val::Table(reference), state)?.raw_set(
+            state,
+            Val::Num(1.0),
+            Val::Num(99.0),
+        )?;
         Ok(0)
     }
     fn metatable(state: &mut LuaState) -> LuaResult<u32> {
         let Val::Table(reference) = state.stack_get(state.base) else {
             panic!("table fixture")
         };
-        rilua::Table(reference).set_metatable(state, None)?;
+        rilua::Table::from_lua(Val::Table(reference), state)?.set_metatable(state, None)?;
         Ok(0)
     }
     let mut lua = secure_lua();
