@@ -132,3 +132,57 @@ fn table_security_flags_do_not_survive_collected_table_slot_reuse() {
     lua.state_mut().call_stack[0].taint = Some("Addon".to_owned());
     assert!(check_table_access(lua.state(), replacement, Some(Val::Num(1.0))).is_ok());
 }
+
+#[test]
+fn table_security_frozen_wrapper_graph_keeps_private_payload() {
+    let mut lua = secure_lua();
+    let root = lua.state_mut().gc.alloc_table(Table::new());
+    let payload = lua.state_mut().gc.alloc_table(Table::new());
+    let wrapper = wrap_secret(lua.state_mut(), Val::Table(payload)).unwrap();
+    {
+        let state = lua.state_mut();
+        state
+            .gc
+            .tables
+            .get_mut(root)
+            .unwrap()
+            .raw_set(Val::Num(1.0), wrapper, &state.gc.string_arena)
+            .unwrap();
+        state.gc.freeze_table(root);
+    }
+    lua.exec("collectgarbage('collect'); collectgarbage('collect')")
+        .unwrap();
+    assert!(lua.state().gc.tables.get(payload).is_some());
+    assert!(
+        matches!(rilua::table_security::unwrap_secret(lua.state(), wrapper).unwrap(), Val::Table(value) if value == payload)
+    );
+}
+
+#[test]
+fn table_security_reused_arena_slots_drop_restrictions_and_secret_payload() {
+    let mut lua = secure_lua();
+    let state = lua.state_mut();
+    let table = state.gc.alloc_table(Table::new());
+    set_table_security(state, table, 0).unwrap();
+    let wrapped = wrap_secret(state, Val::Table(table)).unwrap();
+    let Val::Userdata(secret) = wrapped else {
+        panic!("expected wrapper")
+    };
+    state.gc.userdata.free(secret);
+    state.gc.tables.free(table);
+    let replacement = state.gc.alloc_table(Table::new());
+    let userdata = state
+        .gc
+        .alloc_userdata(rilua::vm::value::Userdata::new(Box::new(())));
+    assert_eq!(table.index(), replacement.index());
+    assert_ne!(table.generation(), replacement.generation());
+    assert_eq!(secret.index(), userdata.index());
+    assert_ne!(secret.generation(), userdata.generation());
+    state.call_stack[0].taint = Some("Addon".to_owned());
+    assert!(check_table_access(state, replacement, None).is_ok());
+    assert!(!rilua::table_security::is_secret_value(
+        state,
+        Val::Userdata(userdata)
+    ));
+    assert!(!rilua::table_security::is_secret_value(state, wrapped));
+}

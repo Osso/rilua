@@ -90,19 +90,19 @@ pub fn wrap_secret(state: &mut LuaState, value: Val) -> LuaResult<Val> {
 
 /// Unwrap to the original value, preserving table and ordinary-key identity.
 pub fn unwrap_secret(state: &LuaState, value: Val) -> LuaResult<Val> {
-    if !is_secret_value(state, value) {
-        return Ok(value);
-    }
-    ensure_secure_caller(state)?;
     let Val::Userdata(reference) = value else {
-        unreachable!()
+        return Ok(value);
     };
-    Ok(state
+    let Some(payload) = state
         .gc
         .userdata
         .get(reference)
         .and_then(Userdata::secret_value)
-        .unwrap_or(value))
+    else {
+        return Ok(value);
+    };
+    ensure_secure_caller(state)?;
+    Ok(payload)
 }
 
 fn ensure_secure_caller(state: &LuaState) -> LuaResult<()> {
