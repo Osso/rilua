@@ -22,9 +22,9 @@ fn vm_security_rejects_tainted_existing_missing_and_numeric_access() {
             function() protected.missing = 99 end,
             function() protected[1] = 99 end,
         }
-        for _, access in ipairs(accessors) do
+        for index, access in ipairs(accessors) do
             debug.setobjecttaint(access, 'Addon')
-            assert(not pcall(access))
+            assert(not pcall(access), 'accessor ' .. index .. ' bypassed security')
         end
         assert(protected.existing == 17 and protected.missing == nil)
         assert(protected[1] == 23)
@@ -47,7 +47,8 @@ fn vm_security_checks_proxy_before_metamethod_and_redirected_target() {
         local function write() protected.x = 2 end
         debug.setobjecttaint(read, 'Addon')
         debug.setobjecttaint(write, 'Addon')
-        assert(not pcall(read) and not pcall(write))
+        assert(not pcall(read), 'proxy read bypassed security')
+        assert(not pcall(write), 'proxy write bypassed security')
         assert(calls == 0)
         local backing = { x = 9 }
         settablesecurity(backing, 0)
@@ -56,7 +57,8 @@ fn vm_security_checks_proxy_before_metamethod_and_redirected_target() {
         local function redirected_write() proxy.y = 2 end
         debug.setobjecttaint(redirected_read, 'Addon')
         debug.setobjecttaint(redirected_write, 'Addon')
-        assert(not pcall(redirected_read) and not pcall(redirected_write))
+        assert(not pcall(redirected_read), 'redirected read bypassed security')
+        assert(not pcall(redirected_write), 'redirected write bypassed security')
         assert(backing.x == 9 and backing.y == nil)
         local function_proxy = setmetatable({}, {
             __index = function(_, key) return backing[key] end,
@@ -66,7 +68,8 @@ fn vm_security_checks_proxy_before_metamethod_and_redirected_target() {
         local function function_write() function_proxy.z = 2 end
         debug.setobjecttaint(function_read, 'Addon')
         debug.setobjecttaint(function_write, 'Addon')
-        assert(not pcall(function_read) and not pcall(function_write))
+        assert(not pcall(function_read), 'function read bypassed security')
+        assert(not pcall(function_write), 'function write bypassed security')
         assert(backing.z == nil)
     "#);
 }
