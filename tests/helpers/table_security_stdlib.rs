@@ -23,6 +23,9 @@ fn protected_tables_reject_tainted_stdlib_access() {
             function() return unpack(t) end,
             function() return getmetatable(t) end,
             function() setmetatable(t, {}) end,
+            function() return debug.getmetatable(t) end,
+            function() debug.setmetatable(t, {}) end,
+            function() secureexecuterange(t, function() end) end,
             function() return table.getn(t) end,
             function() return table.maxn(t) end,
             function() return table.concat(t, ',') end,
@@ -82,4 +85,50 @@ fn captured_iterators_recheck_tainted_callers() {
     "#,
         )
         .unwrap();
+}
+
+#[test]
+fn host_functions_using_handles_cannot_bypass_caller_security() {
+    use rilua::vm::state::LuaState;
+    use rilua::{LuaApiMut, LuaResult, Val};
+    fn read(state: &mut LuaState) -> LuaResult<u32> {
+        let Val::Table(reference) = state.stack_get(state.base) else {
+            panic!("table fixture")
+        };
+        let handle = rilua::Table(reference);
+        let value = handle.raw_get(state, Val::Num(1.0))?;
+        state.push(value);
+        Ok(1)
+    }
+    fn write(state: &mut LuaState) -> LuaResult<u32> {
+        let Val::Table(reference) = state.stack_get(state.base) else {
+            panic!("table fixture")
+        };
+        rilua::Table(reference).raw_set(state, Val::Num(1.0), Val::Num(99.0))?;
+        Ok(0)
+    }
+    fn metatable(state: &mut LuaState) -> LuaResult<u32> {
+        let Val::Table(reference) = state.stack_get(state.base) else {
+            panic!("table fixture")
+        };
+        rilua::Table(reference).set_metatable(state, None)?;
+        Ok(0)
+    }
+    let mut lua = secure_lua();
+    lua.register_function("host_read", read).unwrap();
+    lua.register_function("host_write", write).unwrap();
+    lua.register_function("host_metatable", metatable).unwrap();
+    lua.exec(
+        r#"
+        local t = {42}
+        settablesecurity(t, 0)
+        assert(host_read(t) == 42)
+        for _, operation in ipairs({host_read, host_write, host_metatable}) do
+            local function invoke() return operation(t) end
+            assert(not pcall(call_tainted, invoke))
+        end
+        assert(host_read(t) == 42)
+    "#,
+    )
+    .unwrap();
 }
