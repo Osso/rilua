@@ -56,7 +56,10 @@ fn simple_error(msg: String) -> LuaError {
 /// Validates that argument `n` (0-indexed) is a table and returns its `GcRef`.
 fn check_table(state: &LuaState, name: &str, n: usize) -> LuaResult<GcRef<Table>> {
     match arg(state, n) {
-        Val::Table(r) => Ok(r),
+        Val::Table(r) => {
+            crate::table_security::check_table_access(state, r, None)?;
+            Ok(r)
+        }
         _ => Err(bad_argument(name, n + 1, "table expected")),
     }
 }
@@ -66,16 +69,18 @@ fn check_table(state: &LuaState, name: &str, n: usize) -> LuaResult<GcRef<Table>
 // ---------------------------------------------------------------------------
 
 /// Raw get by integer key.
-fn get_raw(state: &LuaState, tref: GcRef<Table>, idx: i64) -> Val {
-    state
+fn get_raw(state: &LuaState, tref: GcRef<Table>, idx: i64) -> LuaResult<Val> {
+    crate::table_security::check_table_access(state, tref, None)?;
+    Ok(state
         .gc
         .tables
         .get(tref)
-        .map_or(Val::Nil, |t| t.get_int(idx))
+        .map_or(Val::Nil, |t| t.get_int(idx)))
 }
 
 /// Raw set by numeric key.
 fn set_raw(state: &mut LuaState, tref: GcRef<Table>, idx: i64, val: Val) -> LuaResult<()> {
+    crate::table_security::check_table_access(state, tref, None)?;
     let strings = &state.gc.string_arena;
     let t = state
         .gc
@@ -95,6 +100,7 @@ fn swap_sort_values(
     right_idx: i64,
     right_val: Val,
 ) -> LuaResult<()> {
+    crate::table_security::check_table_access(state, tref, None)?;
     if left_idx == right_idx {
         return Ok(());
     }
@@ -120,12 +126,13 @@ fn swap_sort_values(
 }
 
 /// Get the length of a table (#t).
-fn table_len(state: &LuaState, tref: GcRef<Table>) -> usize {
-    state
+fn table_len(state: &LuaState, tref: GcRef<Table>) -> LuaResult<usize> {
+    crate::table_security::check_table_access(state, tref, None)?;
+    Ok(state
         .gc
         .tables
         .get(tref)
-        .map_or(0, |t| t.len(&state.gc.string_arena))
+        .map_or(0, |t| t.len(&state.gc.string_arena)))
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +141,7 @@ fn table_len(state: &LuaState, tref: GcRef<Table>) -> usize {
 
 pub fn tab_getn(state: &mut LuaState) -> LuaResult<u32> {
     let tref = check_table(state, "getn", 0)?;
-    let n = table_len(state, tref);
+    let n = table_len(state, tref)?;
     #[allow(clippy::cast_precision_loss)]
     state.stack_set(state.base, Val::Num(n as f64));
     state.top = state.base + 1;
@@ -218,7 +225,7 @@ pub fn tab_concat(state: &mut LuaState) -> LuaResult<u32> {
     let j = match arg(state, 3) {
         Val::Nil => {
             #[allow(clippy::cast_possible_wrap)]
-            let len = table_len(state, tref) as i64;
+            let len = table_len(state, tref)? as i64;
             len
         }
         Val::Num(n) => n as i64,
@@ -231,7 +238,7 @@ pub fn tab_concat(state: &mut LuaState) -> LuaResult<u32> {
         if idx != i {
             result.extend_from_slice(&sep);
         }
-        let val = get_raw(state, tref, idx);
+        let val = get_raw(state, tref, idx)?;
         match val {
             Val::Str(r) => {
                 let data = state
@@ -265,7 +272,7 @@ pub fn tab_concat(state: &mut LuaState) -> LuaResult<u32> {
 pub fn tab_insert(state: &mut LuaState) -> LuaResult<u32> {
     let tref = check_table(state, "insert", 0)?;
     #[allow(clippy::cast_possible_wrap)]
-    let e = table_len(state, tref) as i64 + 1; // first empty element
+    let e = table_len(state, tref)? as i64 + 1; // first empty element
 
     let n = nargs(state);
     match n {
@@ -285,7 +292,7 @@ pub fn tab_insert(state: &mut LuaState) -> LuaResult<u32> {
             // Shift elements up
             let mut idx = end;
             while idx > pos {
-                let v = get_raw(state, tref, idx - 1);
+                let v = get_raw(state, tref, idx - 1)?;
                 set_raw(state, tref, idx, v)?;
                 idx -= 1;
             }
@@ -309,7 +316,7 @@ pub fn tab_insert(state: &mut LuaState) -> LuaResult<u32> {
 pub fn tab_remove(state: &mut LuaState) -> LuaResult<u32> {
     let tref = check_table(state, "remove", 0)?;
     #[allow(clippy::cast_possible_wrap)]
-    let e = table_len(state, tref) as i64;
+    let e = table_len(state, tref)? as i64;
 
     if e == 0 {
         state.top = state.base;
@@ -323,12 +330,12 @@ pub fn tab_remove(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     // Save the removed value.
-    let removed = get_raw(state, tref, pos);
+    let removed = get_raw(state, tref, pos)?;
 
     // Shift elements down.
     let mut p = pos;
     while p < e {
-        let v = get_raw(state, tref, p + 1);
+        let v = get_raw(state, tref, p + 1)?;
         set_raw(state, tref, p, v)?;
         p += 1;
     }
@@ -352,9 +359,10 @@ pub fn tab_foreach(state: &mut LuaState) -> LuaResult<u32> {
         return Err(bad_argument("foreach", 2, "function expected"));
     };
 
-    // Iterate all keys via raw next.
+    // Iterate all keys via raw next, rechecking after each user callback.
     let mut key = Val::Nil;
     loop {
+        crate::table_security::check_table_access(state, tref, Some(key))?;
         let next = {
             let t = state
                 .gc
@@ -403,10 +411,10 @@ pub fn tab_foreachi(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     #[allow(clippy::cast_possible_wrap)]
-    let n = table_len(state, tref) as i64;
+    let n = table_len(state, tref)? as i64;
 
     for i in 1..=n {
-        let v = get_raw(state, tref, i);
+        let v = get_raw(state, tref, i)?;
 
         // Call f(i, value).
         let call_base = state.top;
@@ -444,7 +452,7 @@ pub fn tab_foreachi(state: &mut LuaState) -> LuaResult<u32> {
 pub fn tab_sort(state: &mut LuaState) -> LuaResult<u32> {
     let tref = check_table(state, "sort", 0)?;
     #[allow(clippy::cast_possible_wrap)]
-    let n = table_len(state, tref) as i64;
+    let n = table_len(state, tref)? as i64;
 
     // Optional comparison function (arg 1).
     let comp = match arg(state, 1) {
@@ -508,7 +516,7 @@ fn scan_sort_forward(
         if idx > upper {
             return Err(simple_error("invalid order function for sorting".into()));
         }
-        let value = get_raw(state, tref, idx);
+        let value = get_raw(state, tref, idx)?;
         if !sort_comp(state, value, pivot, comp)? {
             return Ok((idx, value));
         }
@@ -528,7 +536,7 @@ fn scan_sort_backward(
         if idx < lower {
             return Err(simple_error("invalid order function for sorting".into()));
         }
-        let value = get_raw(state, tref, idx);
+        let value = get_raw(state, tref, idx)?;
         if !sort_comp(state, pivot, value, comp)? {
             return Ok((idx, value));
         }
@@ -624,8 +632,8 @@ fn auxsort(
 ) -> LuaResult<()> {
     while l < u {
         // Sort elements a[l], a[u].
-        let al = get_raw(state, tref, l);
-        let au = get_raw(state, tref, u);
+        let al = get_raw(state, tref, l)?;
+        let au = get_raw(state, tref, u)?;
         if sort_comp(state, au, al, comp)? {
             // a[u] < a[l]: swap
             swap_sort_values(state, tref, l, al, u, au)?;
@@ -635,14 +643,14 @@ fn auxsort(
         }
 
         let mid = i64::midpoint(l, u);
-        let amid = get_raw(state, tref, mid);
-        let al = get_raw(state, tref, l);
+        let amid = get_raw(state, tref, mid)?;
+        let al = get_raw(state, tref, l)?;
 
         if sort_comp(state, amid, al, comp)? {
             // a[mid] < a[l]: swap
             swap_sort_values(state, tref, mid, amid, l, al)?;
         } else {
-            let au = get_raw(state, tref, u);
+            let au = get_raw(state, tref, u)?;
             if sort_comp(state, au, amid, comp)? {
                 // a[u] < a[mid]: swap
                 swap_sort_values(state, tref, mid, amid, u, au)?;
@@ -653,8 +661,8 @@ fn auxsort(
         }
 
         // Pivot = a[mid]. Swap pivot with a[u-1].
-        let pivot = get_raw(state, tref, mid);
-        let au1 = get_raw(state, tref, u - 1);
+        let pivot = get_raw(state, tref, mid)?;
+        let au1 = get_raw(state, tref, u - 1)?;
         swap_sort_values(state, tref, mid, pivot, u - 1, au1)?;
 
         // Partition: a[l..i] <= pivot <= a[j..u]
@@ -676,7 +684,7 @@ fn auxsort(
         }
 
         // Place pivot at position i.
-        let ai = get_raw(state, tref, i);
+        let ai = get_raw(state, tref, i)?;
         swap_sort_values(state, tref, u - 1, pivot, i, ai)?;
 
         // Recurse on smaller partition, loop on larger (tail recursion).

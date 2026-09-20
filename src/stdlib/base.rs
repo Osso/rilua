@@ -573,6 +573,8 @@ pub fn lua_setmetatable(state: &mut LuaState) -> LuaResult<u32> {
         return Err(bad_argument("setmetatable", 1, "table expected"));
     };
 
+    crate::table_security::check_table_access(state, table_ref, None)?;
+
     // Validate second argument is nil or table.
     let new_mt = match mt_val {
         Val::Nil => None,
@@ -620,6 +622,10 @@ pub fn lua_getmetatable(state: &mut LuaState) -> LuaResult<u32> {
     check_args("getmetatable", state, 1)?;
     let val = arg(state, 0);
 
+    if let Val::Table(table_ref) = val {
+        crate::table_security::check_table_access(state, table_ref, None)?;
+    }
+
     // Get the actual metatable.
     let mt = match val {
         Val::Table(r) => state.gc.tables.get(r).and_then(Table::metatable),
@@ -658,6 +664,7 @@ pub fn lua_rawget(state: &mut LuaState) -> LuaResult<u32> {
     let Val::Table(table_ref) = table_val else {
         return Err(bad_argument("rawget", 1, "table expected"));
     };
+    crate::table_security::check_table_access(state, table_ref, Some(key))?;
 
     let result = state
         .gc
@@ -681,6 +688,7 @@ pub fn lua_rawset(state: &mut LuaState) -> LuaResult<u32> {
     let Val::Table(table_ref) = table_val else {
         return Err(bad_argument("rawset", 1, "table expected"));
     };
+    crate::table_security::check_table_access(state, table_ref, Some(key))?;
 
     if state.gc.tables.is_frozen(table_ref) {
         return Err(crate::error::runtime_error(
@@ -789,6 +797,7 @@ pub fn lua_unpack(state: &mut LuaState) -> LuaResult<u32> {
     let Val::Table(table_ref) = list_val else {
         return Err(bad_argument("unpack", 1, "table expected"));
     };
+    crate::table_security::check_table_access(state, table_ref, None)?;
 
     #[allow(clippy::cast_possible_truncation)]
     let i = match i_val {
@@ -857,6 +866,7 @@ pub fn lua_next(state: &mut LuaState) -> LuaResult<u32> {
     let Val::Table(table_ref) = table_val else {
         return Err(bad_argument("next", 1, "table expected"));
     };
+    crate::table_security::check_table_access(state, table_ref, Some(key))?;
 
     let result = state
         .gc
@@ -885,9 +895,10 @@ pub fn lua_pairs(state: &mut LuaState) -> LuaResult<u32> {
     check_args("pairs", state, 1)?;
     let table_val = arg(state, 0);
 
-    let Val::Table(_) = table_val else {
+    let Val::Table(table_ref) = table_val else {
         return Err(bad_argument("pairs", 1, "table expected"));
     };
+    crate::table_security::check_table_access(state, table_ref, None)?;
 
     // Push the `next` function. We look it up from globals.
     // Hot: pairs() is one of the most-called Lua iterators.
@@ -919,6 +930,7 @@ fn ipairs_aux(state: &mut LuaState) -> LuaResult<u32> {
         return Err(bad_argument("ipairs", 2, "number expected"));
     };
 
+    crate::table_security::check_table_access(state, table_ref, None)?;
     let next_idx = idx_f + 1.0;
     #[allow(clippy::cast_precision_loss)]
     let key = Val::Num(next_idx);
@@ -948,9 +960,10 @@ pub fn lua_ipairs(state: &mut LuaState) -> LuaResult<u32> {
     check_args("ipairs", state, 1)?;
     let table_val = arg(state, 0);
 
-    let Val::Table(_) = table_val else {
+    let Val::Table(table_ref) = table_val else {
         return Err(bad_argument("ipairs", 1, "table expected"));
     };
+    crate::table_security::check_table_access(state, table_ref, None)?;
 
     // Create the ipairs_aux closure and push it.
     let closure = crate::vm::closure::Closure::Rust(crate::vm::closure::RustClosure::new(

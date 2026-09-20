@@ -384,6 +384,7 @@ fn collect_secure_range_entries(
     state: &LuaState,
     table_ref: crate::vm::gc::arena::GcRef<Table>,
 ) -> LuaResult<Vec<(Val, Val)>> {
+    crate::table_security::check_table_access(state, table_ref, None)?;
     let table = state
         .gc
         .tables

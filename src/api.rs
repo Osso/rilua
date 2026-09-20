@@ -29,7 +29,8 @@ pub trait LuaApi {
         table.raw_get(self.state(), key)
     }
 
-    /// Returns the raw length of a table (no `__len` metamethod).
+    /// Returns raw length for trusted embedding code (no `__len` metamethod).
+    /// Lua-facing callers must check table access before using this infallible API.
     fn table_raw_len(&self, table: &Table) -> i64 {
         table.raw_len(self.state())
     }
@@ -64,7 +65,8 @@ pub trait LuaApiMut: LuaApi {
         self.set_global_val(name, val)
     }
 
-    /// Reads a value from the global table by name.
+    /// Reads a value from the global table for trusted embedding code.
+    /// Lua-facing global reads must use the checked VM access path.
     fn get_global_val(&mut self, name: &str) -> Val {
         let state = self.state_mut();
         let key_ref = state.gc.intern_string(name.as_bytes());
@@ -80,6 +82,7 @@ pub trait LuaApiMut: LuaApi {
         let key_ref = state.gc.intern_string(name.as_bytes());
         let key = Val::Str(key_ref);
         let global = state.global;
+        crate::table_security::check_table_access(state, global, Some(key))?;
         let table = state.gc.tables.get_mut(global).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "global table not found".into(),

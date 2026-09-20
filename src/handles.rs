@@ -54,6 +54,7 @@ impl AnyUserData {
 impl Table {
     /// Gets a value by key without metamethod dispatch.
     pub fn raw_get(&self, state: &LuaState, key: Val) -> LuaResult<Val> {
+        crate::table_security::check_table_access(state, self.0, Some(key))?;
         let table = state.gc.tables.get(self.0).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "table has been collected".into(),
@@ -66,6 +67,7 @@ impl Table {
 
     /// Sets a value by key without metamethod dispatch.
     pub fn raw_set(&self, state: &mut LuaState, key: Val, value: Val) -> LuaResult<()> {
+        crate::table_security::check_table_access(state, self.0, Some(key))?;
         let table = state.gc.tables.get_mut(self.0).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "table has been collected".into(),
@@ -76,7 +78,8 @@ impl Table {
         table.raw_set(key, value, &state.gc.string_arena)
     }
 
-    /// Returns the raw length of the table (no `__len` metamethod).
+    /// Returns the raw length for trusted embedding code (no `__len` metamethod).
+    /// Lua-facing callers must check table access before using this infallible API.
     pub fn raw_len(&self, state: &LuaState) -> i64 {
         state
             .gc
@@ -87,6 +90,7 @@ impl Table {
 
     /// Sets or clears the metatable for this table.
     pub fn set_metatable(&self, state: &mut LuaState, mt: Option<Self>) -> LuaResult<()> {
+        crate::table_security::check_table_access(state, self.0, None)?;
         let table = state.gc.tables.get_mut(self.0).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "table has been collected".into(),
