@@ -337,6 +337,7 @@ fn val_to_string_bytes(val: Val, gc: &Gc, buffer: &mut Vec<u8>) {
 /// Raw table get.
 #[allow(dead_code)]
 fn table_get(state: &LuaState, table_ref: GcRef<Table>, key: Val) -> LuaResult<Val> {
+    crate::table_security::check_table_access(state, table_ref, Some(key))?;
     let table = state
         .gc
         .tables
@@ -352,6 +353,7 @@ pub(super) fn table_set(
     key: Val,
     value: Val,
 ) -> LuaResult<()> {
+    crate::table_security::check_table_access(state, table_ref, Some(key))?;
     ensure_table_not_frozen(state, table_ref)?;
     let table = state
         .gc
@@ -564,6 +566,7 @@ fn handle_table_gettable(
     resolved_key: ResolvedGetKey,
     result_reg: usize,
 ) -> LuaResult<GettableStep> {
+    crate::table_security::check_table_access(state, table_ref, Some(key))?;
     let table = state
         .gc
         .tables
@@ -685,6 +688,7 @@ fn handle_table_settable(
     key: Val,
     value: Val,
 ) -> LuaResult<SettableStep> {
+    crate::table_security::check_table_access(state, table_ref, Some(key))?;
     if table_has_no_metatable(state, table_ref)? {
         raw_set_new_slot(state, table_ref, key, value)?;
         return Ok(SettableStep::Done);

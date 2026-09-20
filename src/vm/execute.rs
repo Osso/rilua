@@ -186,6 +186,9 @@ fn try_plain_table_get_ref(
     key: Val,
     result_reg: usize,
 ) -> bool {
+    if crate::table_security::check_table_access(state, table_ref, Some(key)).is_err() {
+        return false;
+    }
     let resolved_key = resolve_plain_table_key(key, &state.gc);
     let Some(table) = state.gc.tables.get(table_ref) else {
         return false;
@@ -1184,6 +1187,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         continue;
                     }
 
+                    crate::table_security::check_table_access(state, root_global, Some(key))?;
                     if slot_idx == 0 {
                         state.stack_set(ra, snapshot);
                         continue;
@@ -1207,6 +1211,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         continue;
                     };
 
+                    crate::table_security::check_table_access(state, live_ref, Some(key))?;
                     if let Some(live_table) = state.gc.tables.get(live_ref)
                         && !(live_table.array_len() == 0 && live_table.hash_size() == 0)
                     {
@@ -2067,6 +2072,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         return Err(type_error(state, &proto, pc, base, a, "index"));
                     };
 
+                    crate::table_security::check_table_access(state, table_ref, None)?;
                     let offset = (c - 1) * LFIELDS_PER_FLUSH as usize;
                     let last = offset + n;
 
