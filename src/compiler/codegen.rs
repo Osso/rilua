@@ -472,6 +472,9 @@ impl Compiler {
 
     /// Patches all jumps in `list` to target the current pc.
     pub(crate) fn patch_to_here(&mut self, list: i32) {
+        // Mark the target before deferred patching so emit_nil cannot coalesce
+        // initialization into a preceding branch that these jumps skip.
+        self.get_label();
         let jpc = self.fs().jpc;
         let mut merged = jpc;
         self.concat_jumps(&mut merged, list);

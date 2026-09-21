@@ -7,6 +7,9 @@
 
 use std::process::Command;
 
+#[path = "helpers/compiler_nil_initialization.rs"]
+mod compiler_nil_initialization;
+
 #[path = "helpers/closure_taint.rs"]
 mod closure_taint;
 
