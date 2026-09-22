@@ -7,7 +7,7 @@
 - Invalid arguments fail explicitly. Option 2 (`SecretWrapContents`) fails as unsupported, without changing existing restrictions.
 - Shared access validation rejects tainted callers, including tainted ancestors, for option 0; option 1 rejects opaque secret keys. Trusted direct table/arena APIs remain below this validator.
 - Secret wrappers retain original values through GC without storing payloads in a Lua-visible environment or metatable. Unwrapping preserves original key identity, including independently wrapped copies of the same value.
-- Wrapping and unwrapping secret payloads require an untainted caller. Wrapping an existing wrapper is idempotent. Varargs preserve nils and arity; ordinary unwrapped values pass through unwrapping.
+- Lua-value `wrap_secret` and `unwrap_secret` require an untainted caller. Wrapping an existing wrapper is idempotent. Trusted Rust may mint only a host-computed boolean through `wrap_host_secret_bool`; it is not a Lua entry point, accepts no Lua value, and preserves caller taint. Varargs preserve nils and arity; ordinary unwrapped values pass through unwrapping.
 - Flags belong to table objects and disappear on collection. Wrapper payloads are traced during normal marking, finalizer marking, and frozen-graph traversal.
 
 ## Evidence and limits
@@ -16,7 +16,7 @@ Source: Forever 1.60.1.69913 `Blizzard_APIDocumentationGenerated/FrameScriptDocu
 
 The API documentation gives option values 0–2 and wrap/unwrap descriptions; the consumer applies options 1 then 0 to its backing table and 0 to its proxy. Error text, opaque-userdata representation, strict argument validation, and rejected tainted operations are simulator policy, not native-conformance claims.
 
-This core supplies validators, not automatic enforcement of every Lua/host operation. Interpreter and standard-library callers must wire the validator separately. Full secret arithmetic/type behavior, native equality of distinct wrappers, automatic wrapping of table contents, and general secret-value VM semantics are not implemented here.
+This core supplies validators, not automatic enforcement of every Lua/host operation. Interpreter and standard-library callers must wire the validator separately. Guarded boundaries may inspect only secret booleans: secure evaluation of `not` and equality produces public results, while tainted inspection fails; `and`/`or` retain the wrapper. This bounded policy does not claim native automatic secrecy propagation. Other secret payloads remain opaque userdata; secret arithmetic, native equality of distinct wrappers, automatic wrapping of table contents, and general secret-value VM semantics are not implemented here. Native metadata for these boolean rules is unknown.
 
 ## Lua-facing standard-library boundaries
 
