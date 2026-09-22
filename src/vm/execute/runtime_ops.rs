@@ -1,6 +1,7 @@
 //! Runtime helpers extracted from the main execute loop.
 
 use crate::error::LuaResult;
+use crate::table_security::{checked_order_operand, checked_truthiness};
 use crate::vm::value::{append_lua_number_bytes, lua_number_string_len};
 
 use super::super::gc::arena::Arena;
@@ -170,7 +171,7 @@ fn call_order_tm(state: &mut LuaState, lhs: Val, rhs: Val, event: TMS) -> LuaRes
     cmp_result?;
 
     let result = state.stack_get(call_base);
-    Ok(Some(result.is_truthy()))
+    Ok(Some(checked_truthiness(state, result)?))
 }
 
 /// Concatenate registers `base+b` through `base+c`, storing the result
@@ -889,6 +890,8 @@ pub(super) fn val_less_than(
     proto: &Proto,
     pc: usize,
 ) -> LuaResult<bool> {
+    let a = checked_order_operand(state, a)?;
+    let b = checked_order_operand(state, b)?;
     match (&a, &b) {
         (Val::Num(x), Val::Num(y)) => Ok(x < y),
         (Val::Str(x), Val::Str(y)) => {
@@ -924,6 +927,8 @@ pub(super) fn val_less_equal(
     proto: &Proto,
     pc: usize,
 ) -> LuaResult<bool> {
+    let a = checked_order_operand(state, a)?;
+    let b = checked_order_operand(state, b)?;
     match (&a, &b) {
         (Val::Num(x), Val::Num(y)) => Ok(x <= y),
         (Val::Str(x), Val::Str(y)) => {

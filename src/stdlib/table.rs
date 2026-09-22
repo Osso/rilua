@@ -3,6 +3,7 @@
 //! Reference: `ltablib.c` in PUC-Rio Lua 5.1.1.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
+use crate::table_security::checked_truthiness;
 use crate::vm::gc::arena::GcRef;
 use crate::vm::metatable::{TMS, gettmbyobj, val_raw_equal};
 use crate::vm::state::LuaState;
@@ -498,7 +499,7 @@ fn sort_comp(state: &mut LuaState, a: Val, b: Val, comp: SortComparator) -> LuaR
 
             let result = state.stack_get(call_base);
             state.top = call_base;
-            Ok(result.is_truthy())
+            checked_truthiness(state, result)
         }
     }
 }
@@ -608,7 +609,7 @@ fn default_less_than(state: &mut LuaState, a: Val, b: Val) -> LuaResult<bool> {
 
                     let result = state.stack_get(call_base);
                     state.top = call_base;
-                    Ok(result.is_truthy())
+                    checked_truthiness(state, result)
                 }
                 _ => Err(simple_error(format!(
                     "attempt to compare two {} values",

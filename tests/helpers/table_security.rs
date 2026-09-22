@@ -32,6 +32,20 @@ fn host_bool_lua() -> Lua {
     let mut lua = secure_lua();
     lua.register_function("host_true", host_true).unwrap();
     lua.register_function("host_false", host_false).unwrap();
+    fn api_equal(state: &mut LuaState) -> LuaResult<u32> {
+        let result =
+            state.api_equal(state.stack_get(state.base), state.stack_get(state.base + 1))?;
+        state.push(Val::Bool(result));
+        Ok(1)
+    }
+    fn api_less(state: &mut LuaState) -> LuaResult<u32> {
+        let result =
+            state.api_lessthan(state.stack_get(state.base), state.stack_get(state.base + 1))?;
+        state.push(Val::Bool(result));
+        Ok(1)
+    }
+    lua.register_function("host_api_equal", api_equal).unwrap();
+    lua.register_function("host_api_less", api_less).unwrap();
     lua.exec("debug.settaintmode(true); function call_tainted(fn) debug.setstacktaint('TestAddon'); return fn() end")
         .unwrap();
     lua
@@ -63,9 +77,14 @@ fn host_secret_booleans_keep_taint_and_secure_boolean_control_flow() {
         assert(yes == true and no == false and yes ~= false and no ~= true)
         assert(rawequal(no, false) and rawequal(yes, true))
         assert(no == host_false() and yes == host_true())
+        assert(host_api_equal(no, false) and host_api_equal(no, host_false()))
+        assert(not host_api_equal(yes, no) and not host_api_equal(no, true))
         assert(not pcall(assert, no))
         assert(issecretvalue(assert(yes)))
         assert(type(not no) == 'boolean' and type(no == false) == 'boolean')
+        local number = secretwrap(0)
+        assert(number and number ~= 0 and not pcall(function() return number + 1 end))
+        assert(secretunwrap(number) == 0)
     "#,
         )
         .unwrap();
@@ -90,6 +109,8 @@ fn tainted_code_cannot_inspect_secret_booleans_even_by_alias_identity() {
             function() return no == host_false() end,
             function() return rawequal(no, no) end,
             function() return rawequal(yes, true) end,
+            function() return host_api_equal(no, no) end,
+            function() return host_api_less(no, no) end,
             function() return assert(no) end,
             function() return assert(yes) end,
         }
@@ -122,12 +143,46 @@ fn secret_boolean_comparator_results_and_ordinals_enforce_caller_security() {
         assert(not pcall(call_tainted, function() return secretFalse < secretTrue end))
         assert(not pcall(function() return secretFalse < secretTrue end))
         assert(not pcall(function() return secretFalse <= secretTrue end))
+        assert(not pcall(host_api_less, secretFalse, secretTrue))
         local values = {2, 1}
         table.sort(values, function() return host_false() end)
         assert(values[1] == 2 and values[2] == 1)
         assert(not pcall(call_tainted, function()
             table.sort({2, 1}, function() return host_false() end)
         end))
+        local left, right = {key=2}, {key=1}
+        local mt = {__lt = function(a, b)
+            if a.key < b.key then return host_true() end
+            return host_false()
+        end}
+        setmetatable(left, mt); setmetatable(right, mt)
+        local ordered = {left, right}
+        table.sort(ordered)
+        assert(ordered[1] == right and ordered[2] == left)
+        assert(not pcall(call_tainted, function() table.sort({left, right}) end))
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn secret_boolean_stdlib_truth_checks_guard_tainted_callers() {
+    host_bool_lua()
+        .exec(
+            r#"
+        assert(string.find('a+b', 'a.b', 1, host_false()) == 1)
+        assert(string.find('a.b', 'a.b', 1, host_true()) == 1)
+        assert(not pcall(call_tainted, function()
+            return string.find('a+b', 'a.b', 1, host_false())
+        end))
+        package.loaded['host-secret-false'] = host_false()
+        package.preload['host-secret-false'] = function() return 'loaded' end
+        assert(require('host-secret-false') == 'loaded')
+        package.loaded['host-secret-false'] = host_false()
+        assert(not pcall(call_tainted, function() return require('host-secret-false') end))
+        assert(({} or false) ~= false)
+        local plain = newproxy(true)
+        assert(plain and not (plain == false))
     "#,
         )
         .unwrap();

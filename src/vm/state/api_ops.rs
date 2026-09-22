@@ -1,6 +1,7 @@
 //! API-facing table and metamethod operations for `LuaState`.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
+use crate::table_security::{checked_boolean_equality, checked_order_operand, checked_truthiness};
 use crate::vm::value::append_lua_number_bytes;
 
 use super::{GettableOrigin, LuaState, Table, Val};
@@ -103,6 +104,8 @@ impl LuaState {
     /// Equivalent to PUC-Rio's `lua_lessthan`. Unlike the VM's
     /// `val_less_than`, this doesn't require proto/pc context.
     pub fn api_lessthan(&mut self, a: Val, b: Val) -> LuaResult<bool> {
+        let a = checked_order_operand(self, a)?;
+        let b = checked_order_operand(self, b)?;
         match (&a, &b) {
             (Val::Num(x), Val::Num(y)) => Ok(x < y),
             (Val::Str(x), Val::Str(y)) => {
@@ -131,6 +134,9 @@ impl LuaState {
     /// Equivalent to PUC-Rio's `lua_equal`. Triggers `__eq` metamethod
     /// for tables and userdata of the same type.
     pub fn api_equal(&mut self, a: Val, b: Val) -> LuaResult<bool> {
+        if let Some(result) = checked_boolean_equality(self, a, b)? {
+            return Ok(result);
+        }
         if val_raw_equal(a, b, &self.gc.tables, &self.gc.string_arena) {
             return Ok(true);
         }
@@ -150,7 +156,7 @@ impl LuaState {
         }
 
         let result = self.call_tm_two_args(lhs_tm, a, b)?;
-        Ok(result.is_truthy())
+        checked_truthiness(self, result)
     }
 
     /// API-level concatenation of `count` values at top of stack.
@@ -317,7 +323,7 @@ impl LuaState {
         }
 
         let result = self.call_tm_two_args(lhs_tm, lhs, rhs)?;
-        Ok(Some(result.is_truthy()))
+        Ok(Some(checked_truthiness(self, result)?))
     }
 }
 

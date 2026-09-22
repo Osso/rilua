@@ -523,6 +523,24 @@ pushing the library name as argument, then calling. The opener:
 The base library uses an empty name and registers directly into the
 global table.
 
+### Host-produced secret booleans
+
+`rilua::table_security::wrap_host_secret_bool(&mut LuaState, bool) -> Val`
+creates an authenticated, GC-traced secret boolean from a **trusted Rust-computed**
+value. It is not a Lua global and cannot wrap arbitrary Lua input. Push or
+otherwise root the returned `Val` before the next GC safe point. It preserves
+the caller's taint and does not relax the guarded `wrap_secret`/`unwrap_secret`
+APIs.
+
+The wrapper still reports Lua type `userdata`. Secure code may evaluate it in
+conditions, `not`, `and`/`or`, equality, `rawequal`, and comparator results;
+these operations produce ordinary public booleans when they produce a new
+result. `and`/`or` retain the original wrapped operand. Tainted callers cannot
+inspect a secret boolean through any of those operations, even by comparing
+an alias to itself. Boolean ordering still raises a Lua type error for secure
+callers. Other secret payloads retain opaque userdata semantics. This is a
+bounded VM policy, not a claim about native WoW secrecy propagation.
+
 ### GC Handle Safety
 
 Values on the Lua stack (between `stack[0]` and `stack[top-1]`) are

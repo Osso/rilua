@@ -34,6 +34,7 @@ use super::string::LuaString;
 use super::table::Table;
 use super::value::{Userdata, Val, append_lua_number_bytes, lua_number_string_len};
 use crate::check_interrupted;
+use crate::table_security::{checked_boolean_equality, checked_truthiness};
 
 use crate::platform::{localeconv, strcoll, strtod};
 
@@ -1493,7 +1494,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Not => {
                     let b = instr.b() as usize;
                     let b_val = state.stack_get(base + b);
-                    state.stack_set(ra, Val::Bool(!b_val.is_truthy()));
+                    state.stack_set(ra, Val::Bool(!checked_truthiness(state, b_val)?));
                 }
 
                 // ----- String operations -----
@@ -1556,7 +1557,10 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Eq => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let equal = if val_equal(b_val, c_val, &state.gc) {
+                    let equal = if let Some(equal) = checked_boolean_equality(state, b_val, c_val)?
+                    {
+                        equal
+                    } else if val_equal(b_val, c_val, &state.gc) {
                         // Raw-equal succeeded.
                         true
                     } else if std::mem::discriminant(&b_val) != std::mem::discriminant(&c_val) {
@@ -1598,7 +1602,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                             call_tm_res(state, tm_val, b_val, c_val, res)?;
                             // PUC-Rio reads from L->top after callTMres
                             // decrements it. We saved the result position.
-                            state.stack_get(res).is_truthy()
+                            checked_truthiness(state, state.stack_get(res))?
                         } else {
                             false
                         }
@@ -1647,7 +1651,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Test => {
                     let val = state.stack_get(ra);
                     let c = instr.c() != 0;
-                    if val.is_truthy() == c {
+                    if checked_truthiness(state, val)? == c {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
                         pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;
                     } else {
@@ -1659,7 +1663,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                     let b = instr.b() as usize;
                     let rb = state.stack_get(base + b);
                     let c = instr.c() != 0;
-                    if rb.is_truthy() == c {
+                    if checked_truthiness(state, rb)? == c {
                         state.stack_set(ra, rb);
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
                         pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;

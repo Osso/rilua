@@ -8,6 +8,14 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Add a Rust-host-only secret-boolean constructor for trusted return values; preserve tainted caller restrictions on wrapping and unwrapping Lua values.
+
+### Fixed
+
+- Evaluate secret booleans through guarded conditional, equality, and standard-library boolean paths; reject tainted inspection before identity shortcuts. Other secret payloads remain opaque.
+
 ## [0.1.21](https://github.com/wowemulation-dev/rilua/compare/v0.1.20...v0.1.21) - 2026-02-27
 
 ### Added

@@ -1,7 +1,9 @@
 //! Opt-in table-access policy and opaque secret keys for WoW consumers.
 //!
 //! This is not a general secret-value VM: wrappers cannot participate in Lua
-//! arithmetic. Their private payload is GC-traced and is never stored in fenv.
+//! arithmetic. Secret booleans support guarded control-flow and comparisons;
+//! other wrapped payloads remain opaque. The private payload is GC-traced and
+//! is never stored in fenv.
 //! Access-boundary callers must invoke `check_table_access` before reading or
 //! mutating a table. Low-level arena/table operations remain trusted host APIs.
 
@@ -86,6 +88,69 @@ pub fn wrap_secret(state: &mut LuaState, value: Val) -> LuaResult<Val> {
     Ok(Val::Userdata(
         state.gc.alloc_userdata(Userdata::secret(value)),
     ))
+}
+
+/// Create a secret result from a boolean computed by trusted Rust host code.
+/// Unlike `wrap_secret`, this does not accept a Lua value or change caller taint.
+/// The caller must root the result (for example, push it) before another GC safe point.
+pub fn wrap_host_secret_bool(state: &mut LuaState, value: bool) -> Val {
+    Val::Userdata(state.gc.alloc_userdata(Userdata::secret(Val::Bool(value))))
+}
+
+/// Return a secret boolean's payload through the existing secure-caller guard.
+/// Non-boolean secret wrappers and ordinary Lua values keep their original behavior.
+fn checked_secret_bool(state: &LuaState, value: Val) -> LuaResult<Option<bool>> {
+    let Val::Userdata(reference) = value else {
+        return Ok(None);
+    };
+    let Some(Val::Bool(_)) = state
+        .gc
+        .userdata
+        .get(reference)
+        .and_then(Userdata::secret_value)
+    else {
+        return Ok(None);
+    };
+    let Val::Bool(value) = unwrap_secret(state, value)? else {
+        unreachable!("a secret boolean's payload changed during inspection")
+    };
+    Ok(Some(value))
+}
+
+/// Evaluate truthiness without allowing a tainted caller to inspect a secret boolean.
+/// Other opaque secret values retain their previous userdata truthiness.
+pub(crate) fn checked_truthiness(state: &LuaState, value: Val) -> LuaResult<bool> {
+    Ok(checked_secret_bool(state, value)?.unwrap_or_else(|| value.is_truthy()))
+}
+
+/// Apply boolean equality before userdata identity can reveal a secret boolean.
+/// `None` delegates non-boolean values to the existing raw/metamethod path.
+pub(crate) fn checked_boolean_equality(
+    state: &LuaState,
+    left: Val,
+    right: Val,
+) -> LuaResult<Option<bool>> {
+    let left_bool = checked_secret_bool(state, left)?;
+    let right_bool = checked_secret_bool(state, right)?;
+    if left_bool.is_none() && right_bool.is_none() {
+        return Ok(None);
+    }
+    let left = left_bool.or_else(|| match left {
+        Val::Bool(value) => Some(value),
+        _ => None,
+    });
+    let right = right_bool.or_else(|| match right {
+        Val::Bool(value) => Some(value),
+        _ => None,
+    });
+    Ok(Some(left.is_some() && left == right))
+}
+
+/// Inspect only wrapped booleans before order comparisons. Lua still rejects
+/// ordering booleans; this check prevents a tainted caller reaching an identity
+/// or metamethod path with a secret boolean.
+pub(crate) fn checked_order_operand(state: &LuaState, value: Val) -> LuaResult<Val> {
+    Ok(checked_secret_bool(state, value)?.map_or(value, Val::Bool))
 }
 
 /// Unwrap to the original value, preserving table and ordinary-key identity.

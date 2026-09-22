@@ -32,6 +32,7 @@
 
 use crate::compiler::codegen::int2fb;
 use crate::error::{LuaError, LuaResult, RuntimeError};
+use crate::table_security::checked_truthiness;
 use crate::vm::closure::{Closure, RustClosure};
 use crate::vm::execute::fb2int;
 use crate::vm::gc::arena::GcRef;
@@ -660,7 +661,7 @@ fn run_testc_program(
             "tobool" => {
                 let si = next_index(&mut tokens, state);
                 let val = get_special(state, tc_base, &si, caller_closure_ref);
-                let b = val.is_truthy();
+                let b = checked_truthiness(state, val)?;
                 state.push(Val::Num(if b { 1.0 } else { 0.0 }));
             }
             "tocfunction" => {

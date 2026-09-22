@@ -3,6 +3,7 @@
 //! Reference: `loadlib.c` in PUC-Rio Lua 5.1.1.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
+use crate::table_security::checked_truthiness;
 use crate::vm::closure::{Closure, RustClosure};
 use crate::vm::gc::arena::GcRef;
 use crate::vm::state::LuaState;
@@ -560,7 +561,7 @@ pub fn ll_require(state: &mut LuaState) -> LuaResult<u32> {
         loaded_t.get_str(name_key, &state.gc.string_arena)
     };
 
-    if cached.is_truthy() {
+    if checked_truthiness(state, cached)? {
         // Check for sentinel (circular require).
         if cached == Val::LightUserdata(SENTINEL) {
             return Err(simple_error(format!(
