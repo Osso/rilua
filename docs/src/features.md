@@ -50,7 +50,7 @@ rilua column:
 | 22 reserved keywords | | ✓ | ✓ | ✓ | | ✗ | 5.2+ adds `goto` to the 5.1 set |
 | 23 reserved keywords | | | | | ✓ | ✗ | 5.5 adds `global`; effectively 22 when `LUA_COMPAT_GLOBAL` is on (default) |
 | `global` keyword | | | | | ✓ | ✗ | Conditionally reserved; unreserved by default via `LUA_COMPAT_GLOBAL` |
-| Short strings (`"..."` / `'...'`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Short strings (`"..."` / `'...'`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Unknown escapes consume the backslash and retain the next byte (Lua 5.1); `\z` is literal `z`, not whitespace skipping. Recognized escapes and malformed structured-escape errors are unchanged. |
 | Long strings (`[[...]]`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | With levels: `[=[...]=]` |
 | Escape: `\a \b \f \n \r \t \v \\ \" \'` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | Escape: `\ddd` (decimal byte) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |

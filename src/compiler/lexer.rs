@@ -652,7 +652,7 @@ impl<'a> Lexer<'a> {
             Some(b'\n') | Some(b'\r') => self.push_escaped_newline(buf),
             Some(byte) if byte.is_ascii_digit() => self.push_decimal_escape(buf),
             Some(byte) if !byte.is_ascii() => self.push_escaped_utf8_byte(buf),
-            Some(byte) => Err(self.invalid_escape_error(byte)),
+            Some(byte) => self.push_single_byte_escape(buf, byte),
             None => Err(self.syntax_error_near("unfinished string", "<eof>")),
         }
     }
@@ -706,13 +706,6 @@ impl<'a> Lexer<'a> {
         };
         buf.push(byte);
         Ok(())
-    }
-
-    fn invalid_escape_error(&self, byte: u8) -> LuaError {
-        self.syntax_error_near(
-            &format!("invalid escape sequence '\\{}'", char::from(byte)),
-            "<string>",
-        )
     }
 
     fn read_hex_escape_byte(&mut self) -> LuaResult<u8> {
@@ -1008,6 +1001,20 @@ mod tests {
     }
 
     #[test]
+    fn string_unknown_escapes_preserve_following_bytes() {
+        for (source, expected) in [
+            (
+                r#""([^\.]*)\.([^\.]*)\.([^\.]*)""#,
+                b"([^.]*).([^.]*).([^.]*)".as_slice(),
+            ),
+            (r#"'\s+\z \?'"#, b"s+z ?".as_slice()),
+        ] {
+            let tokens = lex_tokens(source).unwrap();
+            assert_eq!(tokens[0], Token::Str(expected.to_vec()));
+        }
+    }
+
+    #[test]
     fn string_decimal_escape() {
         let tokens = lex_tokens(r#""\65\066\127""#).unwrap();
         assert_eq!(tokens[0], Token::Str(b"AB\x7F".to_vec()));
@@ -1253,8 +1260,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_escape() {
-        assert!(lex_tokens(r#""\z""#).is_err());
+    fn malformed_structured_escapes_remain_errors() {
+        for source in [r#""\x""#, r#""\xGG""#, r#""\u123""#, r#""\uD800""#] {
+            assert!(
+                lex_tokens(source).is_err(),
+                "accepted malformed escape: {source}"
+            );
+        }
     }
 
     // -- Reader-based lexer tests --

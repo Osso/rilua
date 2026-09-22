@@ -54,6 +54,23 @@ fn print_string() {
 }
 
 #[test]
+fn lua51_unknown_short_string_escapes_execute() {
+    let (stdout, stderr, code) = run_rilua(
+        r#"
+        local pattern = "([^\.]*)\.([^\.]*)\.([^\.]*)"
+        assert(pattern == "([^.]*).([^.]*).([^.]*)")
+        local _, _, major, minor, patch = string.find("1.2.3", pattern)
+        assert(major == "1" and minor == "2" and patch == "3")
+        assert('\s+\z \?' == 's+z ?')
+        assert("\65\066\x43\u0044" == "ABCD")
+        print(pattern)
+        "#,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "([^.]*).([^.]*).([^.]*)\n");
+}
+
+#[test]
 fn print_multiple() {
     let (stdout, _, code) = run_rilua("print(1, 2, 3)");
     assert_eq!(code, 0);
