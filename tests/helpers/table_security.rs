@@ -85,6 +85,8 @@ fn host_secret_booleans_keep_taint_and_secure_boolean_control_flow() {
         local number = secretwrap(0)
         assert(number and number ~= 0 and not pcall(function() return number + 1 end))
         assert(secretunwrap(number) == 0)
+        collectgarbage('collect')
+        assert(issecretvalue(no) and secretunwrap(no) == false)
     "#,
         )
         .unwrap();
@@ -138,8 +140,11 @@ fn secret_boolean_comparator_results_and_ordinals_enforce_caller_security() {
                              __eq = function() return secretTrue end})
         setmetatable(second, getmetatable(first))
         assert(not (first < second) and first == second)
+        assert(not host_api_less(first, second) and host_api_equal(first, second))
         assert(not pcall(call_tainted, function() return first < second end))
         assert(not pcall(call_tainted, function() return first == second end))
+        assert(not pcall(call_tainted, function() return host_api_less(first, second) end))
+        assert(not pcall(call_tainted, function() return host_api_equal(first, second) end))
         assert(not pcall(call_tainted, function() return secretFalse < secretTrue end))
         assert(not pcall(function() return secretFalse < secretTrue end))
         assert(not pcall(function() return secretFalse <= secretTrue end))
@@ -181,6 +186,8 @@ fn secret_boolean_stdlib_truth_checks_guard_tainted_callers() {
         package.loaded['host-secret-false'] = host_false()
         assert(not pcall(call_tainted, function() return require('host-secret-false') end))
         assert(({} or false) ~= false)
+        local opaque = secretwrap('opaque')
+        assert(opaque and opaque == opaque and opaque ~= 'opaque')
         local plain = newproxy(true)
         assert(plain and not (plain == false))
     "#,
