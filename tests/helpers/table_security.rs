@@ -1,4 +1,7 @@
-use rilua::table_security::{check_table_access, set_table_security, wrap_secret};
+use rilua::api::state_is_secure;
+use rilua::table_security::{
+    check_table_access, set_table_security, wrap_host_secret_bool, wrap_secret,
+};
 use rilua::vm::table::Table;
 use rilua::{Lua, LuaApi, LuaApiMut, Val};
 
@@ -6,6 +9,128 @@ fn secure_lua() -> Lua {
     let mut lua = Lua::new().unwrap();
     rilua::table_security::register_table_security(&mut lua).unwrap();
     lua
+}
+
+fn host_bool_lua() -> Lua {
+    use rilua::LuaResult;
+    use rilua::vm::state::LuaState;
+
+    fn host_true(state: &mut LuaState) -> LuaResult<u32> {
+        let before = state_is_secure(state);
+        let secret = wrap_host_secret_bool(state, true);
+        state.push(secret);
+        assert_eq!(state_is_secure(state), before);
+        Ok(1)
+    }
+    fn host_false(state: &mut LuaState) -> LuaResult<u32> {
+        let before = state_is_secure(state);
+        let secret = wrap_host_secret_bool(state, false);
+        state.push(secret);
+        assert_eq!(state_is_secure(state), before);
+        Ok(1)
+    }
+    let mut lua = secure_lua();
+    lua.register_function("host_true", host_true).unwrap();
+    lua.register_function("host_false", host_false).unwrap();
+    lua.exec("debug.settaintmode(true); function call_tainted(fn) debug.setstacktaint('TestAddon'); return fn() end")
+        .unwrap();
+    lua
+}
+
+#[test]
+fn host_secret_booleans_keep_taint_and_secure_boolean_control_flow() {
+    host_bool_lua()
+        .exec(
+            r#"
+        local yes, no = host_true(), host_false()
+        assert(issecretvalue(yes) and issecretvalue(no))
+        assert(type(yes) == 'userdata' and type(no) == 'userdata')
+        assert(secretunwrap(yes) == true and secretunwrap(no) == false)
+        local fromTainted = call_tainted(function()
+            assert(debug.getstacktaint() == 'TestAddon')
+            local value = host_false()
+            assert(debug.getstacktaint() == 'TestAddon')
+            return value
+        end)
+        assert(issecretvalue(fromTainted) and secretunwrap(fromTainted) == false)
+        if no then error('secret false entered true branch') end
+        if not yes then error('secret true entered false branch') end
+        assert(not no and not (not yes))
+        assert((no or 'fallback') == 'fallback')
+        assert((yes and 'selected') == 'selected')
+        assert(issecretvalue(yes or no) and issecretvalue(no and yes))
+        assert((no and yes) == false and (yes and no) == false)
+        assert(yes == true and no == false and yes ~= false and no ~= true)
+        assert(rawequal(no, false) and rawequal(yes, true))
+        assert(no == host_false() and yes == host_true())
+        assert(not pcall(assert, no))
+        assert(issecretvalue(assert(yes)))
+        assert(type(not no) == 'boolean' and type(no == false) == 'boolean')
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn tainted_code_cannot_inspect_secret_booleans_even_by_alias_identity() {
+    host_bool_lua()
+        .exec(
+            r#"
+        local yes, no = host_true(), host_false()
+        local operations = {
+            function() return secretunwrap(no) end,
+            function() if no then return 1 end end,
+            function() if yes then return 1 end end,
+            function() return not no end,
+            function() return no and 1 end,
+            function() return yes or 1 end,
+            function() return no == no end,
+            function() return yes == yes end,
+            function() return no == false end,
+            function() return no == host_false() end,
+            function() return rawequal(no, no) end,
+            function() return rawequal(yes, true) end,
+            function() return assert(no) end,
+            function() return assert(yes) end,
+        }
+        for _, operation in ipairs(operations) do
+            local ok, message = pcall(call_tainted, operation)
+            assert(not ok and string.find(message, 'untainted caller', 1, true), tostring(message))
+        end
+        local ok = pcall(call_tainted, function() return secretwrap(false) end)
+        assert(not ok)
+        assert(secretunwrap(no) == false and secretunwrap(yes) == true)
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn secret_boolean_comparator_results_and_ordinals_enforce_caller_security() {
+    host_bool_lua()
+        .exec(
+            r#"
+        local first, second = {}, {}
+        local secretFalse = host_false()
+        local secretTrue = host_true()
+        setmetatable(first, {__lt = function() return secretFalse end,
+                             __eq = function() return secretTrue end})
+        setmetatable(second, getmetatable(first))
+        assert(not (first < second) and first == second)
+        assert(not pcall(call_tainted, function() return first < second end))
+        assert(not pcall(call_tainted, function() return first == second end))
+        assert(not pcall(call_tainted, function() return secretFalse < secretTrue end))
+        assert(not pcall(function() return secretFalse < secretTrue end))
+        assert(not pcall(function() return secretFalse <= secretTrue end))
+        local values = {2, 1}
+        table.sort(values, function() return host_false() end)
+        assert(values[1] == 2 and values[2] == 1)
+        assert(not pcall(call_tainted, function()
+            table.sort({2, 1}, function() return host_false() end)
+        end))
+    "#,
+        )
+        .unwrap();
 }
 
 #[test]
