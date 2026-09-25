@@ -18,6 +18,9 @@ and this project adheres to
 
 - Key closure taint by weak closure references so collection clears stamps and slot reuse cannot inherit taint.
 - Evaluate secret booleans through guarded conditional, equality, and standard-library boolean paths; reject tainted inspection before identity shortcuts. Other secret payloads remain opaque.
+- Permit secure-only Lua indexing of wrapped tables and return plain fields; this native-unverified policy is shallow and does not provide general secret propagation.
+- Guard wrapped-nil equality before wrapper identity can disclose it.
+- Stamp created closures with effective call-stack taint and retain those stamps across GC publication barriers.
 
 ## [0.1.21](https://github.com/wowemulation-dev/rilua/compare/v0.1.20...v0.1.21) - 2026-02-27
 
