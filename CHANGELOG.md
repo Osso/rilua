@@ -10,6 +10,7 @@ and this project adheres to
 
 ### Added
 
+- Add `Table::make_read_only` and `Table::is_read_only` for shallow table write protection without pinning objects or skipping GC tracing. Referenced tables and closure state remain mutable; recursive GC freezing is unchanged.
 - Add a Rust-host-only secret-boolean constructor for trusted return values; preserve tainted caller restrictions on wrapping and unwrapping Lua values.
 
 ### Fixed
