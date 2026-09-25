@@ -6,6 +6,7 @@
 use crate::error::{LuaResult, runtime_error};
 use crate::vm::callinfo::LUA_MULTRET;
 use crate::vm::closure::{Closure, RustClosure};
+use crate::vm::gc::arena::GcRef;
 use crate::vm::state::LuaState;
 use crate::vm::table::Table;
 use crate::vm::value::Val;
@@ -153,42 +154,91 @@ fn setobjecttaint(state: &mut LuaState) -> LuaResult<u32> {
         return Ok(0);
     };
 
-    // Store taint in registry: __closure_taint[cl_index] = taint_string
-    let taint_table = get_or_create_closure_taint_table(state);
-    let key = Val::Num(f64::from(cl_ref.index()));
-    if let Some(t) = state.gc.tables.get_mut(taint_table) {
-        let _ = t.raw_set(key, taint_val, &state.gc.string_arena);
-    }
+    let name = decode_taint_name(state, taint_val);
+    set_closure_taint(state, cl_ref, name.as_deref())?;
     Ok(0)
 }
 
-/// Read the existing closure stamp without creating registry state during calls.
-pub(crate) fn closure_taint(
+/// Set or clear a closure's taint without invoking Lua code.
+///
+/// The closure must still be alive. A stamp does not keep it alive during GC.
+pub fn set_closure_taint(
     state: &mut LuaState,
-    closure: crate::vm::gc::arena::GcRef<crate::vm::closure::Closure>,
-) -> Option<String> {
+    closure: GcRef<Closure>,
+    taint: Option<&str>,
+) -> LuaResult<()> {
+    if state.gc.closures.get(closure).is_none() {
+        return Err(runtime_error("closure has been collected"));
+    }
+    let table = get_or_create_closure_taint_table(state)?;
+    let value = taint.map_or(Val::Nil, |name| {
+        Val::Str(state.gc.intern_string(name.as_bytes()))
+    });
+    state
+        .gc
+        .tables
+        .get_mut(table)
+        .ok_or_else(|| runtime_error("closure taint table missing"))?
+        .raw_set(Val::Function(closure), value, &state.gc.string_arena)
+}
+
+/// Read a live closure's stamp without creating registry state.
+pub fn get_closure_taint(state: &mut LuaState, closure: GcRef<Closure>) -> Option<String> {
+    if state.gc.closures.get(closure).is_none() {
+        return None;
+    }
     let key = state.gc.intern_string_static(CLOSURE_TAINT_KEY.as_bytes());
     let registry = state.gc.tables.get(state.registry)?;
     let Val::Table(stamps) = registry.get_str(key, &state.gc.string_arena) else {
         return None;
     };
-    let stamps = state.gc.tables.get(stamps)?;
-    let value = stamps.get_int(i64::from(closure.index()));
+    let value = state
+        .gc
+        .tables
+        .get(stamps)?
+        .get(Val::Function(closure), &state.gc.string_arena);
     decode_taint_name(state, value)
 }
 
-fn get_or_create_closure_taint_table(state: &mut LuaState) -> crate::vm::gc::arena::GcRef<Table> {
+/// Read the existing closure stamp during calls.
+pub(crate) fn closure_taint(state: &mut LuaState, closure: GcRef<Closure>) -> Option<String> {
+    get_closure_taint(state, closure)
+}
+
+fn get_or_create_closure_taint_table(state: &mut LuaState) -> LuaResult<GcRef<Table>> {
     let key = state.gc.intern_string_static(CLOSURE_TAINT_KEY.as_bytes());
     if let Some(reg) = state.gc.tables.get(state.registry)
         && let Val::Table(t) = reg.get_str(key, &state.gc.string_arena)
     {
-        return t;
+        return Ok(t);
     }
+    let mode_key = state.gc.intern_string_static(b"__mode");
+    let weak_keys = state.gc.intern_string_static(b"k");
+    let metatable = state.gc.alloc_table(Table::new());
+    state
+        .gc
+        .tables
+        .get_mut(metatable)
+        .ok_or_else(|| runtime_error("closure taint metatable missing"))?
+        .raw_set(
+            Val::Str(mode_key),
+            Val::Str(weak_keys),
+            &state.gc.string_arena,
+        )?;
     let new_table = state.gc.alloc_table(Table::new());
-    if let Some(reg) = state.gc.tables.get_mut(state.registry) {
-        let _ = reg.raw_set(Val::Str(key), Val::Table(new_table), &state.gc.string_arena);
-    }
-    new_table
+    state
+        .gc
+        .tables
+        .get_mut(new_table)
+        .ok_or_else(|| runtime_error("closure taint table missing"))?
+        .set_metatable(Some(metatable));
+    state
+        .gc
+        .tables
+        .get_mut(state.registry)
+        .ok_or_else(|| runtime_error("registry table missing"))?
+        .raw_set(Val::Str(key), Val::Table(new_table), &state.gc.string_arena)?;
+    Ok(new_table)
 }
 
 // ---------------------------------------------------------------------------
@@ -777,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn setobjecttaint_stores_function_taint_in_registry() {
+    fn setobjecttaint_stores_function_taint_with_closure_key() {
         let mut state = new_state_with_taint_api();
         let closure_ref = state
             .gc
@@ -790,14 +840,18 @@ mod tests {
             0
         );
 
-        let taint_table = get_or_create_closure_taint_table(&mut state);
+        let taint_table = get_or_create_closure_taint_table(&mut state).unwrap();
         let stored = state
             .gc
             .tables
             .get(taint_table)
             .expect("missing taint table")
-            .get(Val::Num(closure_ref.index() as f64), &state.gc.string_arena);
+            .get(Val::Function(closure_ref), &state.gc.string_arena);
         assert_eq!(decode_string(&state, stored), "RegistryAddon");
+        assert_eq!(
+            get_closure_taint(&mut state, closure_ref).as_deref(),
+            Some("RegistryAddon")
+        );
     }
 
     #[test]

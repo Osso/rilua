@@ -10,11 +10,13 @@ and this project adheres to
 
 ### Added
 
+- Expose `stdlib::taint::{set_closure_taint, get_closure_taint}` for Rust hosts with direct `LuaState` access.
 - Add `Table::make_read_only` and `Table::is_read_only` for shallow table write protection without pinning objects or skipping GC tracing. Referenced tables and closure state remain mutable; recursive GC freezing is unchanged.
 - Add a Rust-host-only secret-boolean constructor for trusted return values; preserve tainted caller restrictions on wrapping and unwrapping Lua values.
 
 ### Fixed
 
+- Key closure taint by weak closure references so collection clears stamps and slot reuse cannot inherit taint.
 - Evaluate secret booleans through guarded conditional, equality, and standard-library boolean paths; reject tainted inspection before identity shortcuts. Other secret payloads remain opaque.
 
 ## [0.1.21](https://github.com/wowemulation-dev/rilua/compare/v0.1.20...v0.1.21) - 2026-02-27

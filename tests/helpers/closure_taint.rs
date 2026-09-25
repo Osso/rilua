@@ -1,4 +1,4 @@
-use rilua::Lua;
+use rilua::{Function, Lua, LuaApi, LuaApiMut, stdlib::taint};
 
 #[test]
 fn stamped_closures_protect_tables_across_call_boundaries() {
@@ -54,4 +54,67 @@ fn secure_calls_clear_caller_taint_but_not_callee_stamps() {
     "#,
     )
     .unwrap();
+}
+
+#[test]
+fn collected_closure_stamp_does_not_transfer_to_reused_slot() {
+    let mut lua = Lua::new().unwrap();
+    lua.exec(
+        r#"
+        local function make() return function() return debug.getstacktaint() end end
+        for i = 1, 12 do
+            local stale = make()
+            debug.setobjecttaint(stale, 'CollectedClosureProbe')
+            assert(securecallfunction(stale) == 'CollectedClosureProbe')
+            stale = nil
+            collectgarbage('collect')
+            local fresh = make()
+            assert(securecallfunction(fresh) == nil, 'collected stamp leaked at iteration ' .. i)
+        end
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn host_and_lua_share_live_closure_stamps_across_gc() {
+    let mut lua = Lua::new().unwrap();
+    lua.exec("function callback() return debug.getstacktaint() end")
+        .unwrap();
+    let callback: Function = lua.global("callback").unwrap();
+    taint::set_closure_taint(lua.state_mut(), callback.gc_ref(), Some("HostAddon")).unwrap();
+    assert_eq!(
+        taint::get_closure_taint(lua.state_mut(), callback.gc_ref()).as_deref(),
+        Some("HostAddon")
+    );
+    lua.exec("collectgarbage('collect'); assert(securecallfunction(callback) == 'HostAddon'); debug.setobjecttaint(callback, 'LuaAddon')")
+        .unwrap();
+    assert_eq!(
+        taint::get_closure_taint(lua.state_mut(), callback.gc_ref()).as_deref(),
+        Some("LuaAddon")
+    );
+    taint::set_closure_taint(lua.state_mut(), callback.gc_ref(), None).unwrap();
+    lua.exec("assert(securecallfunction(callback) == nil)")
+        .unwrap();
+}
+
+#[test]
+fn collected_host_stamped_closure_is_not_kept_alive() {
+    let mut lua = Lua::new().unwrap();
+    lua.exec("function callback() return debug.getstacktaint() end")
+        .unwrap();
+    let callback: Function = lua.global("callback").unwrap();
+    taint::set_closure_taint(lua.state_mut(), callback.gc_ref(), Some("HostAddon")).unwrap();
+    lua.exec("callback = nil; collectgarbage('collect'); collectgarbage('collect')")
+        .unwrap();
+    assert!(lua.state().gc.closures.get(callback.gc_ref()).is_none());
+    assert_eq!(
+        taint::get_closure_taint(lua.state_mut(), callback.gc_ref()),
+        None
+    );
+    lua.exec(
+        "for key in pairs(debug.getregistry().__closure_taint) do error('dead stamp retained') end",
+    )
+    .unwrap();
+    assert!(taint::set_closure_taint(lua.state_mut(), callback.gc_ref(), Some("Stale")).is_err());
 }
