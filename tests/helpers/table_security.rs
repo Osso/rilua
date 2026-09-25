@@ -253,6 +253,50 @@ fn secret_boolean_stdlib_truth_checks_guard_tainted_callers() {
 }
 
 #[test]
+fn secret_table_reads_use_lua_indexing_and_return_plain_fields() {
+    secure_lua()
+        .exec(
+            r#"
+        local asset = secretwrap({asset = {texCoords = {0.1, 0.9}}, name = 'icon'})
+        assert(asset.asset.texCoords[1] == 0.1)
+        assert(asset.name == 'icon' and asset.missing == nil)
+        local backing = setmetatable({}, {__index = function(_, key) return key .. '-atlas' end})
+        assert(secretwrap(backing).asset == 'asset-atlas')
+        local plain = newproxy(true)
+        assert(not pcall(function() return plain.asset end))
+        assert(not pcall(function() asset.asset = 1 end))
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn secret_nil_equality_and_table_reads_reject_tainted_callers() {
+    secure_lua()
+        .exec(
+            r#"
+        local asset = secretwrap({asset = {texCoords = {1, 2}}})
+        local absent = secretwrap(nil)
+        assert(absent == nil and nil == absent and not (absent ~= nil))
+        assert(absent == secretwrap(nil) and absent ~= false)
+        local operations = {
+            function() return asset.asset end,
+            function() return asset.missing end,
+            function() return absent == nil end,
+            function() return nil ~= absent end,
+            function() return absent == absent end,
+        }
+        for _, operation in ipairs(operations) do
+            debug.setobjecttaint(operation, 'TestAddon')
+            local ok, message = pcall(securecallfunction, operation)
+            assert(not ok and string.find(message, 'untainted caller', 1, true), tostring(message))
+        end
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
 fn table_security_registration_is_opt_in() {
     let mut lua = Lua::new().unwrap();
     lua.exec("assert(settablesecurity == nil and secretwrap == nil)")

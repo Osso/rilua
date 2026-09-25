@@ -123,9 +123,9 @@ pub(crate) fn checked_truthiness(state: &LuaState, value: Val) -> LuaResult<bool
     Ok(checked_secret_bool(state, value)?.unwrap_or_else(|| value.is_truthy()))
 }
 
-/// Apply boolean equality before userdata identity can reveal a secret boolean.
-/// `None` delegates non-boolean values to the existing raw/metamethod path.
-pub(crate) fn checked_boolean_equality(
+/// Compare wrapped booleans and nil before userdata identity reveals a secret.
+/// `None` delegates other values to the existing raw/metamethod path.
+pub(crate) fn checked_secret_equality(
     state: &LuaState,
     left: Val,
     right: Val,
@@ -133,7 +133,14 @@ pub(crate) fn checked_boolean_equality(
     let left_bool = checked_secret_bool(state, left)?;
     let right_bool = checked_secret_bool(state, right)?;
     if left_bool.is_none() && right_bool.is_none() {
-        return Ok(None);
+        let left_nil = checked_secret_nil(state, left)?;
+        let right_nil = checked_secret_nil(state, right)?;
+        if !left_nil && !right_nil {
+            return Ok(None);
+        }
+        return Ok(Some(
+            (left_nil || left.is_nil()) && (right_nil || right.is_nil()),
+        ));
     }
     let left = left_bool.or_else(|| match left {
         Val::Bool(value) => Some(value),
@@ -144,6 +151,43 @@ pub(crate) fn checked_boolean_equality(
         _ => None,
     });
     Ok(Some(left.is_some() && left == right))
+}
+
+fn checked_secret_nil(state: &LuaState, value: Val) -> LuaResult<bool> {
+    let Val::Userdata(reference) = value else {
+        return Ok(false);
+    };
+    if !matches!(
+        state
+            .gc
+            .userdata
+            .get(reference)
+            .and_then(Userdata::secret_value),
+        Some(Val::Nil)
+    ) {
+        return Ok(false);
+    }
+    Ok(unwrap_secret(state, value)?.is_nil())
+}
+
+/// Resolve a wrapped table only for ordinary Lua indexing. Fields returned
+/// by the table or its __index chain remain plain Lua values; this is not
+/// recursive secret propagation or a native-verified information-flow policy.
+pub(crate) fn checked_secret_table_read(state: &LuaState, value: Val) -> LuaResult<Val> {
+    let Val::Userdata(reference) = value else {
+        return Ok(value);
+    };
+    if !matches!(
+        state
+            .gc
+            .userdata
+            .get(reference)
+            .and_then(Userdata::secret_value),
+        Some(Val::Table(_))
+    ) {
+        return Ok(value);
+    }
+    unwrap_secret(state, value)
 }
 
 /// Inspect only wrapped booleans and numbers before order comparisons.

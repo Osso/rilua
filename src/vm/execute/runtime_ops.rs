@@ -515,6 +515,7 @@ fn gettable_step(
     base: usize,
     obj_reg: Option<usize>,
 ) -> LuaResult<GettableStep> {
+    let current = crate::table_security::checked_secret_table_read(state, current)?;
     match current {
         Val::Table(table_ref) => {
             handle_table_gettable(state, current, table_ref, key, resolved_key, result_reg)

@@ -34,7 +34,7 @@ use super::string::LuaString;
 use super::table::Table;
 use super::value::{Userdata, Val, append_lua_number_bytes, lua_number_string_len};
 use crate::check_interrupted;
-use crate::table_security::{checked_boolean_equality, checked_truthiness};
+use crate::table_security::{checked_secret_equality, checked_truthiness};
 
 use crate::platform::{localeconv, strcoll, strtod};
 
@@ -1557,8 +1557,7 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Eq => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let equal = if let Some(equal) = checked_boolean_equality(state, b_val, c_val)?
-                    {
+                    let equal = if let Some(equal) = checked_secret_equality(state, b_val, c_val)? {
                         equal
                     } else if val_equal(b_val, c_val, &state.gc) {
                         // Raw-equal succeeded.
@@ -2026,6 +2025,9 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
 
                     let cl_ref = state.gc.alloc_closure(Closure::Lua(new_cl));
                     state.stack_set(ra, Val::Function(cl_ref));
+                    if let Some(taint) = state.call_stack[state.ci].taint.clone() {
+                        crate::stdlib::taint::set_closure_taint(state, cl_ref, Some(&taint))?;
+                    }
                 }
 
                 OpCode::Close => {

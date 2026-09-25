@@ -57,6 +57,32 @@ fn secure_calls_clear_caller_taint_but_not_callee_stamps() {
 }
 
 #[test]
+fn nested_closures_created_by_addon_remain_tainted_across_secure_calls_and_gc() {
+    let mut lua = Lua::new().unwrap();
+    rilua::table_security::register_table_security(&mut lua).unwrap();
+    lua.exec(
+        r#"
+        debug.settaintmode(true)
+        local protected = {value = 17}
+        settablesecurity(protected, 0)
+        local function make() return function() return protected.value end end
+        debug.setobjecttaint(make, 'Addon')
+        local callback = make()
+        assert(not pcall(securecallfunction, callback))
+        collectgarbage('collect')
+        assert(not pcall(securecallfunction, callback))
+        local function trusted() return function() return protected.value end end
+        assert(securecallfunction(trusted()) == 17)
+        callback = nil
+        collectgarbage('collect')
+        collectgarbage('collect')
+        assert(securecallfunction(trusted()) == 17)
+    "#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn collected_closure_stamp_does_not_transfer_to_reused_slot() {
     let mut lua = Lua::new().unwrap();
     lua.exec(

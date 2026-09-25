@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
-use crate::table_security::{checked_boolean_equality, checked_truthiness};
+use crate::table_security::{checked_secret_equality, checked_truthiness};
 use crate::vm::callinfo::LUA_MULTRET;
 use crate::vm::execute;
 use crate::vm::metatable::{self, val_raw_equal};
@@ -732,7 +732,7 @@ pub fn lua_rawequal(state: &mut LuaState) -> LuaResult<u32> {
     let v1 = arg(state, 0);
     let v2 = arg(state, 1);
 
-    let result = checked_boolean_equality(state, v1, v2)?
+    let result = checked_secret_equality(state, v1, v2)?
         .unwrap_or_else(|| val_raw_equal(v1, v2, &state.gc.tables, &state.gc.string_arena));
     state.push(Val::Bool(result));
     Ok(1)

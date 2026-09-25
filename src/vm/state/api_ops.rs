@@ -1,7 +1,9 @@
 //! API-facing table and metamethod operations for `LuaState`.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
-use crate::table_security::{checked_boolean_equality, checked_order_operand, checked_truthiness};
+use crate::table_security::{
+    checked_order_operand, checked_secret_equality, checked_secret_table_read, checked_truthiness,
+};
 use crate::vm::value::append_lua_number_bytes;
 
 use super::{GettableOrigin, LuaState, Table, Val};
@@ -23,6 +25,7 @@ impl LuaState {
     fn resolve_gettable_chain(&mut self, t: Val, key: Val) -> LuaResult<Val> {
         let mut current = t;
         for _ in 0..MAXTAGLOOP {
+            current = checked_secret_table_read(self, current)?;
             if let Val::Table(table_ref) = current {
                 let result = self
                     .gc
@@ -134,7 +137,7 @@ impl LuaState {
     /// Equivalent to PUC-Rio's `lua_equal`. Triggers `__eq` metamethod
     /// for tables and userdata of the same type.
     pub fn api_equal(&mut self, a: Val, b: Val) -> LuaResult<bool> {
-        if let Some(result) = checked_boolean_equality(self, a, b)? {
+        if let Some(result) = checked_secret_equality(self, a, b)? {
             return Ok(result);
         }
         if val_raw_equal(a, b, &self.gc.tables, &self.gc.string_arena) {

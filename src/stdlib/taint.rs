@@ -179,7 +179,9 @@ pub fn set_closure_taint(
         .tables
         .get_mut(table)
         .ok_or_else(|| runtime_error("closure taint table missing"))?
-        .raw_set(Val::Function(closure), value, &state.gc.string_arena)
+        .raw_set(Val::Function(closure), value, &state.gc.string_arena)?;
+    state.gc.barrier_back(table);
+    Ok(())
 }
 
 /// Read a live closure's stamp without creating registry state.
@@ -238,6 +240,7 @@ fn get_or_create_closure_taint_table(state: &mut LuaState) -> LuaResult<GcRef<Ta
         .get_mut(state.registry)
         .ok_or_else(|| runtime_error("registry table missing"))?
         .raw_set(Val::Str(key), Val::Table(new_table), &state.gc.string_arena)?;
+    state.gc.barrier_back(state.registry);
     Ok(new_table)
 }
 
@@ -851,6 +854,91 @@ mod tests {
         assert_eq!(
             get_closure_taint(&mut state, closure_ref).as_deref(),
             Some("RegistryAddon")
+        );
+    }
+
+    #[test]
+    fn first_closure_stamp_survives_incremental_registry_publication() {
+        let mut state = new_state_with_taint_api();
+        let closure = state
+            .gc
+            .alloc_closure(Closure::Rust(RustClosure::new(noop_callback, "noop")));
+        state.push(Val::Function(closure));
+        for _ in 0..1000 {
+            if state
+                .gc
+                .tables
+                .color(state.registry)
+                .is_some_and(|color| color.is_black())
+            {
+                break;
+            }
+            state.gc_singlestep().unwrap();
+        }
+        assert!(
+            state
+                .gc
+                .tables
+                .color(state.registry)
+                .is_some_and(|color| color.is_black())
+        );
+        set_closure_taint(&mut state, closure, Some("IncrementalAddon")).unwrap();
+        for _ in 0..1000 {
+            if state.gc.gc_state.phase == crate::vm::gc::collector::GcPhase::Pause {
+                break;
+            }
+            state.gc_singlestep().unwrap();
+        }
+        assert_eq!(
+            state.gc.gc_state.phase,
+            crate::vm::gc::collector::GcPhase::Pause
+        );
+        assert_eq!(
+            get_closure_taint(&mut state, closure).as_deref(),
+            Some("IncrementalAddon")
+        );
+    }
+
+    #[test]
+    fn later_closure_stamp_survives_incremental_table_write() {
+        let mut state = new_state_with_taint_api();
+        let table = get_or_create_closure_taint_table(&mut state).unwrap();
+        let closure = state
+            .gc
+            .alloc_closure(Closure::Rust(RustClosure::new(noop_callback, "noop")));
+        state.push(Val::Function(closure));
+        for _ in 0..1000 {
+            if state
+                .gc
+                .tables
+                .color(table)
+                .is_some_and(|color| color.is_black())
+            {
+                break;
+            }
+            state.gc_singlestep().unwrap();
+        }
+        assert!(
+            state
+                .gc
+                .tables
+                .color(table)
+                .is_some_and(|color| color.is_black())
+        );
+        set_closure_taint(&mut state, closure, Some("LaterAddon")).unwrap();
+        for _ in 0..1000 {
+            if state.gc.gc_state.phase == crate::vm::gc::collector::GcPhase::Pause {
+                break;
+            }
+            state.gc_singlestep().unwrap();
+        }
+        assert_eq!(
+            state.gc.gc_state.phase,
+            crate::vm::gc::collector::GcPhase::Pause
+        );
+        assert_eq!(
+            get_closure_taint(&mut state, closure).as_deref(),
+            Some("LaterAddon")
         );
     }
 
