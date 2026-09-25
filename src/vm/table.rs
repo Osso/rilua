@@ -177,6 +177,8 @@ pub struct Table {
     slot_taint: Option<std::collections::HashMap<TaintKey, String>>,
     /// Opt-in table access policy; separate from metamethod cache flags.
     pub(crate) security_flags: u8,
+    /// Shallow write protection; unlike GC Frozen, does not pin or skip tracing.
+    read_only: bool,
 }
 
 /// Key type for the per-slot taint map.
@@ -202,6 +204,7 @@ impl Table {
             backing: None,
             slot_taint: None,
             security_flags: 0,
+            read_only: false,
         }
     }
 
@@ -223,6 +226,7 @@ impl Table {
                 backing: None,
                 slot_taint: None,
                 security_flags: 0,
+                read_only: false,
             }
         } else {
             let log2 = ceil_log2(hash_size);
@@ -238,8 +242,19 @@ impl Table {
                 backing: None,
                 slot_taint: None,
                 security_flags: 0,
+                read_only: false,
             }
         }
+    }
+
+    /// Protects this table's entries without affecting descendants or GC lifetime.
+    pub fn make_read_only(&mut self) {
+        self.read_only = true;
+    }
+
+    /// Whether this table is shallowly write-protected.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Returns the size of the array part.
@@ -1124,6 +1139,9 @@ impl Table {
         value: Val,
         strings: &Arena<LuaString>,
     ) -> LuaResult<usize> {
+        if self.read_only {
+            return Err(runtime_error("attempt to modify a read-only table"));
+        }
         // Invalidate metamethod cache for `__` keys.
         if let Val::Str(r) = key
             && let Some(s) = strings.get(r)

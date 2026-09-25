@@ -411,6 +411,122 @@ mod tests {
     }
 
     #[test]
+    fn shallow_read_only_rejects_root_writes_but_not_closure_environment_or_children() {
+        use crate::Lua;
+        use crate::api::LuaApiMut;
+
+        let mut lua = Lua::new().expect("lua");
+        lua.exec("local up = { value = 1 }; shallow_root = { child = { value = 1 }, fn = function() up.value = 2; _G.shallow_env_write = true end }")
+            .expect("create closure and children");
+        let root = match lua.get_global_val("shallow_root") {
+            Val::Table(r) => r,
+            other => panic!("expected table, got {other:?}"),
+        };
+        lua.state_mut()
+            .gc
+            .tables
+            .get_mut(root)
+            .unwrap()
+            .make_read_only();
+        assert!(lua.state_mut().gc.tables.get(root).unwrap().is_read_only());
+        assert!(!lua.state_mut().gc.tables.is_frozen(root));
+
+        lua.exec("shallow_root.fn(); shallow_root.child.value = 3; assert(shallow_env_write and shallow_root.child.value == 3)")
+            .expect("closure env, upvalue, and child stay mutable");
+        for write in [
+            "shallow_root.child = {}",
+            "shallow_root.new = 1",
+            "rawset(shallow_root, 'child', nil)",
+            "table.insert(shallow_root, 4)",
+            "setmetatable(shallow_root, {})",
+        ] {
+            let result = lua.exec(write);
+            assert!(
+                matches!(&result, Err(err) if format!("{err}").contains("read-only table")),
+                "{write}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shallow_read_only_sort_cannot_swap_array_elements() {
+        use crate::Lua;
+        use crate::api::LuaApiMut;
+
+        let mut lua = Lua::new().expect("lua");
+        lua.exec("shallow_root = { 2, 1 }").unwrap();
+        let root = match lua.get_global_val("shallow_root") {
+            Val::Table(r) => r,
+            other => panic!("expected table, got {other:?}"),
+        };
+        lua.state_mut()
+            .gc
+            .tables
+            .get_mut(root)
+            .unwrap()
+            .make_read_only();
+        let result = lua.exec("table.sort(shallow_root)");
+        assert!(
+            matches!(&result, Err(err) if format!("{err}").contains("read-only table")),
+            "{result:?}"
+        );
+        lua.exec("assert(shallow_root[1] == 2 and shallow_root[2] == 1)")
+            .expect("sort leaves root unchanged");
+    }
+
+    #[test]
+    fn shallow_read_only_root_traces_children_during_full_gc() {
+        use crate::Lua;
+        use crate::api::LuaApiMut;
+
+        let mut lua = Lua::new().expect("lua");
+        lua.exec("shallow_root = { child = { value = 'retained' } }")
+            .unwrap();
+        let root = match lua.get_global_val("shallow_root") {
+            Val::Table(r) => r,
+            other => panic!("expected table, got {other:?}"),
+        };
+        lua.state_mut()
+            .gc
+            .tables
+            .get_mut(root)
+            .unwrap()
+            .make_read_only();
+        lua.state_mut().full_gc().expect("full gc");
+        lua.exec(
+            "assert(shallow_root.child.value == 'retained'); shallow_root.child.value = 'changed'",
+        )
+        .expect("child remains reachable and mutable");
+    }
+
+    #[test]
+    fn shallow_read_only_root_is_collectible_and_other_tables_stay_mutable() {
+        use crate::Lua;
+        use crate::api::LuaApiMut;
+
+        let mut lua = Lua::new().expect("lua");
+        lua.exec("weak_roots = setmetatable({}, { __mode = 'v' }); shallow_root = {}; weak_roots[1] = shallow_root")
+            .unwrap();
+        let root = match lua.get_global_val("shallow_root") {
+            Val::Table(r) => r,
+            other => panic!("expected table, got {other:?}"),
+        };
+        lua.state_mut()
+            .gc
+            .tables
+            .get_mut(root)
+            .unwrap()
+            .make_read_only();
+        lua.exec("shallow_root = nil").unwrap();
+        lua.state_mut().full_gc().expect("full gc");
+        lua.exec(
+            "assert(weak_roots[1] == nil); local fresh = {}; fresh[1] = 42; assert(fresh[1] == 42)",
+        )
+        .expect("root collected and fresh table mutable");
+        assert!(!lua.state_mut().gc.tables.is_valid(root));
+    }
+
+    #[test]
     fn rawset_on_frozen_table_raises_error() {
         use crate::Lua;
         use crate::api::LuaApiMut;

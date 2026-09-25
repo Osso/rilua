@@ -720,7 +720,7 @@ fn table_has_no_metatable(state: &LuaState, table_ref: GcRef<Table>) -> LuaResul
     Ok(table.metatable().is_none())
 }
 
-/// Gate a table write on the Frozen flag.
+/// Gate a table write on recursive GC Frozen or shallow read-only state.
 ///
 /// Frozen tables are expected to be pinned as part of the Track 2
 /// freeze-after-bootstrap plan; writing into one would silently break
@@ -735,6 +735,14 @@ fn table_has_no_metatable(state: &LuaState, table_ref: GcRef<Table>) -> LuaResul
 pub(super) fn ensure_table_not_frozen(state: &LuaState, table_ref: GcRef<Table>) -> LuaResult<()> {
     if state.gc.tables.is_frozen(table_ref) {
         return Err(runtime_error_simple("attempt to modify a frozen table"));
+    }
+    if state
+        .gc
+        .tables
+        .get(table_ref)
+        .is_some_and(Table::is_read_only)
+    {
+        return Err(runtime_error_simple("attempt to modify a read-only table"));
     }
     Ok(())
 }

@@ -102,6 +102,9 @@ fn swap_sort_values(
     right_val: Val,
 ) -> LuaResult<()> {
     crate::table_security::check_table_access(state, tref, None)?;
+    if state.gc.tables.get(tref).is_some_and(Table::is_read_only) {
+        return Err(simple_error("attempt to modify a read-only table".into()));
+    }
     if left_idx == right_idx {
         return Ok(());
     }

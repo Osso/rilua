@@ -575,6 +575,16 @@ pub fn lua_setmetatable(state: &mut LuaState) -> LuaResult<u32> {
     };
 
     crate::table_security::check_table_access(state, table_ref, None)?;
+    if state
+        .gc
+        .tables
+        .get(table_ref)
+        .is_some_and(Table::is_read_only)
+    {
+        return Err(crate::error::runtime_error(
+            "attempt to modify a read-only table",
+        ));
+    }
 
     // Validate second argument is nil or table.
     let new_mt = match mt_val {
