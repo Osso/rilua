@@ -214,6 +214,18 @@ fn get_or_create_closure_taint_table(state: &mut LuaState) -> LuaResult<GcRef<Ta
     {
         return Ok(t);
     }
+    let new_table = create_weak_closure_taint_table(state)?;
+    state
+        .gc
+        .tables
+        .get_mut(state.registry)
+        .ok_or_else(|| runtime_error("registry table missing"))?
+        .raw_set(Val::Str(key), Val::Table(new_table), &state.gc.string_arena)?;
+    state.gc.barrier_back(state.registry);
+    Ok(new_table)
+}
+
+fn create_weak_closure_taint_table(state: &mut LuaState) -> LuaResult<GcRef<Table>> {
     let mode_key = state.gc.intern_string_static(b"__mode");
     let weak_keys = state.gc.intern_string_static(b"k");
     let metatable = state.gc.alloc_table(Table::new());
@@ -234,13 +246,6 @@ fn get_or_create_closure_taint_table(state: &mut LuaState) -> LuaResult<GcRef<Ta
         .get_mut(new_table)
         .ok_or_else(|| runtime_error("closure taint table missing"))?
         .set_metatable(Some(metatable));
-    state
-        .gc
-        .tables
-        .get_mut(state.registry)
-        .ok_or_else(|| runtime_error("registry table missing"))?
-        .raw_set(Val::Str(key), Val::Table(new_table), &state.gc.string_arena)?;
-    state.gc.barrier_back(state.registry);
     Ok(new_table)
 }
 
