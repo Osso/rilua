@@ -93,6 +93,63 @@ fn host_secret_booleans_keep_taint_and_secure_boolean_control_flow() {
 }
 
 #[test]
+fn secret_numbers_order_securely_without_exposing_other_operations() {
+    host_bool_lua()
+        .exec(
+            r#"
+        local one, two = secretwrap(1), secretwrap(2)
+        assert(one < 2 and one <= 1 and 2 > one and 1 >= one)
+        assert(1 < two and 2 <= two and two > 1 and two >= 2)
+        assert(one < two and one <= two and two > one and two >= one)
+        assert(not (two < one) and not (one >= two))
+        assert(host_api_less(one, 2) and host_api_less(1, two))
+        assert(host_api_less(one, two) and not host_api_less(two, one))
+        assert(3 < 4 and 3 <= 3 and 4 > 3 and 4 >= 4)
+        assert(one ~= 1 and one ~= secretwrap(1))
+        assert(not pcall(function() return one + 1 end))
+        assert(not pcall(function() return one - 1 end))
+        local opaque = secretwrap('1')
+        local wrappedBool = secretwrap(true)
+        for _, operation in ipairs({
+            function() return opaque < 2 end,
+            function() return 2 <= opaque end,
+            function() return opaque < secretwrap('2') end,
+            function() return wrappedBool < one end,
+            function() return one <= wrappedBool end,
+            function() return host_api_less(opaque, 2) end,
+        }) do
+            assert(not pcall(operation))
+        end
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn tainted_closure_cannot_order_secret_numbers_even_through_secure_call() {
+    host_bool_lua()
+        .exec(
+            r#"
+        local one, two = secretwrap(1), secretwrap(2)
+        local operations = {
+            function() return one < 2 end,
+            function() return 2 > one end,
+            function() return one <= two end,
+            function() return two >= one end,
+            function() return host_api_less(one, 2) end,
+        }
+        for _, operation in ipairs(operations) do
+            debug.setobjecttaint(operation, 'TestAddon')
+            local ok, message = pcall(securecallfunction, operation)
+            assert(not ok and string.find(message, 'untainted caller', 1, true), tostring(message))
+        end
+        assert(one < two and 2 > one)
+    "#,
+        )
+        .unwrap();
+}
+
+#[test]
 fn tainted_code_cannot_inspect_secret_booleans_even_by_alias_identity() {
     host_bool_lua()
         .exec(

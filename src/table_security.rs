@@ -2,8 +2,8 @@
 //!
 //! This is not a general secret-value VM: wrappers cannot participate in Lua
 //! arithmetic. Secret booleans support guarded control-flow and comparisons;
-//! other wrapped payloads remain opaque. The private payload is GC-traced and
-//! is never stored in fenv.
+//! secret numbers support guarded ordering. Other wrapped payloads remain opaque.
+//! The private payload is GC-traced and never stored in fenv.
 //! Access-boundary callers must invoke `check_table_access` before reading or
 //! mutating a table. Low-level arena/table operations remain trusted host APIs.
 
@@ -146,11 +146,27 @@ pub(crate) fn checked_boolean_equality(
     Ok(Some(left.is_some() && left == right))
 }
 
-/// Inspect only wrapped booleans before order comparisons. Lua still rejects
-/// ordering booleans; this check prevents a tainted caller reaching an identity
-/// or metamethod path with a secret boolean.
+/// Inspect only wrapped booleans and numbers before order comparisons.
+/// Lua still rejects ordering booleans; numeric payloads use ordinary Lua
+/// ordering only after the stack-wide secure-caller check.
 pub(crate) fn checked_order_operand(state: &LuaState, value: Val) -> LuaResult<Val> {
-    Ok(checked_secret_bool(state, value)?.map_or(value, Val::Bool))
+    if let Some(boolean) = checked_secret_bool(state, value)? {
+        return Ok(Val::Bool(boolean));
+    }
+    let Val::Userdata(reference) = value else {
+        return Ok(value);
+    };
+    if matches!(
+        state
+            .gc
+            .userdata
+            .get(reference)
+            .and_then(Userdata::secret_value),
+        Some(Val::Num(_))
+    ) {
+        return unwrap_secret(state, value);
+    }
+    Ok(value)
 }
 
 /// Unwrap to the original value, preserving table and ordinary-key identity.
