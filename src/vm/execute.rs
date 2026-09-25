@@ -2025,7 +2025,11 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
 
                     let cl_ref = state.gc.alloc_closure(Closure::Lua(new_cl));
                     state.stack_set(ra, Val::Function(cl_ref));
-                    if let Some(taint) = state.call_stack[state.ci].taint.clone() {
+                    let active_taint = state.call_stack[..=state.ci]
+                        .iter()
+                        .rev()
+                        .find_map(|frame| frame.taint.clone());
+                    if let Some(taint) = active_taint {
                         crate::stdlib::taint::set_closure_taint(state, cl_ref, Some(&taint))?;
                     }
                 }

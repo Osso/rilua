@@ -83,6 +83,35 @@ fn nested_closures_created_by_addon_remain_tainted_across_secure_calls_and_gc() 
 }
 
 #[test]
+fn trusted_factory_inherits_tainted_caller_unless_securely_called() {
+    let mut lua = Lua::new().unwrap();
+    rilua::table_security::register_table_security(&mut lua).unwrap();
+    lua.exec(
+        r#"
+        debug.settaintmode(true)
+        local protected = {value = 17}
+        settablesecurity(protected, 0)
+        local function factory()
+            return function() return protected.value end
+        end
+        local function addon()
+            local inherited = factory()
+            local clean = securecallfunction(factory)
+            return inherited, clean
+        end
+        debug.setobjecttaint(addon, 'Addon')
+        local inherited, clean = addon()
+        assert(not pcall(securecallfunction, inherited), 'trusted factory lost caller taint')
+        assert(securecallfunction(clean) == 17, 'secure factory inherited suspended caller taint')
+        collectgarbage('collect')
+        assert(not pcall(securecallfunction, inherited), 'inherited stamp lost after GC')
+        assert(securecallfunction(clean) == 17, 'clean stamp changed after GC')
+    "#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn collected_closure_stamp_does_not_transfer_to_reused_slot() {
     let mut lua = Lua::new().unwrap();
     lua.exec(
