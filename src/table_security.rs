@@ -97,6 +97,21 @@ pub fn wrap_host_secret_bool(state: &mut LuaState, value: bool) -> Val {
     Val::Userdata(state.gc.alloc_userdata(Userdata::secret(Val::Bool(value))))
 }
 
+/// Create a secret result from a number computed by trusted Rust host code.
+/// Unlike `wrap_secret`, this does not accept a Lua value or change caller taint.
+/// The caller must root the result before another GC safe point.
+pub fn wrap_host_secret_number(state: &mut LuaState, value: f64) -> Val {
+    Val::Userdata(state.gc.alloc_userdata(Userdata::secret(Val::Num(value))))
+}
+
+/// Copy a string computed by trusted Rust host code into a VM-owned secret result.
+/// Unlike `wrap_secret`, this does not accept a Lua value or change caller taint.
+/// The caller must root the result before another GC safe point.
+pub fn wrap_host_secret_string(state: &mut LuaState, value: &str) -> Val {
+    let payload = Val::Str(state.gc.intern_string(value.as_bytes()));
+    Val::Userdata(state.gc.alloc_userdata(Userdata::secret(payload)))
+}
+
 /// Return a secret boolean's payload through the existing secure-caller guard.
 /// Non-boolean secret wrappers and ordinary Lua values keep their original behavior.
 fn checked_secret_bool(state: &LuaState, value: Val) -> LuaResult<Option<bool>> {

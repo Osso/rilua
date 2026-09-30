@@ -1,6 +1,7 @@
 use rilua::api::state_is_secure;
 use rilua::table_security::{
-    check_table_access, set_table_security, wrap_host_secret_bool, wrap_secret,
+    check_table_access, set_table_security, wrap_host_secret_bool, wrap_host_secret_number,
+    wrap_host_secret_string, wrap_secret,
 };
 use rilua::vm::table::Table;
 use rilua::{Lua, LuaApi, LuaApiMut, Val};
@@ -49,6 +50,70 @@ fn host_bool_lua() -> Lua {
     lua.exec("debug.settaintmode(true); function call_tainted(fn) debug.setstacktaint('TestAddon'); return fn() end")
         .unwrap();
     lua
+}
+
+#[test]
+fn host_secret_number_and_string_preserve_taint_and_payload_guards() {
+    use rilua::LuaResult;
+    use rilua::vm::state::LuaState;
+
+    fn host_number(state: &mut LuaState) -> LuaResult<u32> {
+        let before = state_is_secure(state);
+        let secret = wrap_host_secret_number(state, 3.0);
+        state.push(secret);
+        assert_eq!(state_is_secure(state), before);
+        assert!(wrap_secret(state, Val::Num(3.0)).is_err());
+        Ok(1)
+    }
+    fn host_string(state: &mut LuaState) -> LuaResult<u32> {
+        let before = state_is_secure(state);
+        let payload = String::from("1.5%");
+        let secret = wrap_host_secret_string(state, &payload);
+        state.push(secret);
+        assert_eq!(state_is_secure(state), before);
+        assert!(wrap_secret(state, Val::Num(3.0)).is_err());
+        Ok(1)
+    }
+
+    let mut lua = host_bool_lua();
+    lua.register_function("host_number", host_number).unwrap();
+    lua.register_function("host_string", host_string).unwrap();
+    lua.exec(
+        r#"
+        assert(wrap_host_secret_number == nil and wrap_host_secret_string == nil)
+        local number, text = call_tainted(function()
+            assert(debug.getstacktaint() == 'TestAddon')
+            local number = host_number()
+            assert(debug.getstacktaint() == 'TestAddon')
+            local text = host_string()
+            assert(debug.getstacktaint() == 'TestAddon')
+            assert(issecretvalue(number) and issecretvalue(text))
+            for _, value in ipairs({number, text}) do
+                local ok, message = pcall(secretunwrap, value)
+                assert(not ok and string.find(message, 'untainted caller', 1, true))
+            end
+            local ok, message = pcall(secretwrap, 3, '1.5%')
+            assert(not ok and string.find(message, 'untainted caller', 1, true))
+            assert(debug.getstacktaint() == 'TestAddon')
+            return number, text
+        end)
+        assert(debug.getstacktaint() == nil)
+        assert(type(number) == 'userdata' and type(text) == 'userdata')
+        assert(issecretvalue(number) and issecretvalue(text))
+        assert(secretunwrap(number) == 3 and secretunwrap(text) == '1.5%')
+        assert(getmetatable(text) == nil and debug.getmetatable(text) == nil)
+        assert(not pcall(getfenv, text))
+        assert(text ~= '1.5%')
+        assert(not string.find(tostring(text), '1.5%', 1, true))
+        assert(not pcall(function() return text .. '' end))
+        assert(not pcall(string.len, text))
+        collectgarbage('collect')
+        collectgarbage('collect')
+        assert(issecretvalue(number) and issecretvalue(text))
+        assert(secretunwrap(number) == 3 and secretunwrap(text) == '1.5%')
+    "#,
+    )
+    .unwrap();
 }
 
 #[test]
