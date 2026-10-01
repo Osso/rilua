@@ -3,9 +3,9 @@
 //! Reference: `lstrlib.c` in PUC-Rio Lua 5.1.1.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
-use crate::table_security::checked_truthiness;
+use crate::table_security::{checked_truthiness, is_secret_value};
 use crate::vm::state::LuaState;
-use crate::vm::value::Val;
+use crate::vm::value::{Userdata, Val};
 
 // ---------------------------------------------------------------------------
 // Argument helpers (same pattern as base.rs)
@@ -303,6 +303,7 @@ const LUA_MAXCAPTURES: usize = 32;
 pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
     check_args("string.format", state, 1)?;
     let fmt = check_string(state, "string.format", 0)?;
+    let secret_result = (0..nargs(state)).any(|index| is_secret_value(state, arg(state, index)));
     let mut result = Vec::new();
     let mut arg_idx = 1usize; // Next argument index (0 = format string itself).
     let mut i = 0;
@@ -415,6 +416,9 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
             b's' => {
                 let val = arg(state, arg_idx);
                 arg_idx += 1;
+                if append_secret_format_string(state, val, &mut result, arg_idx)? {
+                    continue;
+                }
                 // Lua strings are byte arrays, not UTF-8. We must work
                 // with raw bytes to avoid replacing high bytes with the
                 // UTF-8 replacement character (U+FFFD).
@@ -480,8 +484,51 @@ pub fn str_format(state: &mut LuaState) -> LuaResult<u32> {
     }
 
     let r = state.gc.intern_string(&result);
-    state.push(Val::Str(r));
+    let output = if secret_result {
+        Val::Userdata(state.gc.alloc_userdata(Userdata::secret(Val::Str(r))))
+    } else {
+        Val::Str(r)
+    };
+    state.push(output);
     Ok(1)
+}
+
+/// Opaque `%s` operation: copy VM-private string bytes without exposing a Lua
+/// payload. Secret strings ignore width and precision; the caller wraps the
+/// complete result. Tainted-call permission is inferred, not native-verified.
+fn append_secret_format_string(
+    state: &LuaState,
+    value: Val,
+    output: &mut Vec<u8>,
+    arg_index: usize,
+) -> LuaResult<bool> {
+    let Val::Userdata(reference) = value else {
+        return Ok(false);
+    };
+    let Some(payload) = state
+        .gc
+        .userdata
+        .get(reference)
+        .and_then(Userdata::secret_value)
+    else {
+        return Ok(false);
+    };
+    let Val::Str(reference) = payload else {
+        return Err(bad_argument(
+            "string.format",
+            arg_index,
+            "secret string expected",
+        ));
+    };
+    let string = state.gc.string_arena.get(reference).ok_or_else(|| {
+        bad_argument(
+            "string.format",
+            arg_index,
+            "secret string has been collected",
+        )
+    })?;
+    output.extend_from_slice(string.data());
+    Ok(true)
 }
 
 /// Coerce a value to f64 or return an error.

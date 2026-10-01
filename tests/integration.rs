@@ -13,6 +13,9 @@ mod compiler_nil_initialization;
 #[path = "helpers/closure_taint.rs"]
 mod closure_taint;
 
+#[path = "helpers/secret_string_formatting.rs"]
+mod secret_string_formatting;
+
 #[path = "helpers/table_security.rs"]
 mod table_security;
 #[path = "helpers/table_security_stdlib.rs"]

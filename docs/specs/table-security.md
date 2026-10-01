@@ -26,6 +26,14 @@ Infallible embedding-only `Table::raw_len`, `LuaApi::table_raw_len`, and `LuaApi
 
 `tests/helpers/table_security_stdlib.rs` covers these stdlib boundaries, secure access, tainted rejection without mutation, secret-key rejection/unwrapping, retained iterators, and Lua-invoked Rust functions using checked handles. These stdlib fixtures use live `debug.setstacktaint`. Separate `tests/helpers/closure_taint.rs` regressions cover closure-object stamps through ordinary calls, protected/nested calls, tail calls, delayed callbacks, and coroutine entry.
 
+## Opaque secret-string formatting
+
+`string.format` copies VM-private secret-string payload bytes for `%s`, ignoring both precision (`%.5s` preserves all of `abcdefgh`) and width (`%12s` and `%-12s` add no padding). Public strings retain ordinary width/precision behavior. Successful formatting returns a VM-owned secret string if any input is secret, including unused arguments; mixed public fields still honor their own formatting. Payloads and result provenance survive GC. Non-string secrets are not decoded by `%s`; secret numeric conversions and `%q` are outside this contract.
+
+The retained WoW 12.0.5 API change states: “String formatting APIs no longer honor field width modifiers for secret string values (e.g. the `"%.5s"` format will no longer truncate a secret string).” Tainted addon calls are permitted as opaque formatting operations, retaining secret output and caller stack taint. That permission and result-provenance policy are explicit inferences from addon-focused notes, not native-verified semantics. Existing public `secretunwrap` and host `unwrap_secret` guards remain unchanged; no decoded Lua callback or public payload accessor is added. `SetFormattedText` consumer storage/display policy is outside this VM fix.
+
+`tests/helpers/secret_string_formatting.rs`, grouped in the existing integration target, covers host-created payloads, full precision, width/alignment, public controls, mixed arguments, unused secret input provenance, GC after releasing the input, and tainted closure calls with rejected input/output unwrapping.
+
 ## Closure stamp propagation
 
 Call entry reads the existing `debug.setobjecttaint` registry stamp and applies it to the new Lua or Rust call frame. Lua closures created while any active call frame is tainted receive that effective taint stamp, including when trusted code is called by a tainted caller; a secure call suspends that inherited taint for closures it creates. Tail-call frame reuse preserves callee stamps and an insecure caller's taint. Secure calls temporarily clear the caller chain and restore it on return or error, without removing the callee's own stamp. Clearing an object's stamp with nil restores untainted entry from an untainted caller.
