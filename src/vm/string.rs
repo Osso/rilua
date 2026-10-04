@@ -181,6 +181,20 @@ pub struct StringTable {
     count: usize,
 }
 
+/// Revives a string the collector marked dead but has not swept yet.
+///
+/// After the atomic phase flips `current_white`, unreached objects carry the
+/// other white until swept. Handing such a string back from the intern table
+/// without recoloring lets the sweep free it while it is in use (PUC-Rio
+/// `luaS_newlstr` does `changewhite` for the same reason). Sweeps reset
+/// survivors to `current_white`, so the other white always means dead.
+#[inline]
+fn resurrect_if_dead(arena: &mut Arena<LuaString>, r: GcRef<LuaString>, current_white: Color) {
+    if arena.color(r) == Some(current_white.other_white()) {
+        arena.set_color(r, current_white);
+    }
+}
+
 impl StringTable {
     /// Creates a new string table with `MINSTRTABSIZE` (32) buckets.
     pub fn new() -> Self {
@@ -225,10 +239,7 @@ impl StringTable {
                 && s.data.len() == data.len()
                 && *s.data == *data
             {
-                // Found existing string.
-                // Resurrection of dead strings will be added with the
-                // GC collector (Phase 7). For now, all valid refs are
-                // returned as-is.
+                resurrect_if_dead(arena, r, current_white);
                 return r;
             }
         }
@@ -266,6 +277,7 @@ impl StringTable {
                 && s.data.len() == data.len()
                 && *s.data == *data
             {
+                resurrect_if_dead(arena, r, current_white);
                 return r;
             }
         }
@@ -605,6 +617,54 @@ mod tests {
         assert_eq!(r1, r2, "same content should return same GcRef");
         assert_eq!(table.count(), 1, "should not allocate twice");
         assert_eq!(arena.len(), 1);
+    }
+
+    #[test]
+    fn reinterning_a_dead_string_survives_the_string_sweep() {
+        // Allocated under White0, then the atomic phase flips current white
+        // to White1: the unreached string now carries the dead (other) white.
+        let mut arena = Arena::new();
+        let mut table = StringTable::new();
+        let hash = lua_hash(b"reused");
+        let dead = table.intern_hashed(b"reused", hash, &mut arena, Color::White0);
+
+        let revived = table.intern_hashed(b"reused", hash, &mut arena, Color::White1);
+        assert_eq!(revived, dead);
+        assert_eq!(arena.color(revived), Some(Color::White1));
+
+        let (freed, _, done) = arena.sweep_partial(Color::White0, Color::White1, 0, 64);
+        assert!(done);
+        assert_eq!(freed, 0, "a re-interned string must not be swept");
+        assert_eq!(
+            arena.get(revived).expect("string survives").data(),
+            b"reused"
+        );
+    }
+
+    #[test]
+    fn reinterning_owned_bytes_revives_a_dead_string() {
+        let mut arena = Arena::new();
+        let mut table = StringTable::new();
+        let hash = lua_hash(b"owned");
+        let dead = table.intern_hashed_owned(b"owned".to_vec(), hash, &mut arena, Color::White0);
+
+        let revived = table.intern_hashed_owned(b"owned".to_vec(), hash, &mut arena, Color::White1);
+        assert_eq!(revived, dead);
+
+        let (freed, _, _) = arena.sweep_partial(Color::White0, Color::White1, 0, 64);
+        assert_eq!(freed, 0);
+        assert!(arena.get(revived).is_some());
+    }
+
+    #[test]
+    fn unreferenced_dead_string_is_still_swept() {
+        let mut arena = Arena::new();
+        let mut table = StringTable::new();
+        let dead = table.intern(b"garbage", &mut arena, Color::White0);
+
+        let (freed, _, _) = arena.sweep_partial(Color::White0, Color::White1, 0, 64);
+        assert_eq!(freed, 1);
+        assert!(arena.get(dead).is_none());
     }
 
     #[test]
