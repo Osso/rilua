@@ -1028,6 +1028,14 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                 return Err(runtime_error(&proto, pc, "interrupted!"));
             }
 
+            // Host metering is independent of Lua-editable hooks and taint.
+            if let Some(owner) = state.instruction_meter_owner()
+                && let Err(error) = state.charge_instruction(owner)
+            {
+                state.call_stack[state.ci].saved_pc = pc;
+                return Err(error);
+            }
+
             // Hook check: line and count hooks (PUC-Rio: lvm.c lines 388-396).
             // The decrement runs every instruction when line or count hooks
             // are set. traceexec fires when counter reaches zero OR line

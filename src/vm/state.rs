@@ -21,6 +21,9 @@
 mod api_ops;
 #[cfg(test)]
 mod api_ops_tests;
+mod instruction_budget;
+pub use instruction_budget::InstructionBudget;
+
 mod environment_transfer;
 pub use environment_transfer::EnvironmentTransferHook;
 
@@ -747,6 +750,9 @@ pub struct LuaState {
     /// taint metadata is not written, avoiding overhead for non-WoW uses.
     pub taint_mode: bool,
 
+    /// Host-only execution policy, shared across coroutine stack swaps.
+    instruction_budgets: instruction_budget::InstructionBudgets,
+
     /// Application-specific data, type-erased.
     ///
     /// Allows the host to store arbitrary state accessible from Rust functions
@@ -838,6 +844,7 @@ impl LuaState {
             yielded_in_hook: false,
             saved_threads: Vec::new(),
             taint_mode: false,
+            instruction_budgets: instruction_budget::InstructionBudgets::default(),
             app_data: None,
         }
     }
