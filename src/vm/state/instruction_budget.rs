@@ -107,7 +107,7 @@ impl LuaState {
     pub(crate) fn charge_instruction(&mut self, index: usize) -> LuaResult<()> {
         let (owner, budget) = &mut self.instruction_budgets.owners[index];
         if budget.limit.is_some_and(|limit| budget.used >= limit) {
-            return Err(runtime_error(&format!(
+            return Err(runtime_error(format!(
                 "instruction budget exhausted for owner '{owner}'"
             )));
         }
@@ -151,7 +151,7 @@ mod tests {
             );
             state.with_instruction_budget_exemption(|state| {
                 state.with_instruction_budget_exemption(|state| {
-                    assert!(state.instruction_budgets.active.is_none())
+                    assert!(state.instruction_budgets.active.is_none());
                 });
                 assert!(state.instruction_budgets.active.is_none());
             });

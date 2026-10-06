@@ -70,7 +70,11 @@ fn secret_transform_binary_payload_errors_and_kind_validation() -> LuaResult<()>
         return Err(runtime_error("string expected"));
     };
     assert_eq!(
-        state.gc.string_arena.get(result).map(|s| s.data()),
+        state
+            .gc
+            .string_arena
+            .get(result)
+            .map(crate::vm::string::LuaString::data),
         Some([b'A', 255, 0].as_slice())
     );
     assert!(

@@ -1,28 +1,24 @@
 use rilua::table_security::{SecretPayloadKind, is_secret_table, secret_payload_kind};
-use rilua::vm::state::LuaState;
 use rilua::{Lua, LuaApiMut, LuaResult, Val};
 
-fn secret_table(state: &mut LuaState) -> LuaResult<u32> {
-    state.push(Val::Bool(is_secret_table(
-        state,
-        state.stack_get(state.base),
-    )));
-    Ok(1)
-}
-fn kind(state: &mut LuaState) -> LuaResult<u32> {
-    let kind = secret_payload_kind(state, state.stack_get(state.base));
-    state.push(Val::Bool(kind == Some(SecretPayloadKind::Table)));
-    Ok(1)
-}
-
 #[test]
-fn secret_kind_metadata_and_contents_are_opaque_to_tainted_callers() {
-    let mut lua = Lua::new().unwrap();
-    rilua::table_security::register_table_security(&mut lua).unwrap();
-    lua.register_function("secret_table", secret_table).unwrap();
-    lua.register_function("table_kind", kind).unwrap();
+fn secret_kind_metadata_and_contents_are_opaque_to_tainted_callers() -> LuaResult<()> {
+    let mut lua = Lua::new()?;
+    rilua::table_security::register_table_security(&mut lua)?;
+    lua.register_function("secret_table", |state| {
+        state.push(Val::Bool(is_secret_table(
+            state,
+            state.stack_get(state.base),
+        )));
+        Ok(1)
+    })?;
+    lua.register_function("table_kind", |state| {
+        let kind = secret_payload_kind(state, state.stack_get(state.base));
+        state.push(Val::Bool(kind == Some(SecretPayloadKind::Table)));
+        Ok(1)
+    })?;
     lua.exec(
-        r#"
+        r"
         local plain = { child = secretwrap(3) }
         local wrapped = secretwrap({ field = 'private' })
         local contents = { 'one', 'two', n = 12, child = {} }
@@ -60,31 +56,33 @@ fn secret_kind_metadata_and_contents_are_opaque_to_tainted_callers() {
         assert(secretunwrap(contents.n) == 13)
         collectgarbage('collect')
         assert(secretunwrap(contents[1]) == 'one')
-    "#,
-    )
-    .unwrap();
+    ",
+    )?;
+    Ok(())
 }
 
 #[test]
-fn secret_contents_wraps_index_metamethod_results_and_checked_host_writes() {
-    let mut lua = Lua::new().unwrap();
-    rilua::table_security::register_table_security(&mut lua).unwrap();
+fn secret_contents_wraps_index_metamethod_results_and_checked_host_writes() -> LuaResult<()> {
+    let mut lua = Lua::new()?;
+    rilua::table_security::register_table_security(&mut lua)?;
     lua.exec(
-        r#"
+        r"
         contents = setmetatable({}, {__index = function() return 'inherited' end})
         settablesecurity(contents, 2)
         assert(issecretvalue(contents.key))
         assert(secretunwrap(contents.key) == 'inherited')
+        local proxy = setmetatable({}, {__index = contents})
+        assert(issecretvalue(proxy.key))
+        assert(secretunwrap(proxy.key) == 'inherited')
         debug.setstacktaint('Addon')
         assert(issecretvalue(contents.key))
+        assert(issecretvalue(proxy.key))
+        assert(not pcall(secretunwrap, proxy.key))
         assert(not pcall(secretunwrap, contents.key))
-    "#,
-    )
-    .unwrap();
-    let table: rilua::Table = lua.global("contents").unwrap();
-    table
-        .raw_set(lua.state_mut(), Val::Num(1.0), Val::Num(17.0))
-        .unwrap();
-    lua.exec("assert(issecretvalue(rawget(contents, 1)))")
-        .unwrap();
+    ",
+    )?;
+    let table: rilua::Table = lua.global("contents")?;
+    table.raw_set(lua.state_mut(), Val::Num(1.0), Val::Num(17.0))?;
+    lua.exec("assert(issecretvalue(rawget(contents, 1)))")?;
+    Ok(())
 }

@@ -13,14 +13,14 @@ fn exempt_dispatch(state: &mut LuaState) -> LuaResult<u32> {
 }
 
 #[test]
-fn instruction_budget_cannot_be_disabled_by_lua_and_recovers_after_exemption_error() {
-    let mut lua = Lua::new().unwrap();
+fn instruction_budget_cannot_be_disabled_by_lua_and_recovers_after_exemption_error() -> LuaResult<()>
+{
+    let mut lua = Lua::new()?;
     lua.state_mut().set_instruction_budget("Addon", Some(80));
-    lua.register_function("dispatch", dispatch).unwrap();
-    lua.register_function("exempt_dispatch", exempt_dispatch)
-        .unwrap();
+    lua.register_function("dispatch", dispatch)?;
+    lua.register_function("exempt_dispatch", exempt_dispatch)?;
     lua.exec(
-        r#"
+        r"
         function work()
             debug.sethook()
             debug.setstacktaint(nil)
@@ -34,40 +34,55 @@ fn instruction_budget_cannot_be_disabled_by_lua_and_recovers_after_exemption_err
         assert(not pcall(exempt_dispatch, function() error('event failed') end))
         assert(not pcall(dispatch, work))
         assert(1 + 2 == 3)
-    "#,
-    )
-    .unwrap();
+    ",
+    )?;
     assert_eq!(
-        lua.state_mut().instruction_budget("Addon").unwrap().used,
-        80
+        lua.state_mut()
+            .instruction_budget("Addon")
+            .map(|budget| budget.used),
+        Some(80)
     );
-    lua.state_mut().reset_instruction_usage("Addon").unwrap();
-    lua.exec("assert(dispatch(function() return 42 end) == 42)")
-        .unwrap();
-    assert!(lua.state_mut().instruction_budget("Addon").unwrap().used > 0);
+    lua.state_mut().reset_instruction_usage("Addon")?;
+    lua.exec("assert(dispatch(function() return 42 end) == 42)")?;
+    assert!(
+        lua.state_mut()
+            .instruction_budget("Addon")
+            .is_some_and(|budget| budget.used > 0)
+    );
+    Ok(())
 }
 
 #[test]
-fn instruction_budget_accounts_nested_owners_coroutines_and_caught_errors() {
-    let mut lua = Lua::new().unwrap();
+fn instruction_budget_accounts_nested_owners_coroutines_and_caught_errors() -> LuaResult<()> {
+    let mut lua = Lua::new()?;
     lua.state_mut().set_instruction_budget("A", Some(30));
     lua.state_mut().set_instruction_budget("B", Some(100));
-    let function = lua.load("local co = coroutine.create(function() while true do pcall(function() end) end end); coroutine.resume(co); return 4").unwrap();
-    lua.state_mut()
-        .with_instruction_owner("A", |state| {
-            state.with_instruction_owner("B", |state| {
-                let base = state.top;
-                state.push(Val::Function(function.gc_ref()));
-                state.call_function(base, 0)
-            })
+    let function = lua.load("local co = coroutine.create(function() while true do pcall(function() end) end end); coroutine.resume(co); return 4")?;
+    let result = lua.state_mut().with_instruction_owner("A", |state| {
+        state.with_instruction_owner("B", |state| {
+            let base = state.top;
+            state.push(Val::Function(function.gc_ref()));
+            state.call_function(base, 0)
         })
-        .unwrap_err();
-    assert_eq!(lua.state_mut().instruction_budget("A").unwrap().used, 0);
-    assert_eq!(lua.state_mut().instruction_budget("B").unwrap().used, 100);
-    lua.exec("assert(2 + 2 == 4)").unwrap();
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        lua.state_mut()
+            .instruction_budget("A")
+            .map(|budget| budget.used),
+        Some(0)
+    );
+    assert_eq!(
+        lua.state_mut()
+            .instruction_budget("B")
+            .map(|budget| budget.used),
+        Some(100)
+    );
+    lua.exec("assert(2 + 2 == 4)")?;
     assert!(
         lua.state_mut()
             .with_instruction_owner("unknown", |_| Ok(()))
             .is_err()
     );
+    Ok(())
 }

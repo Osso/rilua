@@ -95,15 +95,7 @@ fn enable_secret_contents(state: &mut LuaState, table: GcRef<Table>) -> LuaResul
     if table_wraps_contents(state, table) {
         return Ok(());
     }
-    let entries: Vec<_> = target
-        .array_slice()
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, value)| !value.is_nil())
-        .map(|(index, value)| (Val::Num((index + 1) as f64), value))
-        .chain(target.hash_entries())
-        .collect();
+    let entries = collect_table_entries(target);
     // No GC safe point occurs between wrapper allocation and table rooting.
     state
         .gc
@@ -111,6 +103,26 @@ fn enable_secret_contents(state: &mut LuaState, table: GcRef<Table>) -> LuaResul
         .get_mut(table)
         .ok_or_else(|| runtime_error("table has been collected"))?
         .security_flags |= SECRET_WRAP_CONTENTS;
+    wrap_existing_table_entries(state, table, entries)
+}
+
+fn collect_table_entries(table: &Table) -> Vec<(Val, Val)> {
+    table
+        .array_slice()
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, value)| !value.is_nil())
+        .map(|(index, value)| (Val::Num((index + 1) as f64), value))
+        .chain(table.hash_entries())
+        .collect()
+}
+
+fn wrap_existing_table_entries(
+    state: &mut LuaState,
+    table: GcRef<Table>,
+    entries: Vec<(Val, Val)>,
+) -> LuaResult<()> {
     for (key, value) in entries {
         let value = wrap_table_value(state, table, value);
         state
@@ -154,7 +166,9 @@ pub fn check_table_access(
     Ok(())
 }
 
-/// Add a restriction; options accumulate. Option 2 shallowly wraps stored
+/// Add a restriction; options accumulate.
+///
+/// Option 2 shallowly wraps stored
 /// values and future checked writes/results. Keys and absent nil remain public.
 /// INFERRED: eager wrapper storage makes raw/retained-iterator reads secret too.
 pub fn set_table_security(state: &mut LuaState, table: GcRef<Table>, option: u32) -> LuaResult<()> {
@@ -220,8 +234,9 @@ pub fn wrap_host_secret_string(state: &mut LuaState, value: &str) -> Val {
     Val::Userdata(state.gc.alloc_userdata(Userdata::secret(payload)))
 }
 
-/// Transform an authentic secret string using trusted host code, even for a
-/// tainted or access-revoked caller. Never passes plaintext to a Lua callback.
+/// Transform an authentic secret string using trusted host code.
+///
+/// Allowed even for a tainted or access-revoked caller. Never passes plaintext to a Lua callback.
 /// INFERRED: the output is always secret; other payload kinds are rejected.
 /// Accepts arbitrary bytes (including NUL and non-UTF-8). Closure errors leave
 /// the input unchanged. Root the returned value before another GC safe point.
@@ -392,7 +407,9 @@ pub fn unwrap_secret(state: &LuaState, value: Val) -> LuaResult<Val> {
     Ok(payload)
 }
 
-/// Query the exact guard used by secret unwrapping. Revocation is independent
+/// Query the exact guard used by secret unwrapping.
+///
+/// Revocation is independent
 /// of taint; securecall and debug taint edits cannot restore it. Saved resumer
 /// frames also deny access, preventing coroutine entry from bypassing revocation.
 pub fn can_access_secrets(state: &LuaState) -> bool {
@@ -409,6 +426,7 @@ pub fn can_access_secrets(state: &LuaState) -> bool {
 
 /// Revoke the current Lua context's access, or the immediate caller when called
 /// inside a Rust function (the host binding for dropsecretaccess).
+///
 /// INFERRED: denial lasts through all descendants, protected calls, securecall,
 /// tail calls, and coroutine yields. Access returns when that frame ends, even
 /// by error. This does not taint the frame. No top-level sentinel revocation.
@@ -416,7 +434,7 @@ pub fn revoke_secret_access(state: &mut LuaState) -> LuaResult<()> {
     let target = if state.call_stack[state.ci].is_lua {
         state.ci
     } else {
-        state.ci.checked_sub(1).unwrap_or(0)
+        state.ci.saturating_sub(1)
     };
     if target == 0 {
         return Err(runtime_error(

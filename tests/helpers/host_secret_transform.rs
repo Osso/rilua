@@ -20,14 +20,14 @@ fn shorten(state: &mut LuaState) -> LuaResult<u32> {
 }
 
 #[test]
-fn host_secret_transform_preserves_opaque_bytes_taint_and_gc() {
-    let mut lua = Lua::new().unwrap();
-    rilua::table_security::register_table_security(&mut lua).unwrap();
-    lua.register_function("shorten", shorten).unwrap();
+fn host_secret_transform_preserves_opaque_bytes_taint_and_gc() -> LuaResult<()> {
+    let mut lua = Lua::new()?;
+    rilua::table_security::register_table_security(&mut lua)?;
+    lua.register_function("shorten", shorten)?;
     let input = wrap_host_secret_string(lua.state_mut(), "Name\0é-Realm");
-    lua.set_global("input", input).unwrap();
+    lua.set_global("input", input)?;
     lua.exec(
-        r#"
+        r"
         local function addon()
             debug.setstacktaint('Addon')
             local output = shorten(input)
@@ -41,8 +41,8 @@ fn host_secret_transform_preserves_opaque_bytes_taint_and_gc() {
         collectgarbage('collect')
         assert(issecretvalue(output))
         assert(secretunwrap(output) == 'Name\000é')
-    "#,
-    )
-    .unwrap();
+    ",
+    )?;
     assert!(transform_host_secret_string(lua.state_mut(), Val::Num(4.0), |_| Ok(vec![])).is_err());
+    Ok(())
 }

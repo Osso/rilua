@@ -9,12 +9,12 @@ fn drop_access(state: &mut LuaState) -> LuaResult<u32> {
 }
 
 #[test]
-fn secret_access_revocation_is_scoped_inherited_and_not_taint() {
-    let mut lua = Lua::new().unwrap();
-    rilua::table_security::register_table_security(&mut lua).unwrap();
-    lua.register_function("drop_access", drop_access).unwrap();
+fn secret_access_revocation_is_scoped_inherited_and_not_taint() -> LuaResult<()> {
+    let mut lua = Lua::new()?;
+    rilua::table_security::register_table_security(&mut lua)?;
+    lua.register_function("drop_access", drop_access)?;
     lua.exec(
-        r#"
+        r"
         local secret = secretwrap(false)
         local function read() return secretunwrap(secret) end
         local function dropped()
@@ -44,20 +44,20 @@ fn secret_access_revocation_is_scoped_inherited_and_not_taint() {
         end
         tainted()
         assert(read() == false)
-    "#,
-    )
-    .unwrap();
+    ",
+    )?;
     assert!(can_access_secrets(lua.state_mut()));
     assert!(revoke_secret_access(lua.state_mut()).is_err());
+    Ok(())
 }
 
 #[test]
-fn secret_access_revocation_survives_coroutine_yield_and_returns_at_context_end() {
-    let mut lua = Lua::new().unwrap();
-    rilua::table_security::register_table_security(&mut lua).unwrap();
-    lua.register_function("drop_access", drop_access).unwrap();
+fn secret_access_revocation_survives_coroutine_yield_and_returns_at_context_end() -> LuaResult<()> {
+    let mut lua = Lua::new()?;
+    rilua::table_security::register_table_security(&mut lua)?;
+    lua.register_function("drop_access", drop_access)?;
     lua.exec(
-        r#"
+        r"
         local secret = secretwrap('payload')
         local co = coroutine.create(function()
             drop_access()
@@ -71,7 +71,7 @@ fn secret_access_revocation_survives_coroutine_yield_and_returns_at_context_end(
         ok, result = coroutine.resume(co)
         assert(ok and result == 'done')
         assert(secretunwrap(secret) == 'payload')
-    "#,
-    )
-    .unwrap();
+    ",
+    )?;
+    Ok(())
 }
