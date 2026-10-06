@@ -2,6 +2,27 @@ use rilua::table_security::{can_access_secrets, revoke_secret_access};
 use rilua::vm::state::LuaState;
 use rilua::{Lua, LuaApiMut, LuaResult};
 
+#[test]
+fn secret_access_preserves_public_callinfo_construction() -> LuaResult<()> {
+    let mut state = LuaState::new();
+    let frame = rilua::vm::callinfo::CallInfo {
+        func: 0,
+        base: 1,
+        top: 20,
+        saved_pc: 0,
+        num_results: 0,
+        tail_calls: 0,
+        is_lua: true,
+        taint: None,
+    };
+    state.push_ci(frame);
+    revoke_secret_access(&mut state)?;
+    assert!(!can_access_secrets(&state));
+    state.pop_ci();
+    assert!(can_access_secrets(&state));
+    Ok(())
+}
+
 fn drop_access(state: &mut LuaState) -> LuaResult<u32> {
     revoke_secret_access(state)?;
     assert!(!can_access_secrets(state));

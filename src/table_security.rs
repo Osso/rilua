@@ -417,15 +417,7 @@ pub fn unwrap_secret(state: &LuaState, value: Val) -> LuaResult<Val> {
 /// of taint; securecall and debug taint edits cannot restore it. Saved resumer
 /// frames also deny access, preventing coroutine entry from bypassing revocation.
 pub fn can_access_secrets(state: &LuaState) -> bool {
-    let revoked = state.call_stack[..=state.ci]
-        .iter()
-        .any(|ci| ci.secret_access_revoked)
-        || state.saved_threads.iter().any(|thread| {
-            thread.call_stack[..=thread.ci]
-                .iter()
-                .any(|ci| ci.secret_access_revoked)
-        });
-    state_is_secure(state) && !revoked
+    state_is_secure(state) && !state.secret_context_is_revoked()
 }
 
 /// Revoke the current Lua context's access, or the immediate caller when called
@@ -445,7 +437,7 @@ pub fn revoke_secret_access(state: &mut LuaState) -> LuaResult<()> {
             "secret access revocation requires an active calling context",
         ));
     }
-    state.call_stack[target].secret_access_revoked = true;
+    state.mark_secret_context_revoked(target);
     Ok(())
 }
 

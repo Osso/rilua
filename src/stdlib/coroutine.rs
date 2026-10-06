@@ -235,6 +235,7 @@ pub(crate) fn auxresume(
     let mut resumer = state.save_thread_state();
     resumer.suspended_upvals = resumer_suspended;
     state.saved_threads.push(resumer);
+    state.push_secret_resumer();
 
     // Load the coroutine's state into LuaState.
     state.load_thread_by_ref(co_ref, ThreadStatus::Running);
@@ -320,6 +321,9 @@ pub(crate) fn auxresume(
             Ok(())
         })()
     };
+
+    let context_ended = !matches!(exec_result, Err(LuaError::Yield(_)));
+    state.pop_secret_resumer(context_ended);
 
     // Determine outcome and collect results.
     match exec_result {

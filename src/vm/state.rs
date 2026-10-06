@@ -22,6 +22,7 @@ mod api_ops;
 #[cfg(test)]
 mod api_ops_tests;
 mod instruction_budget;
+mod secret_access;
 pub use instruction_budget::InstructionBudget;
 
 mod environment_transfer;
@@ -752,6 +753,7 @@ pub struct LuaState {
 
     /// Host-only execution policy, shared across coroutine stack swaps.
     instruction_budgets: instruction_budget::InstructionBudgets,
+    secret_access_contexts: secret_access::SecretAccessContexts,
 
     /// Application-specific data, type-erased.
     ///
@@ -845,6 +847,7 @@ impl LuaState {
             saved_threads: Vec::new(),
             taint_mode: false,
             instruction_budgets: instruction_budget::InstructionBudgets::default(),
+            secret_access_contexts: secret_access::SecretAccessContexts::default(),
             app_data: None,
         }
     }
@@ -992,6 +995,7 @@ impl LuaState {
     /// PUC-Rio's linked-list reuse pattern for `CallInfo` frames.
     #[inline]
     pub fn push_ci(&mut self, ci: CallInfo) -> &mut CallInfo {
+        self.prune_secret_contexts();
         let new_idx = self.ci + 1;
         if new_idx < self.call_stack.len() {
             self.call_stack[new_idx] = ci;
@@ -1010,6 +1014,7 @@ impl LuaState {
         if self.ci > 0 {
             self.ci -= 1;
         }
+        self.prune_secret_contexts();
     }
 
     /// Returns the number of arguments currently on the stack above `func`.
