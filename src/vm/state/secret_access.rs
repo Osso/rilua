@@ -6,7 +6,7 @@ use crate::vm::gc::arena::GcRef;
 #[derive(Default)]
 pub(super) struct SecretAccessContexts {
     revoked: Vec<(Option<GcRef<LuaThread>>, usize)>,
-    resumers: Vec<Option<GcRef<LuaThread>>>,
+    resumers: Vec<(usize, Option<GcRef<LuaThread>>)>,
 }
 
 impl LuaState {
@@ -35,8 +35,13 @@ impl LuaState {
                         .secret_access_contexts
                         .resumers
                         .iter()
-                        .zip(&self.saved_threads)
-                        .any(|(resumer, state)| thread == resumer && *depth <= state.ci)
+                        .any(|(index, resumer)| {
+                            thread == resumer
+                                && self
+                                    .saved_threads
+                                    .get(*index)
+                                    .is_some_and(|state| *depth <= state.ci)
+                        })
             })
     }
 
@@ -61,14 +66,34 @@ impl LuaState {
         }
     }
 
+    #[inline]
     pub(crate) fn push_secret_resumer(&mut self) {
+        // Before the first revocation, ancestors have no denial to inherit.
+        if self.secret_access_contexts.revoked.is_empty() {
+            return;
+        }
+        let index = self.saved_threads.len().saturating_sub(1);
         self.secret_access_contexts
             .resumers
-            .push(self.current_thread);
+            .push((index, self.current_thread));
     }
 
+    #[inline]
     pub(crate) fn pop_secret_resumer(&mut self, context_ended: bool) {
-        self.secret_access_contexts.resumers.pop();
+        if self.secret_access_contexts.revoked.is_empty()
+            && self.secret_access_contexts.resumers.is_empty()
+        {
+            return;
+        }
+        let index = self.saved_threads.len().saturating_sub(1);
+        if self
+            .secret_access_contexts
+            .resumers
+            .last()
+            .is_some_and(|(slot, _)| *slot == index)
+        {
+            self.secret_access_contexts.resumers.pop();
+        }
         if context_ended {
             let current = self.current_thread;
             self.secret_access_contexts

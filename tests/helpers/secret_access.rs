@@ -82,6 +82,8 @@ fn secret_access_revocation_survives_coroutine_yield_and_returns_at_context_end(
         local secret = secretwrap('payload')
         local co = coroutine.create(function()
             drop_access()
+            local child = coroutine.create(function() return secretunwrap(secret) end)
+            assert(not coroutine.resume(child))
             coroutine.yield('paused')
             assert(not pcall(secretunwrap, secret))
             return 'done'
