@@ -1,6 +1,6 @@
 """Run through pyrun_eval: exec(fs.read('scripts/bench-vm-capabilities.pyrun.py')).
 Build and copy the Criterion executables to target/vm-bench-base and
- target/vm-bench-branch first; see the proof ledger. Set ctx.vm_bench_phase,
+target/vm-bench-branch first; see the proof ledger. Set ctx.vm_bench_phase,
 ctx.vm_bench_base, and ctx.vm_bench_branch to override these inputs.
 No compilation runs during measurements.
 """
