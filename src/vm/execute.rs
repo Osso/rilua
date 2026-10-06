@@ -111,7 +111,7 @@ pub(crate) fn coerce_to_number(val: Val, gc: &Gc) -> Option<f64> {
     }
 }
 
-#[inline(always)]
+#[inline]
 fn exact_integer_number(n: f64) -> Option<i64> {
     const POSITIVE_ZERO_BITS: u64 = 0.0f64.to_bits();
     const NEGATIVE_ZERO_BITS: u64 = (-0.0f64).to_bits();
@@ -133,7 +133,7 @@ fn exact_integer_number(n: f64) -> Option<i64> {
 
 // Metered/unmetered dispatch specialization doubles helper call sites. Preserve
 // the base VM's inlining instead of spilling loop tuples through an ABI call.
-#[inline(always)]
+#[inline]
 fn coerce_integer_for_loop(init: Val, limit: Val, step: Val, gc: &Gc) -> Option<(i64, i64, i64)> {
     let init = exact_integer_number(coerce_to_number(init, gc)?)?;
     let limit = exact_integer_number(coerce_to_number(limit, gc)?)?;
@@ -141,7 +141,7 @@ fn coerce_integer_for_loop(init: Val, limit: Val, step: Val, gc: &Gc) -> Option<
     Some((init, limit, step))
 }
 
-#[inline(always)]
+#[inline]
 fn integer_for_loop_state(state: &LuaState, ra: usize) -> Option<(i64, i64, i64)> {
     let Val::Num(idx) = state.stack_get(ra) else {
         return None;

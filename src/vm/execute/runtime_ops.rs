@@ -181,7 +181,7 @@ fn call_order_tm(state: &mut LuaState, lhs: Val, rhs: Val, event: TMS) -> LuaRes
 /// strings. If coercion fails, tries the `__concat` metamethod. Coalesces
 /// consecutive string/number values into a single buffer for efficiency.
 // Keep the base dispatch's concatenation inlining in both metering copies.
-#[inline(always)]
+#[inline]
 pub(super) fn vm_concat(
     state: &mut LuaState,
     base: usize,
