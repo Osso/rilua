@@ -131,6 +131,9 @@ fn exact_integer_number(n: f64) -> Option<i64> {
     }
 }
 
+// Metered/unmetered dispatch specialization doubles helper call sites. Preserve
+// the base VM's inlining instead of spilling loop tuples through an ABI call.
+#[inline(always)]
 fn coerce_integer_for_loop(init: Val, limit: Val, step: Val, gc: &Gc) -> Option<(i64, i64, i64)> {
     let init = exact_integer_number(coerce_to_number(init, gc)?)?;
     let limit = exact_integer_number(coerce_to_number(limit, gc)?)?;
@@ -138,6 +141,7 @@ fn coerce_integer_for_loop(init: Val, limit: Val, step: Val, gc: &Gc) -> Option<
     Some((init, limit, step))
 }
 
+#[inline(always)]
 fn integer_for_loop_state(state: &LuaState, ra: usize) -> Option<(i64, i64, i64)> {
     let Val::Num(idx) = state.stack_get(ra) else {
         return None;
