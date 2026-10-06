@@ -22,4 +22,4 @@ INFERRED: this is an instruction allowance, not a native WoW wall-time throttle.
 
 Unit tests cover exact limit/zero/reset, independent owners, nested exemptions and unwind restoration. `tests/helpers/instruction_budget.rs` covers debug/taint tampering, normal exhaustion, exemption success/error, reset, coroutine/pcall evasion and nested host ownership.
 
-Disabled by default: dispatch checks one optional host owner; no counters, owner lookup, clock reads or hooks run when no owner scope is active. Criterion `vm_execution/control_flow_dispatch` is compared against base a76ffa8 to check unused-feature cost.
+Disabled by default: activation entry selects a metered or unmetered dispatch specialization. The unmetered loop contains no per-instruction budget checks, counters, owner lookup, clock reads or hooks. Synchronous nested host calls select their own activation mode; owner/exemption scopes restore before returning to the suspended activation. Criterion `vm_execution/control_flow_dispatch` is compared against base a76ffa8 to check unused-feature cost.
