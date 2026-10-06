@@ -127,47 +127,29 @@ fn finish_scope<T>(result: std::thread::Result<T>) -> T {
 mod tests {
     use super::*;
 
+    fn charge_dispatch(state: &mut LuaState) -> LuaResult<()> {
+        if let Some(owner) = state.instruction_meter_owner() {
+            state.charge_instruction(owner)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn instruction_budget_exact_limit_reset_and_nested_restoration() -> LuaResult<()> {
         let mut state = LuaState::new();
         state.set_instruction_budget("A", Some(1));
         state.set_instruction_budget("B", Some(0));
         state.with_instruction_owner("A", |state| {
-            state.charge_instruction(
-                state
-                    .instruction_budgets
-                    .active
-                    .ok_or_else(|| runtime_error("owner missing"))?,
-            )?;
-            assert!(
-                state
-                    .with_instruction_owner("B", |state| state.charge_instruction(
-                        state
-                            .instruction_budgets
-                            .active
-                            .ok_or_else(|| runtime_error("owner missing"))?
-                    ))
-                    .is_err()
-            );
+            charge_dispatch(state)?;
+            assert!(state.with_instruction_owner("B", charge_dispatch).is_err());
             state.with_instruction_budget_exemption(|state| {
-                state.with_instruction_budget_exemption(|state| {
-                    assert!(state.instruction_budgets.active.is_none());
-                });
-                assert!(state.instruction_budgets.active.is_none());
-            });
-            assert!(
-                state
-                    .charge_instruction(
-                        state
-                            .instruction_budgets
-                            .active
-                            .ok_or_else(|| runtime_error("owner missing"))?
-                    )
-                    .is_err()
-            );
+                state.with_instruction_budget_exemption(charge_dispatch)?;
+                charge_dispatch(state)
+            })?;
+            assert!(charge_dispatch(state).is_err());
             Ok(())
         })?;
-        assert!(state.instruction_budgets.active.is_none());
+        charge_dispatch(&mut state)?;
         assert_eq!(
             state.instruction_budget("A"),
             Some(InstructionBudget {
@@ -181,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn instruction_budget_scopes_restore_after_host_unwind() {
+    fn instruction_budget_scopes_restore_after_host_unwind() -> LuaResult<()> {
         let mut state = LuaState::new();
         state.set_instruction_budget("A", Some(1));
         let panic = catch_unwind(AssertUnwindSafe(|| {
@@ -192,7 +174,17 @@ mod tests {
             })
         }));
         assert!(panic.is_err());
-        assert!(!state.instruction_budgets.exempt);
-        assert!(state.instruction_budgets.active.is_none());
+        charge_dispatch(&mut state)?;
+        assert_eq!(
+            state.instruction_budget("A").map(|budget| budget.used),
+            Some(0)
+        );
+        state.with_instruction_owner("A", charge_dispatch)?;
+        assert_eq!(
+            state.instruction_budget("A").map(|budget| budget.used),
+            Some(1)
+        );
+        assert!(state.with_instruction_owner("A", charge_dispatch).is_err());
+        Ok(())
     }
 }

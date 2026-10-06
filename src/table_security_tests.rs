@@ -5,6 +5,14 @@ fn secret_payload_kind_covers_tags_and_contents_flag_without_unwrap() -> LuaResu
     let mut state = LuaState::new();
     let table = state.gc.alloc_table(Table::new());
     let text = state.gc.intern_string(b"payload");
+    let function = state.gc.alloc_closure(crate::vm::closure::Closure::Rust(
+        crate::vm::closure::RustClosure::new(|_| Ok(0), "kind_test"),
+    ));
+    let userdata = state.gc.alloc_userdata(Userdata::new(Box::new(17_u32)));
+    let thread = state.gc.alloc_thread(crate::vm::state::LuaThread::new(
+        Val::Function(function),
+        state.global,
+    ));
     let values = [
         (Val::Nil, SecretPayloadKind::Nil),
         (Val::Bool(false), SecretPayloadKind::Boolean),
@@ -12,6 +20,9 @@ fn secret_payload_kind_covers_tags_and_contents_flag_without_unwrap() -> LuaResu
         (Val::Str(text), SecretPayloadKind::String),
         (Val::Table(table), SecretPayloadKind::Table),
         (Val::LightUserdata(4), SecretPayloadKind::LightUserdata),
+        (Val::Function(function), SecretPayloadKind::Function),
+        (Val::Userdata(userdata), SecretPayloadKind::Userdata),
+        (Val::Thread(thread), SecretPayloadKind::Thread),
     ];
     for (value, kind) in values {
         let wrapped = wrap_secret(&mut state, value)?;
