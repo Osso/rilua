@@ -995,7 +995,7 @@ impl LuaState {
     /// Writes at `ci + 1`, reusing stale slots left by previous `pop_ci`
     /// calls. Only appends when no reusable slot exists. This matches
     /// PUC-Rio's linked-list reuse pattern for `CallInfo` frames.
-    #[inline]
+    #[inline(always)]
     pub fn push_ci(&mut self, ci: CallInfo) -> &mut CallInfo {
         self.prune_secret_contexts();
         let new_idx = self.ci + 1;
@@ -1011,7 +1011,7 @@ impl LuaState {
     /// Pops the current CallInfo frame from the call stack.
     ///
     /// Restores `ci` to point to the previous frame.
-    #[inline]
+    #[inline(always)]
     pub fn pop_ci(&mut self) {
         if self.ci > 0 {
             self.ci -= 1;
