@@ -14,6 +14,10 @@ use crate::vm::table::Table;
 use crate::vm::value::Userdata;
 use crate::{Lua, LuaResult, Val, runtime_error};
 
+#[cfg(test)]
+#[path = "table_security_tests.rs"]
+mod tests;
+
 const DISALLOW_TAINTED_ACCESS: u8 = 1;
 const DISALLOW_SECRET_KEYS: u8 = 2;
 
@@ -110,6 +114,41 @@ pub fn wrap_host_secret_number(state: &mut LuaState, value: f64) -> Val {
 pub fn wrap_host_secret_string(state: &mut LuaState, value: &str) -> Val {
     let payload = Val::Str(state.gc.intern_string(value.as_bytes()));
     Val::Userdata(state.gc.alloc_userdata(Userdata::secret(payload)))
+}
+
+/// Transform an authentic secret string using trusted host code, even for a
+/// tainted or access-revoked caller. Never passes plaintext to a Lua callback.
+/// INFERRED: the output is always secret; other payload kinds are rejected.
+/// Accepts arbitrary bytes (including NUL and non-UTF-8). Closure errors leave
+/// the input unchanged. Root the returned value before another GC safe point.
+/// The closure must not publish plaintext or include it in error messages.
+pub fn transform_host_secret_string(
+    state: &mut LuaState,
+    value: Val,
+    transform: impl FnOnce(&[u8]) -> LuaResult<Vec<u8>>,
+) -> LuaResult<Val> {
+    let Val::Userdata(reference) = value else {
+        return Err(runtime_error("secret string expected"));
+    };
+    let Some(Val::Str(string)) = state
+        .gc
+        .userdata
+        .get(reference)
+        .and_then(Userdata::secret_value)
+    else {
+        return Err(runtime_error("secret string expected"));
+    };
+    let bytes = state
+        .gc
+        .string_arena
+        .get(string)
+        .ok_or_else(|| runtime_error("secret string has been collected"))?
+        .data();
+    let output = transform(bytes)?;
+    let payload = Val::Str(state.gc.intern_string(&output));
+    Ok(Val::Userdata(
+        state.gc.alloc_userdata(Userdata::secret(payload)),
+    ))
 }
 
 /// Return a secret boolean's payload through the existing secure-caller guard.

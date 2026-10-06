@@ -34,6 +34,12 @@ The retained WoW 12.0.5 API change states: “String formatting APIs no longer h
 
 `tests/helpers/secret_string_formatting.rs`, grouped in the existing integration target, covers host-created payloads, full precision, width/alignment, public controls, mixed arguments, unused secret input provenance, GC after releasing the input, and tainted closure calls with rejected input/output unwrapping.
 
+## Trusted opaque string transforms
+
+`transform_host_secret_string(&mut LuaState, Val, impl FnOnce(&[u8]) -> LuaResult<Vec<u8>>) -> LuaResult<Val>` accepts only an authentic secret string. Trusted Rust receives bytes, never Lua. Output is always a new VM-owned secret string, even for empty/unchanged output; input and caller taint remain unchanged. NUL and invalid UTF-8 are preserved. Host errors propagate without modifying input. Results need rooting before a GC safe point. Hosts must not leak plaintext through side effects or errors; this is not a sandbox against trusted Rust. INFERRED: always-secret output and strict rejection of public/non-string values are the narrow contract needed for Ambiguate and ReplaceIconAndGroupExpressions; native transformation rules remain simulator responsibilities.
+
+Unit binary/error tests and `tests/helpers/host_secret_transform.rs` cover tainted shortening, rejected Lua unwrap, retained taint, NUL/UTF-8 and GC survival.
+
 ## Closure stamp propagation
 
 Call entry reads the existing `debug.setobjecttaint` registry stamp and applies it to the new Lua or Rust call frame. Lua closures created while any active call frame is tainted receive that effective taint stamp, including when trusted code is called by a tainted caller; a secure call suspends that inherited taint for closures it creates. Tail-call frame reuse preserves callee stamps and an insecure caller's taint. Secure calls temporarily clear the caller chain and restore it on return or error, without removing the callee's own stamp. Clearing an object's stamp with nil restores untainted entry from an untainted caller.
