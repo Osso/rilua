@@ -82,6 +82,12 @@ fn secret_contents_wraps_index_metamethod_results_and_checked_host_writes() -> L
     ",
     )?;
     let table: rilua::Table = lua.global("contents")?;
+    let key = Val::Str(lua.state_mut().gc.intern_string(b"key"));
+    let result = lua.state_mut().gettable(Val::Table(table.gc_ref()), key)?;
+    assert!(rilua::table_security::is_secret_value(
+        lua.state_mut(),
+        result
+    ));
     table.raw_set(lua.state_mut(), Val::Num(1.0), Val::Num(17.0))?;
     lua.exec("assert(issecretvalue(rawget(contents, 1)))")?;
     Ok(())

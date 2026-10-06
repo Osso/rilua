@@ -478,8 +478,13 @@ pub(super) fn vm_gettable(
 ) -> LuaResult<()> {
     state.with_gettable_provenance(origin, |state| {
         let mut current = t;
+        let mut contents_secret = false;
         let resolved_key = resolve_gettable_key(key, &state.gc);
         for _ in 0..MAXTAGLOOP {
+            current = crate::table_security::checked_secret_table_read(state, current)?;
+            if let Val::Table(table) = current {
+                contents_secret |= crate::table_security::table_wraps_contents(state, table);
+            }
             match gettable_step(
                 state,
                 current,
@@ -492,14 +497,12 @@ pub(super) fn vm_gettable(
                 obj_reg,
             )? {
                 GettableStep::Done => {
-                    if let Val::Table(table) = t {
-                        let result = crate::table_security::wrap_table_value(
-                            state,
-                            table,
-                            state.stack_get(result_reg),
-                        );
-                        state.stack_set(result_reg, result);
-                    }
+                    let result = crate::table_security::wrap_contents_result(
+                        state,
+                        state.stack_get(result_reg),
+                        contents_secret,
+                    );
+                    state.stack_set(result_reg, result);
                     return Ok(());
                 }
                 GettableStep::Continue(next) => current = next,
@@ -526,7 +529,6 @@ fn gettable_step(
     base: usize,
     obj_reg: Option<usize>,
 ) -> LuaResult<GettableStep> {
-    let current = crate::table_security::checked_secret_table_read(state, current)?;
     match current {
         Val::Table(table_ref) => {
             handle_table_gettable(state, current, table_ref, key, resolved_key, result_reg)

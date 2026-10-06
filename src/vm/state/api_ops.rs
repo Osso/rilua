@@ -18,33 +18,39 @@ impl LuaState {
     /// table access semantics (e.g., gsub table replacement).
     pub fn gettable(&mut self, t: Val, key: Val) -> LuaResult<Val> {
         self.with_gettable_provenance(GettableOrigin::OrdinaryTable, |state| {
-            let result = state.resolve_gettable_chain(t, key)?;
-            Ok(if let Val::Table(table) = t {
-                crate::table_security::wrap_table_value(state, table, result)
-            } else {
-                result
-            })
+            state.resolve_gettable_chain(t, key)
         })
     }
 
     fn resolve_gettable_chain(&mut self, t: Val, key: Val) -> LuaResult<Val> {
         let mut current = t;
+        let mut contents_secret = false;
         for _ in 0..MAXTAGLOOP {
             current = checked_secret_table_read(self, current)?;
             if let Val::Table(table_ref) = current {
+                contents_secret |= crate::table_security::table_wraps_contents(self, table_ref);
                 let result = self
                     .gc
                     .tables
                     .get(table_ref)
                     .map_or(Val::Nil, |table| table.get(key, &self.gc.string_arena));
                 if !result.is_nil() {
-                    return Ok(result);
+                    return Ok(crate::table_security::wrap_contents_result(
+                        self,
+                        result,
+                        contents_secret,
+                    ));
                 }
 
                 match lookup_table_tm(self, table_ref, TMS::Index)? {
                     None => return Ok(Val::Nil),
                     Some(tm_val) if matches!(tm_val, Val::Function(_)) => {
-                        return self.call_tm_two_args(tm_val, current, key);
+                        let result = self.call_tm_two_args(tm_val, current, key)?;
+                        return Ok(crate::table_security::wrap_contents_result(
+                            self,
+                            result,
+                            contents_secret,
+                        ));
                     }
                     Some(tm_val) => current = tm_val,
                 }
@@ -52,7 +58,12 @@ impl LuaState {
                 match lookup_tm(self, current, TMS::Index) {
                     None => return Err(index_error(current)),
                     Some(method) if matches!(method, Val::Function(_)) => {
-                        return self.call_tm_two_args(method, current, key);
+                        let result = self.call_tm_two_args(method, current, key)?;
+                        return Ok(crate::table_security::wrap_contents_result(
+                            self,
+                            result,
+                            contents_secret,
+                        ));
                     }
                     Some(index) => current = index,
                 }

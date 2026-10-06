@@ -63,7 +63,7 @@ pub fn is_secret_table(state: &LuaState, value: Val) -> bool {
         || matches!(value, Val::Table(table) if table_wraps_contents(state, table))
 }
 
-fn table_wraps_contents(state: &LuaState, table: GcRef<Table>) -> bool {
+pub(crate) fn table_wraps_contents(state: &LuaState, table: GcRef<Table>) -> bool {
     state
         .gc
         .tables
@@ -74,7 +74,11 @@ fn table_wraps_contents(state: &LuaState, table: GcRef<Table>) -> bool {
 /// Apply the flagged table's shallow storage/result policy. Missing nil remains
 /// public; existing wrappers are preserved. Below Lua-value wrap permission.
 pub(crate) fn wrap_table_value(state: &mut LuaState, table: GcRef<Table>, value: Val) -> Val {
-    if table_wraps_contents(state, table) && !value.is_nil() && !is_secret_value(state, value) {
+    wrap_contents_result(state, value, table_wraps_contents(state, table))
+}
+
+pub(crate) fn wrap_contents_result(state: &mut LuaState, value: Val, contents_secret: bool) -> Val {
+    if contents_secret && !value.is_nil() && !is_secret_value(state, value) {
         Val::Userdata(state.gc.alloc_userdata(Userdata::secret(value)))
     } else {
         value
