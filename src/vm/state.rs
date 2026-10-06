@@ -753,7 +753,7 @@ pub struct LuaState {
 
     /// Host-only execution policy, shared across coroutine stack swaps.
     instruction_budgets: instruction_budget::InstructionBudgets,
-    secret_access_contexts: secret_access::SecretAccessContexts,
+    secret_access_contexts: Option<Box<secret_access::SecretAccessContexts>>,
     pub(crate) has_secret_contents_policy: bool,
 
     /// Application-specific data, type-erased.
@@ -848,7 +848,7 @@ impl LuaState {
             saved_threads: Vec::new(),
             taint_mode: false,
             instruction_budgets: instruction_budget::InstructionBudgets::default(),
-            secret_access_contexts: secret_access::SecretAccessContexts::default(),
+            secret_access_contexts: None,
             has_secret_contents_policy: false,
             app_data: None,
         }

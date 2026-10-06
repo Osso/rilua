@@ -33,7 +33,7 @@ New tests: 5 unit and 9 integration tests. Contracts: [budgets](instruction-budg
 
 ## Performance: acceptance gap
 
-No per-instruction budget branch remains in unmetered execution. Before option 2 is used, contents helpers avoid table-arena lookups. Coroutine resumer identity bookkeeping is skipped before revocation.
+No per-instruction budget branch remains in unmetered execution. Before option 2 is used, contents helpers avoid table-arena lookups. Coroutine resumer identity bookkeeping is skipped before revocation. Follow-up optimization makes the revocation sidecar an optional boxed allocation, created only on first revocation; frame push/pop, tail transfer, and coroutine resume use one pointer check before out-of-line vector updates. Public CallInfo and revocation lifetimes are unchanged. Interleaved remeasurement is pending.
 
 Wall-clock Criterion results fluctuate sharply on the shared host, even CPU-pinned. Recorded regressions were not discarded: target/performance-pinned-*.out and performance-optimized-*.out retain them. To distinguish scheduling delay from work, per-case runs pinned CPU 18 used 20 samples, 5 s measurement, 10 ms warmup and 100 resamples; child user CPU time was divided by exact sample.json iteration counts (includes small startup/warmup overhead).
 
