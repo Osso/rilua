@@ -1020,9 +1020,7 @@ impl LuaState {
     /// Restores `ci` to point to the previous frame.
     #[inline]
     pub fn pop_ci(&mut self) {
-        if self.ci > 0 {
-            self.ci -= 1;
-        }
+        self.ci = self.ci.saturating_sub(1);
         self.prune_secret_contexts();
     }
 
