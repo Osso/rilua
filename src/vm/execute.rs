@@ -111,7 +111,7 @@ pub(crate) fn coerce_to_number(val: Val, gc: &Gc) -> Option<f64> {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn exact_integer_number(n: f64) -> Option<i64> {
     const POSITIVE_ZERO_BITS: u64 = 0.0f64.to_bits();
     const NEGATIVE_ZERO_BITS: u64 = (-0.0f64).to_bits();
