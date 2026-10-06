@@ -68,6 +68,7 @@ impl Table {
     /// Sets a value by key without metamethod dispatch.
     pub fn raw_set(&self, state: &mut LuaState, key: Val, value: Val) -> LuaResult<()> {
         crate::table_security::check_table_access(state, self.0, Some(key))?;
+        let value = crate::table_security::wrap_table_value(state, self.0, value);
         let table = state.gc.tables.get_mut(self.0).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "table has been collected".into(),
@@ -75,7 +76,9 @@ impl Table {
                 traceback: vec![],
             })
         })?;
-        table.raw_set(key, value, &state.gc.string_arena)
+        table.raw_set(key, value, &state.gc.string_arena)?;
+        state.gc.barrier_back(self.0);
+        Ok(())
     }
 
     /// Returns the raw length for trusted embedding code (no `__len` metamethod).

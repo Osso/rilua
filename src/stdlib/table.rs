@@ -82,6 +82,7 @@ fn get_raw(state: &LuaState, tref: GcRef<Table>, idx: i64) -> LuaResult<Val> {
 /// Raw set by numeric key.
 fn set_raw(state: &mut LuaState, tref: GcRef<Table>, idx: i64, val: Val) -> LuaResult<()> {
     crate::table_security::check_table_access(state, tref, None)?;
+    let val = crate::table_security::wrap_table_value(state, tref, val);
     let strings = &state.gc.string_arena;
     let t = state
         .gc

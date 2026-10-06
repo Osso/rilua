@@ -20,6 +20,109 @@ mod tests;
 
 const DISALLOW_TAINTED_ACCESS: u8 = 1;
 const DISALLOW_SECRET_KEYS: u8 = 2;
+const SECRET_WRAP_CONTENTS: u8 = 4;
+
+/// Only a secret's payload tag, never its bytes, identity, or contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretPayloadKind {
+    Nil,
+    Boolean,
+    Number,
+    String,
+    Table,
+    Function,
+    Userdata,
+    Thread,
+    LightUserdata,
+}
+
+/// Inspect an authentic live wrapper's payload kind, independent of caller
+/// taint or revocation. Ordinary values/collected wrappers return None.
+pub fn secret_payload_kind(state: &LuaState, value: Val) -> Option<SecretPayloadKind> {
+    let Val::Userdata(reference) = value else {
+        return None;
+    };
+    let payload = state.gc.userdata.get(reference)?.secret_value()?;
+    Some(match payload {
+        Val::Nil => SecretPayloadKind::Nil,
+        Val::Bool(_) => SecretPayloadKind::Boolean,
+        Val::Num(_) => SecretPayloadKind::Number,
+        Val::Str(_) => SecretPayloadKind::String,
+        Val::Table(_) => SecretPayloadKind::Table,
+        Val::Function(_) => SecretPayloadKind::Function,
+        Val::Userdata(_) => SecretPayloadKind::Userdata,
+        Val::Thread(_) => SecretPayloadKind::Thread,
+        Val::LightUserdata(_) => SecretPayloadKind::LightUserdata,
+    })
+}
+
+/// Metadata-only test for a wrapped table or a table with SecretWrapContents.
+/// A plain table merely containing wrappers is not a secret table.
+pub fn is_secret_table(state: &LuaState, value: Val) -> bool {
+    secret_payload_kind(state, value) == Some(SecretPayloadKind::Table)
+        || matches!(value, Val::Table(table) if table_wraps_contents(state, table))
+}
+
+fn table_wraps_contents(state: &LuaState, table: GcRef<Table>) -> bool {
+    state
+        .gc
+        .tables
+        .get(table)
+        .is_some_and(|table| table.security_flags & SECRET_WRAP_CONTENTS != 0)
+}
+
+/// Apply the flagged table's shallow storage/result policy. Missing nil remains
+/// public; existing wrappers are preserved. Below Lua-value wrap permission.
+pub(crate) fn wrap_table_value(state: &mut LuaState, table: GcRef<Table>, value: Val) -> Val {
+    if table_wraps_contents(state, table) && !value.is_nil() && !is_secret_value(state, value) {
+        Val::Userdata(state.gc.alloc_userdata(Userdata::secret(value)))
+    } else {
+        value
+    }
+}
+
+fn enable_secret_contents(state: &mut LuaState, table: GcRef<Table>) -> LuaResult<()> {
+    let target = state
+        .gc
+        .tables
+        .get(table)
+        .ok_or_else(|| runtime_error("table has been collected"))?;
+    if state.gc.tables.is_frozen(table) || target.is_read_only() {
+        return Err(runtime_error(
+            "cannot secure contents of an immutable table",
+        ));
+    }
+    if table_wraps_contents(state, table) {
+        return Ok(());
+    }
+    let entries: Vec<_> = target
+        .array_slice()
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, value)| !value.is_nil())
+        .map(|(index, value)| (Val::Num((index + 1) as f64), value))
+        .chain(target.hash_entries())
+        .collect();
+    // No GC safe point occurs between wrapper allocation and table rooting.
+    state
+        .gc
+        .tables
+        .get_mut(table)
+        .ok_or_else(|| runtime_error("table has been collected"))?
+        .security_flags |= SECRET_WRAP_CONTENTS;
+    for (key, value) in entries {
+        let value = wrap_table_value(state, table, value);
+        state
+            .gc
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| runtime_error("table has been collected"))?
+            .raw_set(key, value, &state.gc.string_arena)?;
+    }
+    state.gc.barrier_back(table);
+    Ok(())
+}
 
 /// Register the optional globals. Ordinary Lua states retain their default API.
 pub fn register_table_security(lua: &mut Lua) -> LuaResult<()> {
@@ -51,14 +154,15 @@ pub fn check_table_access(
     Ok(())
 }
 
-/// Add a restriction; options accumulate because one table can need both.
-/// Option 2 is deliberately unsupported rather than silently ignored.
+/// Add a restriction; options accumulate. Option 2 shallowly wraps stored
+/// values and future checked writes/results. Keys and absent nil remain public.
+/// INFERRED: eager wrapper storage makes raw/retained-iterator reads secret too.
 pub fn set_table_security(state: &mut LuaState, table: GcRef<Table>, option: u32) -> LuaResult<()> {
     ensure_secure_caller(state)?;
     let flag = match option {
         0 => DISALLOW_TAINTED_ACCESS,
         1 => DISALLOW_SECRET_KEYS,
-        2 => return Err(runtime_error("SecretWrapContents is not supported")),
+        2 => return enable_secret_contents(state, table),
         _ => return Err(runtime_error("invalid TableSecurityOption")),
     };
     let target = state

@@ -356,6 +356,7 @@ pub(super) fn table_set(
 ) -> LuaResult<()> {
     crate::table_security::check_table_access(state, table_ref, Some(key))?;
     ensure_table_not_frozen(state, table_ref)?;
+    let value = crate::table_security::wrap_table_value(state, table_ref, value);
     let table = state
         .gc
         .tables
@@ -490,7 +491,17 @@ pub(super) fn vm_gettable(
                 base,
                 obj_reg,
             )? {
-                GettableStep::Done => return Ok(()),
+                GettableStep::Done => {
+                    if let Val::Table(table) = t {
+                        let result = crate::table_security::wrap_table_value(
+                            state,
+                            table,
+                            state.stack_get(result_reg),
+                        );
+                        state.stack_set(result_reg, result);
+                    }
+                    return Ok(());
+                }
                 GettableStep::Continue(next) => current = next,
             }
         }
@@ -773,6 +784,7 @@ fn raw_set_existing_slot(
     key: Val,
     value: Val,
 ) -> LuaResult<()> {
+    let value = crate::table_security::wrap_table_value(state, table_ref, value);
     let table = state
         .gc
         .tables

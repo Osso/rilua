@@ -2134,6 +2134,20 @@ fn write_setlist_array_values(
     count: usize,
 ) -> LuaResult<()> {
     ensure_table_not_frozen(state, table_ref)?;
+    if crate::table_security::is_secret_table(state, Val::Table(table_ref)) {
+        for i in 1..=count {
+            let value =
+                crate::table_security::wrap_table_value(state, table_ref, state.stack_get(ra + i));
+            state
+                .gc
+                .tables
+                .get_mut(table_ref)
+                .ok_or_else(|| RuntimeError::new("invalid table reference"))?
+                .set_array_slot(offset + i - 1, value);
+        }
+        state.gc.barrier_back(table_ref);
+        return Ok(());
+    }
     let stack = &state.stack;
     let table = state
         .gc

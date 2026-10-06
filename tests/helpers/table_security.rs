@@ -381,13 +381,12 @@ fn table_security_options_validate_and_return_no_values() {
         assert(select('#', settablesecurity(t, 1)) == 0)
         assert(select('#', settablesecurity(t, 0)) == 0)
         assert(select('#', settablesecurity(t, 1)) == 0)
-        for _, option in ipairs({-1, 0.5, 2, 3, math.huge, '0'}) do
+        for _, option in ipairs({-1, 0.5, 3, math.huge, '0'}) do
             assert(not pcall(settablesecurity, t, option))
         end
         assert(not pcall(settablesecurity, t))
         assert(not pcall(settablesecurity, 12, 0))
-        local ok, message = pcall(settablesecurity, t, 2)
-        assert(not ok and string.find(message, 'SecretWrapContents', 1, true))
+        assert(select('#', settablesecurity(t, 2)) == 0)
     "#,
         )
         .unwrap();

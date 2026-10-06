@@ -13,6 +13,9 @@ mod compiler_nil_initialization;
 #[path = "helpers/closure_taint.rs"]
 mod closure_taint;
 
+#[path = "helpers/secret_kind.rs"]
+mod secret_kind;
+
 #[path = "helpers/instruction_budget.rs"]
 mod instruction_budget;
 

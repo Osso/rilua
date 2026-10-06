@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn secret_payload_kind_covers_tags_and_contents_flag_without_unwrap() -> LuaResult<()> {
+    let mut state = LuaState::new();
+    let table = state.gc.alloc_table(Table::new());
+    let text = state.gc.intern_string(b"payload");
+    let values = [
+        (Val::Nil, SecretPayloadKind::Nil),
+        (Val::Bool(false), SecretPayloadKind::Boolean),
+        (Val::Num(3.0), SecretPayloadKind::Number),
+        (Val::Str(text), SecretPayloadKind::String),
+        (Val::Table(table), SecretPayloadKind::Table),
+        (Val::LightUserdata(4), SecretPayloadKind::LightUserdata),
+    ];
+    for (value, kind) in values {
+        let wrapped = wrap_secret(&mut state, value)?;
+        assert_eq!(secret_payload_kind(&state, wrapped), Some(kind));
+        assert!(is_secret_value(&state, wrapped));
+        assert_eq!(
+            is_secret_table(&state, wrapped),
+            kind == SecretPayloadKind::Table
+        );
+        assert_eq!(secret_payload_kind(&state, value), None);
+    }
+    assert!(!is_secret_table(&state, Val::Table(table)));
+    set_table_security(&mut state, table, 2)?;
+    assert!(is_secret_table(&state, Val::Table(table)));
+    state.call_stack[0].taint = Some("Addon".to_owned());
+    assert!(is_secret_table(&state, Val::Table(table)));
+    assert!(set_table_security(&mut state, table, 2).is_err());
+    Ok(())
+}
+
+#[test]
 fn secret_access_revocation_tracks_frames_without_changing_taint() -> LuaResult<()> {
     use crate::vm::callinfo::CallInfo;
     let mut state = LuaState::new();

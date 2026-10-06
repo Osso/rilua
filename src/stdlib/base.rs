@@ -707,6 +707,8 @@ pub fn lua_rawset(state: &mut LuaState) -> LuaResult<u32> {
         ));
     }
 
+    let value = crate::table_security::wrap_table_value(state, table_ref, value);
+
     // Need to split the borrow: get table mutably, string_arena immutably.
     // Since these are different arenas in gc, we access them via the public fields.
     let table = state

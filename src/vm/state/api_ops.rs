@@ -18,7 +18,12 @@ impl LuaState {
     /// table access semantics (e.g., gsub table replacement).
     pub fn gettable(&mut self, t: Val, key: Val) -> LuaResult<Val> {
         self.with_gettable_provenance(GettableOrigin::OrdinaryTable, |state| {
-            state.resolve_gettable_chain(t, key)
+            let result = state.resolve_gettable_chain(t, key)?;
+            Ok(if let Val::Table(table) = t {
+                crate::table_security::wrap_table_value(state, table, result)
+            } else {
+                result
+            })
         })
     }
 
@@ -244,6 +249,8 @@ impl LuaState {
         key: Val,
         value: Val,
     ) -> LuaResult<()> {
+        crate::table_security::check_table_access(self, table_ref, Some(key))?;
+        let value = crate::table_security::wrap_table_value(self, table_ref, value);
         let table = self
             .gc
             .tables
