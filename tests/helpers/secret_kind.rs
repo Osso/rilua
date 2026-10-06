@@ -2,6 +2,40 @@ use rilua::table_security::{SecretPayloadKind, is_secret_table, secret_payload_k
 use rilua::{Lua, LuaApiMut, LuaResult, Val};
 
 #[test]
+fn secret_contents_global_slot_snapshot_is_not_public() -> LuaResult<()> {
+    let mut lua = Lua::new()?;
+    let state = lua.state_mut();
+    let global = state.global;
+    let global_key = state.gc.intern_string(b"_G");
+    let value_key = state.gc.intern_string(b"payload");
+    let shadow_key = state.gc.intern_string(b"_test_shadow");
+    let shadow = state.gc.alloc_table(rilua::vm::table::Table::new());
+    rilua::Table::from_gc_ref(state.registry).raw_set(
+        state,
+        Val::Str(shadow_key),
+        Val::Table(shadow),
+    )?;
+    state.install_global_slots(
+        vec![Val::Table(global), Val::Num(17.0)].into_boxed_slice(),
+        vec![global_key, value_key].into_boxed_slice(),
+        Some(shadow_key),
+    );
+    let function = lua.load("return payload")?;
+    rilua::table_security::set_table_security(lua.state_mut(), global, 2)?;
+    let result = lua.call_function(&function, &[])?;
+    assert_eq!(result.len(), 1);
+    assert!(rilua::table_security::is_secret_value(
+        lua.state_mut(),
+        result[0]
+    ));
+    assert_eq!(
+        rilua::table_security::unwrap_secret(lua.state_mut(), result[0])?,
+        Val::Num(17.0)
+    );
+    Ok(())
+}
+
+#[test]
 fn secret_kind_metadata_and_contents_are_opaque_to_tainted_callers() -> LuaResult<()> {
     let mut lua = Lua::new()?;
     rilua::table_security::register_table_security(&mut lua)?;

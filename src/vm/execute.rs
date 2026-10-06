@@ -1201,6 +1201,8 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
 
                     crate::table_security::check_table_access(state, root_global, Some(key))?;
                     if slot_idx == 0 {
+                        let snapshot =
+                            crate::table_security::wrap_table_value(state, root_global, snapshot);
                         state.stack_set(ra, snapshot);
                         continue;
                     }
@@ -1230,11 +1232,18 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                         let live_val = live_table.get(key, &state.gc.string_arena);
                         if live_val != Val::Nil {
                             propagate_slot_read_taint(state, live_ref, key);
+                            let live_val = crate::table_security::wrap_table_value(
+                                state,
+                                root_global,
+                                live_val,
+                            );
                             state.stack_set(ra, live_val);
                             continue;
                         }
                     }
 
+                    let snapshot =
+                        crate::table_security::wrap_table_value(state, root_global, snapshot);
                     state.stack_set(ra, snapshot);
                 }
 
