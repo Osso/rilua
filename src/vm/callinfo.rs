@@ -60,6 +60,9 @@ pub struct CallInfo {
     /// When tainted code sets a variable, the variable inherits this taint.
     /// Used by `issecure()`, `issecurevariable()`, and `securecall()`.
     pub taint: Option<String>,
+
+    /// Host revocation, separate from Lua-editable taint. Survives tail calls.
+    pub(crate) secret_access_revoked: bool,
 }
 
 impl CallInfo {
@@ -78,6 +81,7 @@ impl CallInfo {
             tail_calls: 0,
             is_lua: false,
             taint: None,
+            secret_access_revoked: false,
         }
     }
 }

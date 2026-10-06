@@ -1880,6 +1880,8 @@ pub fn execute(state: &mut LuaState) -> LuaResult<()> {
                                 .taint
                                 .clone()
                                 .or_else(|| state.call_stack[prev_ci].taint.clone());
+                            state.call_stack[prev_ci].secret_access_revoked |=
+                                state.call_stack[state.ci].secret_access_revoked;
                             state.call_stack[prev_ci].tail_calls += 1;
 
                             // Remove the new frame -- the previous frame

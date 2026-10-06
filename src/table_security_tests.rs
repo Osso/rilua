@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn secret_access_revocation_tracks_frames_without_changing_taint() -> LuaResult<()> {
+    use crate::vm::callinfo::CallInfo;
+    let mut state = LuaState::new();
+    let secret = wrap_host_secret_number(&mut state, 7.0);
+    state.push(secret);
+    assert!(revoke_secret_access(&mut state).is_err());
+    let mut frame = CallInfo::new(0, 1, 20, 0);
+    frame.is_lua = true;
+    state.push_ci(frame);
+    revoke_secret_access(&mut state)?;
+    assert!(state_is_secure(&state));
+    assert!(!can_access_secrets(&state));
+    assert!(unwrap_secret(&state, secret).is_err());
+    state.push_ci(CallInfo::new(0, 1, 20, 0));
+    assert!(!can_access_secrets(&state));
+    state.pop_ci();
+    assert!(!can_access_secrets(&state));
+    state.pop_ci();
+    assert!(can_access_secrets(&state));
+    assert_eq!(unwrap_secret(&state, secret)?, Val::Num(7.0));
+    Ok(())
+}
+
+#[test]
 fn secret_transform_binary_payload_errors_and_kind_validation() -> LuaResult<()> {
     let mut state = LuaState::new();
     let bytes = state.gc.intern_string(&[0, 255, b'A']);

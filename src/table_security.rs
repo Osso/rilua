@@ -280,8 +280,47 @@ pub fn unwrap_secret(state: &LuaState, value: Val) -> LuaResult<Val> {
     else {
         return Ok(value);
     };
-    ensure_secure_caller(state)?;
+    if !can_access_secrets(state) {
+        return Err(runtime_error(
+            "secret access requires an untainted caller without revoked access",
+        ));
+    }
     Ok(payload)
+}
+
+/// Query the exact guard used by secret unwrapping. Revocation is independent
+/// of taint; securecall and debug taint edits cannot restore it. Saved resumer
+/// frames also deny access, preventing coroutine entry from bypassing revocation.
+pub fn can_access_secrets(state: &LuaState) -> bool {
+    let revoked = state.call_stack[..=state.ci]
+        .iter()
+        .any(|ci| ci.secret_access_revoked)
+        || state.saved_threads.iter().any(|thread| {
+            thread.call_stack[..=thread.ci]
+                .iter()
+                .any(|ci| ci.secret_access_revoked)
+        });
+    state_is_secure(state) && !revoked
+}
+
+/// Revoke the current Lua context's access, or the immediate caller when called
+/// inside a Rust function (the host binding for dropsecretaccess).
+/// INFERRED: denial lasts through all descendants, protected calls, securecall,
+/// tail calls, and coroutine yields. Access returns when that frame ends, even
+/// by error. This does not taint the frame. No top-level sentinel revocation.
+pub fn revoke_secret_access(state: &mut LuaState) -> LuaResult<()> {
+    let target = if state.call_stack[state.ci].is_lua {
+        state.ci
+    } else {
+        state.ci.checked_sub(1).unwrap_or(0)
+    };
+    if target == 0 {
+        return Err(runtime_error(
+            "secret access revocation requires an active calling context",
+        ));
+    }
+    state.call_stack[target].secret_access_revoked = true;
+    Ok(())
 }
 
 fn ensure_secure_caller(state: &LuaState) -> LuaResult<()> {
