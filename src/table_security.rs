@@ -237,6 +237,15 @@ pub fn wrap_host_secret_number(state: &mut LuaState, value: f64) -> Val {
     Val::Userdata(state.gc.alloc_userdata(Userdata::secret(Val::Num(value))))
 }
 
+/// Host numeric inspector signature scaffold for behavioral RED only.
+pub fn inspect_host_secret_number<T>(
+    _state: &LuaState,
+    _value: Val,
+    _inspect: impl FnOnce(f64) -> LuaResult<T>,
+) -> LuaResult<T> {
+    Err(runtime_error("secret number expected"))
+}
+
 /// Copy a string computed by trusted Rust host code into a VM-owned secret result.
 /// Unlike `wrap_secret`, this does not accept a Lua value or change caller taint.
 /// The caller must root the result before another GC safe point.
