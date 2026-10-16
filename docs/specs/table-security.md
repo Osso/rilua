@@ -65,3 +65,16 @@ Closure stamps are retained through GC marking and published root traversal, whi
 ## Proof scope
 
 `tests/helpers/table_security.rs` exercises opt-in publication, arguments/arity, accumulated restrictions, caller taint, opaque key rejection, unwrap identity, and GC reachability/collection. It belongs to the existing integration binary, not a separate Cargo target.
+
+## Trusted host-only numeric inspection
+
+`inspect_host_secret_number<T>(&LuaState, Val, impl FnOnce(f64) -> LuaResult<T>) -> LuaResult<T>` permits trusted Rust to consume a secret numeric payload without exposing it to Lua. This is an embedding capability, not a Lua global or a native-conformance claim.
+
+- [ ] Accept only authentic live VM-owned secret wrappers containing a number. Reject ordinary values, ordinary userdata, nonnumeric secret wrappers, and stale handles with `secret number expected`, without invoking the closure.
+- [ ] Invoke the trusted Rust closure once with the exact numeric payload and return its host-side result. Propagate closure errors unchanged and preserve the input.
+- [ ] Permit inspection from tainted and independently access-revoked Lua contexts, without changing caller taint, revocation, or existing `unwrap_secret`/`secretunwrap` access checks. Secure callers retain ordinary guarded unwrapping.
+- [ ] Do not invoke Lua callbacks, push decoded values, or automatically publish results. The embedder must not expose or log plaintext, including in errors. Generic `T` cannot prevent a caller from deliberately choosing `Val`; this is a trusted-host contract, not a sandbox against Rust.
+
+Staged assertions in `src/table_security_tests.rs` cover registered host callbacks under a stamped addon closure and an untainted revoked context (including a secure call), retained unwrap denial and frame taints, secure unwrap after context exit, public/wrong-kind/ordinary-userdata rejection without closure execution, actual GC collection of an unrooted wrapper, and exact callback-error propagation. These requirements remain unchecked until main records RED/GREEN execution.
+
+Consumer permission remains the simulator's responsibility. The approved use is only the opaque numeric `GetSpellCharges` selector path; this API does not authorize relaxing action or spellbook selector policy (`AllowedWhenUntainted`), shared spell resolution, VM ordering, or Lua unwrapping.

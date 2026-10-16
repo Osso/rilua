@@ -237,13 +237,34 @@ pub fn wrap_host_secret_number(state: &mut LuaState, value: f64) -> Val {
     Val::Userdata(state.gc.alloc_userdata(Userdata::secret(Val::Num(value))))
 }
 
-/// Host numeric inspector signature scaffold for behavioral RED only.
+/// Inspect an authentic live secret number using trusted Rust host code.
+///
+/// Permitted even for tainted or access-revoked callers; no Lua callback is invoked.
+/// Input, caller taint, revocation, and guarded `unwrap_secret` remain unchanged.
+/// Ordinary values, nonnumeric wrappers, and stale userdata are rejected before
+/// invoking the closure. Closure errors propagate unchanged.
+///
+/// The result is host-side: this API does not push a public Lua value or mint a
+/// wrapper. Trusted callers must not publish or log plaintext, including through
+/// closure errors. Generic `T` does not prevent a caller from choosing `Val`;
+/// maintaining the host-only boundary is the embedder's responsibility.
 pub fn inspect_host_secret_number<T>(
-    _state: &LuaState,
-    _value: Val,
-    _inspect: impl FnOnce(f64) -> LuaResult<T>,
+    state: &LuaState,
+    value: Val,
+    inspect: impl FnOnce(f64) -> LuaResult<T>,
 ) -> LuaResult<T> {
-    Err(runtime_error("secret number expected"))
+    let Val::Userdata(reference) = value else {
+        return Err(runtime_error("secret number expected"));
+    };
+    let Some(Val::Num(number)) = state
+        .gc
+        .userdata
+        .get(reference)
+        .and_then(Userdata::secret_value)
+    else {
+        return Err(runtime_error("secret number expected"));
+    };
+    inspect(number)
 }
 
 /// Copy a string computed by trusted Rust host code into a VM-owned secret result.
