@@ -4347,11 +4347,100 @@ fn error_msg_call_local() {
 
 #[test]
 fn error_msg_call_global() {
-    let (stdout, _, code) = run_rilua("local ok, msg = pcall(function() foo() end); print(msg)");
+    let (stdout, stderr, code) =
+        run_rilua("local ok, msg = pcall(function() foo() end); print(msg)");
     assert_eq!(code, 0);
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
     assert!(
         stdout.contains("attempt to call global 'foo' (a nil value)"),
         "got: {stdout}"
+    );
+}
+
+fn assert_missing_global_name(source: &str, name: &str) {
+    let script = format!(
+        "local chunk = assert(loadstring({source:?}, '@diagnostic-name')); \
+         local ok, message = pcall(chunk); assert(not ok); print(message)"
+    );
+    let (stdout, stderr, code) = run_rilua(&script);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    assert_eq!(
+        stdout.trim().split_once(": attempt").map(|(_, msg)| msg),
+        Some(format!(" to index global '{name}' (a nil value)").as_str()),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn error_msg_name_supplied_future_loop_repro() {
+    assert_missing_global_name(
+        "MissingForGeneratorRepro.field(); for index, value in ipairs({}) do end",
+        "MissingForGeneratorRepro",
+    );
+}
+
+#[test]
+fn error_msg_name_future_loop() {
+    assert_missing_global_name(
+        "C_DefinitelyAbsentForProbe.LogErrorMessage('x'); for i,h in ipairs({}) do h() end",
+        "C_DefinitelyAbsentForProbe",
+    );
+}
+
+#[test]
+fn error_msg_name_future_loop_in_closure() {
+    assert_missing_global_name(
+        "local handlers = {}; local function f() C_DefinitelyAbsentForProbe.LogErrorMessage('x'); for i,h in ipairs(handlers) do h() end end; f()",
+        "C_DefinitelyAbsentForProbe",
+    );
+}
+
+#[test]
+fn error_msg_name_future_loop_after_formatted_locals() {
+    assert_missing_global_name(
+        "local handlers = {}; local function f(message) local stack, locals = 'stack', 'locals'; local formatted = string.format('Lua Error: %s', message); if true then C_DefinitelyAbsentForProbe.LogErrorMessage(formatted) end; if #handlers > 0 then for i,h in ipairs(handlers) do pcall(h,message,stack,locals) end end end; f('x')",
+        "C_DefinitelyAbsentForProbe",
+    );
+}
+
+#[test]
+fn error_msg_name_future_numeric_loop() {
+    assert_missing_global_name(
+        "MissingGlobal.field(); for i = 1, 2 do end",
+        "MissingGlobal",
+    );
+}
+
+#[test]
+fn error_msg_name_control_no_loop() {
+    assert_missing_global_name(
+        "C_DefinitelyAbsentForProbe.LogErrorMessage('x')",
+        "C_DefinitelyAbsentForProbe",
+    );
+}
+
+#[test]
+fn error_msg_name_control_preceding_loop() {
+    assert_missing_global_name(
+        "for k,v in pairs({}) do end; C_DefinitelyAbsentForProbe.LogErrorMessage('x')",
+        "C_DefinitelyAbsentForProbe",
+    );
+}
+
+#[test]
+fn error_msg_name_control_preceding_loop_with_local() {
+    assert_missing_global_name(
+        "local t = {}; for k,v in pairs(t) do end; C_DefinitelyAbsentForProbe.LogErrorMessage('x')",
+        "C_DefinitelyAbsentForProbe",
+    );
+}
+
+#[test]
+fn error_msg_name_control_preceding_loop_in_closure() {
+    assert_missing_global_name(
+        "local f = function() for k,v in pairs({}) do end; C_DefinitelyAbsentForProbe.LogErrorMessage('x') end; f()",
+        "C_DefinitelyAbsentForProbe",
     );
 }
 
