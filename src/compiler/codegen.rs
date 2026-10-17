@@ -886,14 +886,14 @@ impl Compiler {
 
     /// Activates `n` local variables (makes them visible).
     ///
-    /// The `n` newest entries in `active_vars` (pushed by prior `new_local`
-    /// calls) have their `start_pc` set to the current code position.
+    /// The next `n` entries after the already-active locals have their
+    /// `start_pc` set to the current code position. Later pending locals
+    /// (such as a for loop's user variables) remain inactive.
     /// Matches PUC-Rio's `adjustlocalvars`.
     pub(crate) fn activate_locals(&mut self, n: u32) {
         let fs = self.fs_mut();
         let pc = fs.proto.code.len();
-        // The n new vars are at the end of active_vars.
-        let start_idx = fs.active_vars.len() - n as usize;
+        let start_idx = usize::from(fs.num_active_vars);
         for i in 0..n as usize {
             let var_idx = fs.active_vars[start_idx + i] as usize;
             if var_idx < fs.proto.local_vars.len() {
