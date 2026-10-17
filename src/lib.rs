@@ -242,6 +242,7 @@ impl Lua {
         };
 
         if let Err(err) = result {
+            self.state.close_upvalues(func_idx);
             self.state.top = func_idx;
             self.state.base = save_base;
             self.state.ci = save_ci;
@@ -317,7 +318,8 @@ impl Lua {
                 let msg = e.to_string();
                 let traceback = stdlib::debug::generate_traceback(&self.state, &msg, 0);
 
-                // Restore state.
+                // Close captures before discarding the failed call's stack slots.
+                self.state.close_upvalues(func_idx);
                 self.state.top = func_idx;
                 self.state.base = save_base;
                 self.state.ci = save_ci;
@@ -427,14 +429,7 @@ impl Lua {
         }
         let closure_ref = self.state.gc.alloc_closure(Closure::Lua(lua_cl));
 
-        self.state.stack_set(0, Val::Function(closure_ref));
-        self.state.top = 1;
-        self.state.base = 1;
-
-        match self.state.precall(0, LUA_MULTRET)? {
-            CallResult::Lua => execute(&mut self.state)?,
-            CallResult::Rust => {}
-        }
+        self.call_function(&Function(closure_ref), &[])?;
 
         Ok(())
     }

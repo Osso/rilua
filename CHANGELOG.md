@@ -16,6 +16,7 @@ and this project adheres to
 
 ### Fixed
 
+- Close escaped upvalues before reusing stack slots after failed host calls, load readers, error handlers, finalizers, and test-library remote calls; recover `exec` through the host call boundary.
 - Key closure taint by weak closure references so collection clears stamps and slot reuse cannot inherit taint.
 - Evaluate secret booleans through guarded conditional, equality, and standard-library boolean paths; reject tainted inspection before identity shortcuts. Other secret payloads remain opaque.
 - Permit secure-only Lua indexing of wrapped tables and return plain fields; this native-unverified policy is shallow and does not provide general secret propagation.

@@ -1625,6 +1625,8 @@ pub fn t_doremote(state: &mut LuaState) -> LuaResult<u32> {
             remote.stack_set(func_pos, Val::Function(cr));
             remote.top = func_pos + 1;
 
+            let saved_ci = remote.ci;
+            let saved_base = remote.base;
             match remote.call_function(func_pos, -1) {
                 Ok(()) => {
                     // Collect results from remote state and return as strings.
@@ -1650,7 +1652,13 @@ pub fn t_doremote(state: &mut LuaState) -> LuaResult<u32> {
                     Ok(n_results as u32)
                 }
                 Err(err) => {
-                    // Error: return nil, error_code, error_message.
+                    // Error: close captures before reusing the remote stack.
+                    remote.close_upvalues(func_pos);
+                    remote.ci = saved_ci;
+                    remote.base = saved_base;
+                    if remote.ci < crate::vm::state::MAXCALLS {
+                        remote.ci_overflow = false;
+                    }
                     remote.top = func_pos;
                     state.push(Val::Nil);
                     let code = match &err {

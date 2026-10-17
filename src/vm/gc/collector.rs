@@ -1504,6 +1504,7 @@ impl LuaState {
         self.push(Val::Userdata(ud_ref));
         let result = self.call_function(base, 0);
         if result.is_err() {
+            self.close_upvalues(saved_top);
             self.ci = saved_ci;
             self.base = self.call_stack[saved_ci].base;
             self.top = saved_top;

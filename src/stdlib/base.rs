@@ -534,6 +534,7 @@ pub fn lua_xpcall(state: &mut LuaState) -> LuaResult<u32> {
             let handler_ret = if handler_result.is_ok() {
                 state.stack_get(handler_pos)
             } else {
+                state.close_upvalues(handler_pos);
                 let msg = state.gc.intern_string_static(b"error in error handling");
                 Val::Str(msg)
             };
@@ -1218,6 +1219,7 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
         }
         Err(e) => {
             // Reader error on first call. Restore state and return nil + msg.
+            state.close_upvalues(saved_top);
             restore_state(state, saved_ci, saved_n_ccalls, saved_call_depth);
             state.top = saved_top;
             state.push(Val::Nil);
@@ -1278,6 +1280,9 @@ pub fn lua_load(state: &mut LuaState) -> LuaResult<u32> {
             Ok(1)
         }
         Err(e) => {
+            state.close_upvalues(saved_top);
+            restore_state(state, saved_ci, saved_n_ccalls, saved_call_depth);
+            state.top = saved_top;
             state.push(Val::Nil);
             let msg_bytes = match &e {
                 crate::error::LuaError::Syntax(syn) => syn.to_lua_bytes(),
@@ -1318,6 +1323,7 @@ fn load_binary_from_reader(
             }
             Ok(None) => break,
             Err(e) => {
+                state.close_upvalues(saved_top);
                 restore_state(state, saved_ci, saved_n_ccalls, saved_call_depth);
                 state.top = saved_top;
                 state.push(Val::Nil);
