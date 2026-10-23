@@ -751,6 +751,9 @@ pub struct LuaState {
     /// taint metadata is not written, avoiding overhead for non-WoW uses.
     pub taint_mode: bool,
 
+    /// Whether nil-global call errors include the recovered global name.
+    pub(crate) named_nil_global_calls: bool,
+
     /// Host-only execution policy, shared across coroutine stack swaps.
     instruction_budgets: instruction_budget::InstructionBudgets,
     secret_access_contexts: Option<Box<secret_access::SecretAccessContexts>>,
@@ -847,11 +850,22 @@ impl LuaState {
             yielded_in_hook: false,
             saved_threads: Vec::new(),
             taint_mode: false,
+            named_nil_global_calls: false,
             instruction_budgets: instruction_budget::InstructionBudgets::default(),
             secret_access_contexts: None,
             has_secret_contents_policy: false,
             app_data: None,
         }
+    }
+
+    /// Include the recovered global name when calling a nil global.
+    ///
+    /// Disabled by default: nil-global calls report `attempt to call a nil value`.
+    /// Enabling this selects stock Lua 5.1 named diagnostics when a global name
+    /// can be recovered. Other type errors and unnamed calls are unchanged.
+    /// This host setting is shared by all coroutines; no Lua API is installed.
+    pub fn set_named_nil_global_calls(&mut self, enabled: bool) {
+        self.named_nil_global_calls = enabled;
     }
 
     /// Returns whether the current table lookup originated from a syntactic

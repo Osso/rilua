@@ -346,14 +346,15 @@ fn type_error(
         (reg as u32),
         &state.gc.string_arena,
     );
-    let message =
-        if matches!(name_info, Some(("global", _))) && opname == "call" && type_name == "nil" {
+    let message = match (name_info, opname, type_name) {
+        (Some(("global", _)), "call", "nil") if !state.named_nil_global_calls => {
             format!("attempt to {opname} a {type_name} value")
-        } else if let Some((kind, name)) = name_info {
+        }
+        (Some((kind, name)), _, _) => {
             format!("attempt to {opname} {kind} '{name}' (a {type_name} value)")
-        } else {
-            format!("attempt to {opname} a {type_name} value")
-        };
+        }
+        _ => format!("attempt to {opname} a {type_name} value"),
+    };
     runtime_error(proto, pc, &message)
 }
 
