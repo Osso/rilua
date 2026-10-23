@@ -607,6 +607,8 @@ fn main() {
         process::exit(1);
     };
 
+    lua.state_mut().set_named_nil_global_calls(true);
+
     // Handle LUA_INIT.
     if handle_lua_init(&mut lua).is_err() {
         process::exit(1);
