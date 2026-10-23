@@ -567,7 +567,7 @@ fn read_line(state: &mut LuaState, fp: *mut LibcFile) -> bool {
             state.push(Val::Str(s));
             return true;
         }
-        let len = unsafe { strlen(buf.as_ptr()) };
+        let len = unsafe { strlen(buf.as_ptr().cast()) };
         if len > 0 && buf[len - 1] == b'\n' {
             // Got end-of-line: add everything except the \n.
             result.extend_from_slice(&buf[..len - 1]);

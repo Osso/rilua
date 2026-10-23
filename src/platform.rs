@@ -58,7 +58,7 @@ unsafe extern "C" {
     pub(crate) fn tmpfile() -> *mut LibcFile;
     pub(crate) fn fscanf(stream: *mut LibcFile, format: *const u8, ...) -> i32;
     pub(crate) fn fprintf(stream: *mut LibcFile, format: *const u8, ...) -> i32;
-    pub(crate) fn strlen(s: *const u8) -> usize;
+    pub(crate) fn strlen(s: *const core::ffi::c_char) -> usize;
 
     // Number parsing / locale
     pub(crate) fn strtod(nptr: *const u8, endptr: *mut *mut u8) -> f64;
