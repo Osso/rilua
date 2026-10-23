@@ -833,22 +833,21 @@ mod tests {
     }
 
     #[test]
-    fn named_nil_global_calls_reports_direct_call_name() {
-        let mut lua = Lua::new().expect("failed to create Lua state");
+    fn named_nil_global_calls_reports_direct_call_name() -> LuaResult<()> {
+        let mut lua = Lua::new()?;
         lua.state_mut().set_named_nil_global_calls(true);
-        let err = lua
-            .exec("MissingGlobal()")
-            .expect_err("calling a missing global should fail");
+        let result = lua.exec("MissingGlobal()");
 
         assert_eq!(
-            err.to_string(),
-            "(string):1: attempt to call global 'MissingGlobal' (a nil value)"
+            result.map_err(|err| err.to_string()),
+            Err("(string):1: attempt to call global 'MissingGlobal' (a nil value)".to_owned())
         );
+        Ok(())
     }
 
     #[test]
-    fn named_nil_global_calls_preserves_inner_pcall_two_results() {
-        let mut lua = Lua::new().expect("failed to create Lua state");
+    fn named_nil_global_calls_preserves_inner_pcall_two_results() -> LuaResult<()> {
+        let mut lua = Lua::new()?;
         lua.state_mut().set_named_nil_global_calls(true);
         lua.exec(
             r#"
@@ -866,7 +865,6 @@ mod tests {
             check(pcall(call_missing_global))
             "#,
         )
-        .expect("inner pcall must preserve named nil-global errors and exactly two results");
     }
 
     #[test]
