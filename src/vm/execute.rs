@@ -511,6 +511,29 @@ impl LuaState {
         result
     }
 
+    /// `call_function` with the new frame's taint set to `taint` instead of
+    /// the callee's closure stamp. The stamp itself is left untouched, so
+    /// nested and recursive calls of the same closure are unaffected.
+    pub fn call_function_with_taint(
+        &mut self,
+        func_idx: usize,
+        num_results: i32,
+        taint: Option<String>,
+    ) -> LuaResult<()> {
+        self.n_ccalls += 1;
+        self.call_depth += 1;
+        let result = (|| {
+            self.check_stack_overflow()?;
+            match self.precall_with_taint(func_idx, num_results, Some(taint))? {
+                CallResult::Lua => execute(self),
+                CallResult::Rust => Ok(()),
+            }
+        })();
+        self.call_depth -= 1;
+        self.n_ccalls -= 1;
+        result
+    }
+
     /// Invokes the active hook function with (event_name, line_or_nil).
     ///
     /// Matches PUC-Rio's `luaD_callhook()` in `ldo.c`:
@@ -568,6 +591,19 @@ impl LuaState {
     /// `num_results` is the number of results the caller expects, or
     /// `LUA_MULTRET` (-1) for all results.
     pub fn precall(&mut self, func_idx: usize, num_results: i32) -> LuaResult<CallResult> {
+        self.precall_with_taint(func_idx, num_results, None)
+    }
+
+    /// `precall` with an optional frame taint replacing the closure stamp.
+    ///
+    /// `taint_override = Some(t)` installs `t` on the new frame for this call
+    /// only; the closure's stored stamp is neither read nor modified.
+    fn precall_with_taint(
+        &mut self,
+        func_idx: usize,
+        num_results: i32,
+        taint_override: Option<Option<String>>,
+    ) -> LuaResult<CallResult> {
         // Check total call depth (Lua + Rust). Matches PUC-Rio's `growCI`:
         // - At MAXCALLS (20,000): throw recoverable "stack overflow"
         //   (error handlers like debug.traceback can still run)
@@ -658,7 +694,10 @@ impl LuaState {
         let saved_pc = self.call_stack[self.ci].saved_pc;
         let _ = saved_pc; // used for restoration in poscall
 
-        let closure_taint = crate::stdlib::taint::closure_taint(self, closure_ref);
+        let closure_taint = match taint_override {
+            Some(taint) => taint,
+            None => crate::stdlib::taint::closure_taint(self, closure_ref),
+        };
         let closure = self
             .gc
             .closures
