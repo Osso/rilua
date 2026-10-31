@@ -306,7 +306,40 @@ fn secret_boolean_error_text_uses_name_and_taint_origin() -> LuaResult<()> {
         }
         for _, case in ipairs(cases) do
             local ok, err = pcall(case[1])
-            assert(not ok and err == case[2], tostring(err))
+            assert(not ok and err:gsub('^.-:%d+: ', '') == case[2], tostring(err))
+        end
+    "#)
+}
+
+#[test]
+fn secret_operation_words_follow_native_vocabulary() -> LuaResult<()> {
+    let mut lua = host_number_inspector_lua()?;
+    lua.exec(r#"
+        SecretBool = secretwrap(true)
+        SecretNumber = secretwrap(4)
+        SecretTable = secretwrap({ field = 1 })
+        local cases = {
+            {function() local x = SecretBool; return not x end,
+                "attempt to negate local 'x' (a secret boolean value, while execution tainted by 'ProbeAddon')"},
+            {function() local x = SecretBool; return x == true end,
+                "attempt to compare local 'x' (a secret boolean value, while execution tainted by 'ProbeAddon')"},
+            {function() local x = SecretNumber; return x < 3 end,
+                "attempt to compare local 'x' (a secret number value, while execution tainted by 'ProbeAddon')"},
+            {function() local x = SecretTable; return x.field end,
+                "attempt to index local 'x' (a secret table value, while execution tainted by 'ProbeAddon')"},
+            {function() local x = SecretTable; x.field = 2 end,
+                "attempt to perform indexed assignment on local 'x' (a secret table value, while execution tainted by 'ProbeAddon')"},
+            {function() local x = SecretNumber; return x + 1 end,
+                "attempt to perform arithmetic on local 'x' (a secret number value, while execution tainted by 'ProbeAddon')"},
+            {function() return SecretNumber .. '' end,
+                "attempt to concatenate global 'SecretNumber' (a secret number value, while execution tainted by 'ProbeAddon')"},
+            {function() return assert(SecretBool) end,
+                "attempt to perform boolean test on a secret boolean value (execution tainted by 'ProbeAddon')"},
+        }
+        for index, case in ipairs(cases) do
+            debug.setobjecttaint(case[1], 'ProbeAddon')
+            local ok, err = pcall(case[1])
+            assert(not ok and err:gsub('^.-:%d+: ', '') == case[2], index .. ': ' .. tostring(err))
         end
     "#)
 }

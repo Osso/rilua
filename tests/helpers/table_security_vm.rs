@@ -108,7 +108,27 @@ fn tainted_table_error_text_matches_native_operations() {
         for _, case in ipairs(tests) do
             local ok, err = pcall(call_tainted, case[1])
             assert(not ok)
+            err = err:gsub('^.-:%d+: ', '')
             assert(err == "attempted to " .. case[2] .. " a table that cannot be accessed while tainted (execution tainted by 'Addon')", err)
+        end
+    "#);
+}
+
+#[test]
+fn secret_key_table_error_text_matches_native_template() {
+    run(r#"
+        local t = {}
+        settablesecurity(t, 1)
+        local key = secretwrap(1)
+        local cases = {
+            {function() return t[key] end, 'index'},
+            {function() t[key] = 2 end, 'perform indexed assignment on'},
+        }
+        for _, case in ipairs(cases) do
+            local ok, err = pcall(case[1])
+            assert(not ok)
+            err = err:gsub('^.-:%d+: ', '')
+            assert(err == "attempted to " .. case[2] .. " a table that cannot be indexed with secret keys", err)
         end
     "#);
 }
