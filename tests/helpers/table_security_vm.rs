@@ -93,3 +93,22 @@ fn vm_security_rejects_secret_keys_and_allows_unwrapping_proxy() {
         assert(not invoked)
     "#);
 }
+
+#[test]
+fn tainted_table_error_text_matches_native_operations() {
+    run(r#"
+        local t = { value = 1 }
+        settablesecurity(t, 0)
+        local tests = {
+            {function() return t.value end, 'index'},
+            {function() t.value = 2 end, 'perform indexed assignment on'},
+            {function() return #t end, 'get length of'},
+            {function() return next(t) end, 'iterate'},
+        }
+        for _, case in ipairs(tests) do
+            local ok, err = pcall(call_tainted, case[1])
+            assert(not ok)
+            assert(err == "attempted to " .. case[2] .. " a table that cannot be accessed while tainted (execution tainted by 'Addon')", err)
+        end
+    "#);
+}
