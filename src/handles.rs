@@ -54,7 +54,12 @@ impl AnyUserData {
 impl Table {
     /// Gets a value by key without metamethod dispatch.
     pub fn raw_get(&self, state: &LuaState, key: Val) -> LuaResult<Val> {
-        crate::table_security::check_table_access(state, self.0, Some(key))?;
+        crate::table_security::check_table_access(
+            state,
+            self.0,
+            Some(key),
+            crate::table_security::TableAccess::Index,
+        )?;
         let table = state.gc.tables.get(self.0).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "table has been collected".into(),
@@ -67,7 +72,12 @@ impl Table {
 
     /// Sets a value by key without metamethod dispatch.
     pub fn raw_set(&self, state: &mut LuaState, key: Val, value: Val) -> LuaResult<()> {
-        crate::table_security::check_table_access(state, self.0, Some(key))?;
+        crate::table_security::check_table_access(
+            state,
+            self.0,
+            Some(key),
+            crate::table_security::TableAccess::IndexedAssignment,
+        )?;
         let value = crate::table_security::wrap_table_value(state, self.0, value);
         let table = state.gc.tables.get_mut(self.0).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
@@ -93,7 +103,12 @@ impl Table {
 
     /// Sets or clears the metatable for this table.
     pub fn set_metatable(&self, state: &mut LuaState, mt: Option<Self>) -> LuaResult<()> {
-        crate::table_security::check_table_access(state, self.0, None)?;
+        crate::table_security::check_table_access(
+            state,
+            self.0,
+            None,
+            crate::table_security::TableAccess::Index,
+        )?;
         let table = state.gc.tables.get_mut(self.0).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "table has been collected".into(),

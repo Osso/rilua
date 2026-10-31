@@ -203,7 +203,12 @@ pub fn os_time(state: &mut LuaState) -> LuaResult<u32> {
     let Val::Table(table_ref) = arg(state, 0) else {
         return Err(bad_argument("time", 1, "table expected"));
     };
-    crate::table_security::check_table_access(state, table_ref, None)?;
+    crate::table_security::check_table_access(
+        state,
+        table_ref,
+        None,
+        crate::table_security::TableAccess::Index,
+    )?;
 
     let sec = get_date_field(state, table_ref, "sec", Some(0))?;
     let min = get_date_field(state, table_ref, "min", Some(0))?;

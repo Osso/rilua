@@ -7,8 +7,9 @@
 //! Access-boundary callers must invoke `check_table_access` before reading or
 //! mutating a table. Low-level arena/table operations remain trusted host APIs.
 
-use crate::api::{LuaApiMut, state_is_secure};
+use crate::api::{LuaApiMut, stack_taint_origin, state_is_secure};
 use crate::vm::gc::arena::GcRef;
+use crate::vm::proto::Proto;
 use crate::vm::state::LuaState;
 use crate::vm::table::Table;
 use crate::vm::value::Userdata;
@@ -156,11 +157,35 @@ pub fn register_table_security(lua: &mut Lua) -> LuaResult<()> {
     Ok(())
 }
 
+/// Table operation a guard reports. The client's tainted-table guard sites pass
+/// `index`, `get length of`, `iterate` and `perform indexed assignment on`
+/// (S9 §10.1); which simulator site maps to which word is best-guess beyond
+/// reads, writes, length and iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableAccess {
+    Index,
+    IndexedAssignment,
+    GetLength,
+    Iterate,
+}
+
+impl TableAccess {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+            Self::IndexedAssignment => "perform indexed assignment on",
+            Self::GetLength => "get length of",
+            Self::Iterate => "iterate",
+        }
+    }
+}
+
 /// Reject forbidden caller/key access. `None` covers keyless operations.
 pub fn check_table_access(
     state: &LuaState,
     table: GcRef<Table>,
     key: Option<Val>,
+    access: TableAccess,
 ) -> LuaResult<()> {
     let flags = state
         .gc
@@ -169,10 +194,17 @@ pub fn check_table_access(
         .ok_or_else(|| runtime_error("table has been collected"))?
         .security_flags;
     if flags & DISALLOW_TAINTED_ACCESS != 0 && !state_is_secure(state) {
-        return Err(runtime_error("tainted access to secured table"));
+        let origin = stack_taint_origin(state).unwrap_or_default();
+        return Err(runtime_error(format!(
+            "attempted to {} a table that cannot be accessed while tainted (execution tainted by '{origin}')",
+            access.word()
+        )));
     }
     if flags & DISALLOW_SECRET_KEYS != 0 && key.is_some_and(|key| is_secret_value(state, key)) {
-        return Err(runtime_error("secret key access to secured table"));
+        return Err(runtime_error(format!(
+            "attempted to {} a table that cannot be indexed with secret keys",
+            access.word()
+        )));
     }
     Ok(())
 }
@@ -311,21 +343,96 @@ pub fn transform_host_secret_string(
     ))
 }
 
-/// Return a secret boolean's payload through the existing secure-caller guard.
-/// Non-boolean secret wrappers and ordinary Lua values keep their original behavior.
-fn checked_secret_bool(state: &LuaState, value: Val) -> LuaResult<Option<bool>> {
+/// Operation words for the client's secret-value formatter (S9 §11).
+/// `perform boolean test on`, `negate`, `index` and `perform indexed assignment on`
+/// are observed at native call sites; the opcode each one maps to is best-guess.
+pub(crate) const BOOLEAN_TEST: &str = "perform boolean test on";
+pub(crate) const NEGATE: &str = "negate";
+pub(crate) const INDEX: &str = "index";
+pub(crate) const INDEXED_ASSIGNMENT: &str = "perform indexed assignment on";
+/// Best-guess: no native comparison call site was observed.
+pub(crate) const COMPARE: &str = "compare";
+
+/// Where the VM read an operand: the position prefix and, for a register, the
+/// variable name of the native named form.
+#[derive(Clone, Copy)]
+pub(crate) struct OperandSite<'a> {
+    pub(crate) proto: &'a Proto,
+    pub(crate) pc: usize,
+    pub(crate) reg: Option<usize>,
+}
+
+fn secret_payload(state: &LuaState, value: Val) -> Option<Val> {
     let Val::Userdata(reference) = value else {
+        return None;
+    };
+    state.gc.userdata.get(reference)?.secret_value()
+}
+
+/// Raise the native secret-value violation for `value` (S9 §12). The named
+/// form needs a resolved variable name; the taint clause needs a taint origin.
+pub(crate) fn secret_violation(
+    state: &LuaState,
+    op: &str,
+    value: Val,
+    site: Option<OperandSite<'_>>,
+) -> crate::LuaError {
+    let type_name = secret_payload(state, value).map_or("userdata", Val::type_name);
+    let name = site.and_then(|site| {
+        crate::vm::debug_info::getobjname(
+            site.proto,
+            site.pc.saturating_sub(1),
+            u32::try_from(site.reg?).ok()?,
+            &state.gc.string_arena,
+        )
+    });
+    let message = match (name, stack_taint_origin(state)) {
+        (Some((kind, name)), Some(origin)) => format!(
+            "attempt to {op} {kind} '{name}' (a secret {type_name} value, while execution tainted by '{origin}')"
+        ),
+        (Some((kind, name)), None) => {
+            format!("attempt to {op} {kind} '{name}' (a secret {type_name} value)")
+        }
+        (None, Some(origin)) => {
+            format!("attempt to {op} a secret {type_name} value (execution tainted by '{origin}')")
+        }
+        (None, None) => format!("attempt to {op} a secret {type_name} value"),
+    };
+    match site {
+        Some(site) => crate::vm::execute::runtime_error(site.proto, site.pc, &message),
+        None => runtime_error(message),
+    }
+}
+
+/// Unwrap a secret operand of a Lua operation, raising the native violation
+/// when the caller cannot access secrets. Ordinary values pass through.
+fn unwrap_secret_operand(
+    state: &LuaState,
+    value: Val,
+    op: &str,
+    site: Option<OperandSite<'_>>,
+) -> LuaResult<Val> {
+    let Some(payload) = secret_payload(state, value) else {
+        return Ok(value);
+    };
+    if !can_access_secrets(state) {
+        return Err(secret_violation(state, op, value, site));
+    }
+    Ok(payload)
+}
+
+/// Return a secret boolean's payload through the secure-caller guard.
+/// Non-boolean secret wrappers and ordinary Lua values keep their original behavior.
+fn checked_secret_bool(
+    state: &LuaState,
+    value: Val,
+    op: &str,
+    site: Option<OperandSite<'_>>,
+) -> LuaResult<Option<bool>> {
+    let Some(Val::Bool(_)) = secret_payload(state, value) else {
         return Ok(None);
     };
-    let Some(Val::Bool(_)) = state
-        .gc
-        .userdata
-        .get(reference)
-        .and_then(Userdata::secret_value)
-    else {
-        return Ok(None);
-    };
-    let Val::Bool(value) = unwrap_secret(state, value)? else {
+    let Val::Bool(value) = unwrap_secret_operand(state, value, op, site)? else {
         unreachable!("a secret boolean's payload changed during inspection")
     };
     Ok(Some(value))
@@ -333,22 +440,27 @@ fn checked_secret_bool(state: &LuaState, value: Val) -> LuaResult<Option<bool>> 
 
 /// Evaluate truthiness without allowing a tainted caller to inspect a secret boolean.
 /// Other opaque secret values retain their previous userdata truthiness.
-pub(crate) fn checked_truthiness(state: &LuaState, value: Val) -> LuaResult<bool> {
-    Ok(checked_secret_bool(state, value)?.unwrap_or_else(|| value.is_truthy()))
+pub(crate) fn checked_truthiness(
+    state: &LuaState,
+    value: Val,
+    op: &str,
+    site: Option<OperandSite<'_>>,
+) -> LuaResult<bool> {
+    Ok(checked_secret_bool(state, value, op, site)?.unwrap_or_else(|| value.is_truthy()))
 }
 
 /// Compare wrapped booleans and nil before userdata identity reveals a secret.
 /// `None` delegates other values to the existing raw/metamethod path.
 pub(crate) fn checked_secret_equality(
     state: &LuaState,
-    left: Val,
-    right: Val,
+    (left, left_site): (Val, Option<OperandSite<'_>>),
+    (right, right_site): (Val, Option<OperandSite<'_>>),
 ) -> LuaResult<Option<bool>> {
-    let left_bool = checked_secret_bool(state, left)?;
-    let right_bool = checked_secret_bool(state, right)?;
+    let left_bool = checked_secret_bool(state, left, COMPARE, left_site)?;
+    let right_bool = checked_secret_bool(state, right, COMPARE, right_site)?;
     if left_bool.is_none() && right_bool.is_none() {
-        let left_nil = checked_secret_nil(state, left)?;
-        let right_nil = checked_secret_nil(state, right)?;
+        let left_nil = checked_secret_nil(state, left, left_site)?;
+        let right_nil = checked_secret_nil(state, right, right_site)?;
         if !left_nil && !right_nil {
             return Ok(None);
         }
@@ -367,77 +479,49 @@ pub(crate) fn checked_secret_equality(
     Ok(Some(left.is_some() && left == right))
 }
 
-fn checked_secret_nil(state: &LuaState, value: Val) -> LuaResult<bool> {
-    let Val::Userdata(reference) = value else {
-        return Ok(false);
-    };
-    if !matches!(
-        state
-            .gc
-            .userdata
-            .get(reference)
-            .and_then(Userdata::secret_value),
-        Some(Val::Nil)
-    ) {
+fn checked_secret_nil(
+    state: &LuaState,
+    value: Val,
+    site: Option<OperandSite<'_>>,
+) -> LuaResult<bool> {
+    if !matches!(secret_payload(state, value), Some(Val::Nil)) {
         return Ok(false);
     }
-    Ok(unwrap_secret(state, value)?.is_nil())
+    Ok(unwrap_secret_operand(state, value, COMPARE, site)?.is_nil())
 }
 
 /// Resolve a wrapped table only for ordinary Lua indexing. Fields returned
 /// by the table or its __index chain remain plain Lua values; this is not
 /// recursive secret propagation or a native-verified information-flow policy.
-pub(crate) fn checked_secret_table_read(state: &LuaState, value: Val) -> LuaResult<Val> {
-    let Val::Userdata(reference) = value else {
-        return Ok(value);
-    };
-    if !matches!(
-        state
-            .gc
-            .userdata
-            .get(reference)
-            .and_then(Userdata::secret_value),
-        Some(Val::Table(_))
-    ) {
+pub(crate) fn checked_secret_table_read(
+    state: &LuaState,
+    value: Val,
+    site: Option<OperandSite<'_>>,
+) -> LuaResult<Val> {
+    if !matches!(secret_payload(state, value), Some(Val::Table(_))) {
         return Ok(value);
     }
-    unwrap_secret(state, value)
+    unwrap_secret_operand(state, value, INDEX, site)
 }
 
 /// Inspect only wrapped booleans and numbers before order comparisons.
 /// Lua still rejects ordering booleans; numeric payloads use ordinary Lua
 /// ordering only after the stack-wide secure-caller check.
-pub(crate) fn checked_order_operand(state: &LuaState, value: Val) -> LuaResult<Val> {
-    if let Some(boolean) = checked_secret_bool(state, value)? {
-        return Ok(Val::Bool(boolean));
+pub(crate) fn checked_order_operand(
+    state: &LuaState,
+    value: Val,
+    site: Option<OperandSite<'_>>,
+) -> LuaResult<Val> {
+    match secret_payload(state, value) {
+        Some(Val::Bool(_) | Val::Num(_)) => unwrap_secret_operand(state, value, COMPARE, site),
+        _ => Ok(value),
     }
-    let Val::Userdata(reference) = value else {
-        return Ok(value);
-    };
-    if matches!(
-        state
-            .gc
-            .userdata
-            .get(reference)
-            .and_then(Userdata::secret_value),
-        Some(Val::Num(_))
-    ) {
-        return unwrap_secret(state, value);
-    }
-    Ok(value)
 }
 
-/// Unwrap to the original value, preserving table and ordinary-key identity.
+/// Unwrap to the original value for trusted host APIs, preserving table and
+/// ordinary-key identity.
 pub fn unwrap_secret(state: &LuaState, value: Val) -> LuaResult<Val> {
-    let Val::Userdata(reference) = value else {
-        return Ok(value);
-    };
-    let Some(payload) = state
-        .gc
-        .userdata
-        .get(reference)
-        .and_then(Userdata::secret_value)
-    else {
+    let Some(payload) = secret_payload(state, value) else {
         return Ok(value);
     };
     if !can_access_secrets(state) {

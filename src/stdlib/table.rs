@@ -3,7 +3,7 @@
 //! Reference: `ltablib.c` in PUC-Rio Lua 5.1.1.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
-use crate::table_security::checked_truthiness;
+use crate::table_security::{BOOLEAN_TEST, checked_truthiness};
 use crate::vm::gc::arena::GcRef;
 use crate::vm::metatable::{TMS, gettmbyobj, val_raw_equal};
 use crate::vm::state::LuaState;
@@ -58,7 +58,12 @@ fn simple_error(msg: String) -> LuaError {
 fn check_table(state: &LuaState, name: &str, n: usize) -> LuaResult<GcRef<Table>> {
     match arg(state, n) {
         Val::Table(r) => {
-            crate::table_security::check_table_access(state, r, None)?;
+            crate::table_security::check_table_access(
+                state,
+                r,
+                None,
+                crate::table_security::TableAccess::Index,
+            )?;
             Ok(r)
         }
         _ => Err(bad_argument(name, n + 1, "table expected")),
@@ -71,7 +76,12 @@ fn check_table(state: &LuaState, name: &str, n: usize) -> LuaResult<GcRef<Table>
 
 /// Raw get by integer key.
 fn get_raw(state: &LuaState, tref: GcRef<Table>, idx: i64) -> LuaResult<Val> {
-    crate::table_security::check_table_access(state, tref, None)?;
+    crate::table_security::check_table_access(
+        state,
+        tref,
+        None,
+        crate::table_security::TableAccess::Index,
+    )?;
     Ok(state
         .gc
         .tables
@@ -81,7 +91,12 @@ fn get_raw(state: &LuaState, tref: GcRef<Table>, idx: i64) -> LuaResult<Val> {
 
 /// Raw set by numeric key.
 fn set_raw(state: &mut LuaState, tref: GcRef<Table>, idx: i64, val: Val) -> LuaResult<()> {
-    crate::table_security::check_table_access(state, tref, None)?;
+    crate::table_security::check_table_access(
+        state,
+        tref,
+        None,
+        crate::table_security::TableAccess::IndexedAssignment,
+    )?;
     let val = crate::table_security::wrap_table_value(state, tref, val);
     let strings = &state.gc.string_arena;
     let t = state
@@ -102,7 +117,12 @@ fn swap_sort_values(
     right_idx: i64,
     right_val: Val,
 ) -> LuaResult<()> {
-    crate::table_security::check_table_access(state, tref, None)?;
+    crate::table_security::check_table_access(
+        state,
+        tref,
+        None,
+        crate::table_security::TableAccess::IndexedAssignment,
+    )?;
     if state.gc.tables.get(tref).is_some_and(Table::is_read_only) {
         return Err(simple_error("attempt to modify a read-only table".into()));
     }
@@ -132,7 +152,12 @@ fn swap_sort_values(
 
 /// Get the length of a table (#t).
 fn table_len(state: &LuaState, tref: GcRef<Table>) -> LuaResult<usize> {
-    crate::table_security::check_table_access(state, tref, None)?;
+    crate::table_security::check_table_access(
+        state,
+        tref,
+        None,
+        crate::table_security::TableAccess::GetLength,
+    )?;
     Ok(state
         .gc
         .tables
@@ -367,7 +392,12 @@ pub fn tab_foreach(state: &mut LuaState) -> LuaResult<u32> {
     // Iterate all keys via raw next, rechecking after each user callback.
     let mut key = Val::Nil;
     loop {
-        crate::table_security::check_table_access(state, tref, Some(key))?;
+        crate::table_security::check_table_access(
+            state,
+            tref,
+            Some(key),
+            crate::table_security::TableAccess::Iterate,
+        )?;
         let next = {
             let t = state
                 .gc
@@ -503,7 +533,7 @@ fn sort_comp(state: &mut LuaState, a: Val, b: Val, comp: SortComparator) -> LuaR
 
             let result = state.stack_get(call_base);
             state.top = call_base;
-            checked_truthiness(state, result)
+            checked_truthiness(state, result, BOOLEAN_TEST, None)
         }
     }
 }
@@ -613,7 +643,7 @@ fn default_less_than(state: &mut LuaState, a: Val, b: Val) -> LuaResult<bool> {
 
                     let result = state.stack_get(call_base);
                     state.top = call_base;
-                    checked_truthiness(state, result)
+                    checked_truthiness(state, result, BOOLEAN_TEST, None)
                 }
                 _ => Err(simple_error(format!(
                     "attempt to compare two {} values",

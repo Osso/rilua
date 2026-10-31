@@ -82,7 +82,12 @@ pub trait LuaApiMut: LuaApi {
         let key_ref = state.gc.intern_string(name.as_bytes());
         let key = Val::Str(key_ref);
         let global = state.global;
-        crate::table_security::check_table_access(state, global, Some(key))?;
+        crate::table_security::check_table_access(
+            state,
+            global,
+            Some(key),
+            crate::table_security::TableAccess::IndexedAssignment,
+        )?;
         let table = state.gc.tables.get_mut(global).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "global table not found".into(),
@@ -410,4 +415,15 @@ pub fn state_is_secure(state: &LuaState) -> bool {
         }
     }
     true
+}
+
+/// The taint origin native taint clauses report: the innermost taint on the
+/// live stack, as `debug.getstacktaint()` returns it. `None` when secure.
+pub fn stack_taint_origin(state: &LuaState) -> Option<&str> {
+    state
+        .call_stack
+        .iter()
+        .take(state.ci + 1)
+        .rev()
+        .find_map(|frame| frame.taint.as_deref())
 }

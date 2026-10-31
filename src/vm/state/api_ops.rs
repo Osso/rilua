@@ -2,7 +2,8 @@
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
 use crate::table_security::{
-    checked_order_operand, checked_secret_equality, checked_secret_table_read, checked_truthiness,
+    BOOLEAN_TEST, checked_order_operand, checked_secret_equality, checked_secret_table_read,
+    checked_truthiness,
 };
 use crate::vm::value::append_lua_number_bytes;
 
@@ -26,7 +27,7 @@ impl LuaState {
         let mut current = t;
         let mut contents_secret = false;
         for _ in 0..MAXTAGLOOP {
-            current = checked_secret_table_read(self, current)?;
+            current = checked_secret_table_read(self, current, None)?;
             if let Val::Table(table_ref) = current {
                 contents_secret |= crate::table_security::table_wraps_contents(self, table_ref);
                 let result = self
@@ -123,8 +124,8 @@ impl LuaState {
     /// Equivalent to PUC-Rio's `lua_lessthan`. Unlike the VM's
     /// `val_less_than`, this doesn't require proto/pc context.
     pub fn api_lessthan(&mut self, a: Val, b: Val) -> LuaResult<bool> {
-        let a = checked_order_operand(self, a)?;
-        let b = checked_order_operand(self, b)?;
+        let a = checked_order_operand(self, a, None)?;
+        let b = checked_order_operand(self, b, None)?;
         match (&a, &b) {
             (Val::Num(x), Val::Num(y)) => Ok(x < y),
             (Val::Str(x), Val::Str(y)) => {
@@ -153,7 +154,7 @@ impl LuaState {
     /// Equivalent to PUC-Rio's `lua_equal`. Triggers `__eq` metamethod
     /// for tables and userdata of the same type.
     pub fn api_equal(&mut self, a: Val, b: Val) -> LuaResult<bool> {
-        if let Some(result) = checked_secret_equality(self, a, b)? {
+        if let Some(result) = checked_secret_equality(self, (a, None), (b, None))? {
             return Ok(result);
         }
         if val_raw_equal(a, b, &self.gc.tables, &self.gc.string_arena) {
@@ -175,7 +176,7 @@ impl LuaState {
         }
 
         let result = self.call_tm_two_args(lhs_tm, a, b)?;
-        checked_truthiness(self, result)
+        checked_truthiness(self, result, BOOLEAN_TEST, None)
     }
 
     /// API-level concatenation of `count` values at top of stack.
@@ -260,7 +261,12 @@ impl LuaState {
         key: Val,
         value: Val,
     ) -> LuaResult<()> {
-        crate::table_security::check_table_access(self, table_ref, Some(key))?;
+        crate::table_security::check_table_access(
+            self,
+            table_ref,
+            Some(key),
+            crate::table_security::TableAccess::IndexedAssignment,
+        )?;
         let value = crate::table_security::wrap_table_value(self, table_ref, value);
         let table = self
             .gc
@@ -344,7 +350,7 @@ impl LuaState {
         }
 
         let result = self.call_tm_two_args(lhs_tm, lhs, rhs)?;
-        Ok(Some(checked_truthiness(self, result)?))
+        Ok(Some(checked_truthiness(self, result, BOOLEAN_TEST, None)?))
     }
 }
 

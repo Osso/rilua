@@ -374,7 +374,12 @@ impl Lua {
     /// Pass `Val::Nil` to start iteration. Returns `None` when the
     /// table is exhausted. This mirrors PUC-Rio's `lua_next`.
     pub fn table_next(&self, table: &Table, key: Val) -> LuaResult<Option<(Val, Val)>> {
-        crate::table_security::check_table_access(&self.state, table.0, Some(key))?;
+        crate::table_security::check_table_access(
+            &self.state,
+            table.0,
+            Some(key),
+            crate::table_security::TableAccess::Iterate,
+        )?;
         let t = self.state.gc.tables.get(table.0).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "table has been collected".into(),
@@ -453,7 +458,12 @@ impl Lua {
         let key_ref = self.state.gc.intern_string(name.as_bytes());
         let key = Val::Str(key_ref);
         let global = self.state.global;
-        crate::table_security::check_table_access(&self.state, global, Some(key))?;
+        crate::table_security::check_table_access(
+            &self.state,
+            global,
+            Some(key),
+            crate::table_security::TableAccess::IndexedAssignment,
+        )?;
         let table = self.state.gc.tables.get_mut(global).ok_or_else(|| {
             LuaError::Runtime(RuntimeError {
                 message: "global table not found".into(),

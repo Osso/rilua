@@ -3,7 +3,7 @@
 //! Reference: `lstrlib.c` in PUC-Rio Lua 5.1.1.
 
 use crate::error::{LuaError, LuaResult, RuntimeError};
-use crate::table_security::{checked_truthiness, is_secret_value};
+use crate::table_security::{BOOLEAN_TEST, checked_truthiness, is_secret_value};
 use crate::vm::state::LuaState;
 use crate::vm::value::{Userdata, Val};
 
@@ -1527,7 +1527,7 @@ pub fn str_find(state: &mut LuaState) -> LuaResult<u32> {
 
     let init = opt_int(state, "string.find", 2, 1).map(|i| posrelat(i, s.len()))?;
     let init = (init.max(1) as usize).saturating_sub(1); // Convert to 0-based.
-    let plain = checked_truthiness(state, plain_val)?;
+    let plain = checked_truthiness(state, plain_val, BOOLEAN_TEST, None)?;
 
     if plain {
         // Plain string search.

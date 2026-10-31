@@ -34,7 +34,10 @@ use super::string::LuaString;
 use super::table::Table;
 use super::value::{Userdata, Val, append_lua_number_bytes, lua_number_string_len};
 use crate::check_interrupted;
-use crate::table_security::{checked_secret_equality, checked_truthiness};
+use crate::table_security::{
+    BOOLEAN_TEST, NEGATE, OperandSite, TableAccess, checked_secret_equality, checked_truthiness,
+    is_secret_value, secret_violation,
+};
 
 use crate::platform::{localeconv, strcoll, strtod};
 
@@ -191,7 +194,9 @@ fn try_plain_table_get_ref(
     key: Val,
     result_reg: usize,
 ) -> bool {
-    if crate::table_security::check_table_access(state, table_ref, Some(key)).is_err() {
+    if crate::table_security::check_table_access(state, table_ref, Some(key), TableAccess::Index)
+        .is_err()
+    {
         return false;
     }
     let resolved_key = resolve_plain_table_key(key, &state.gc);
@@ -304,7 +309,7 @@ fn coerce_to_string(val: Val, gc: &mut Gc) -> Option<Val> {
 // ---------------------------------------------------------------------------
 
 /// Creates a runtime error with source location from the current proto.
-fn runtime_error(proto: &Proto, pc: usize, message: &str) -> LuaError {
+pub(crate) fn runtime_error(proto: &Proto, pc: usize, message: &str) -> LuaError {
     let line = if pc > 0 && pc <= proto.line_info.len() {
         proto.line_info[pc - 1]
     } else if !proto.line_info.is_empty() {
@@ -336,6 +341,16 @@ fn type_error(
     opname: &str,
 ) -> LuaError {
     let val = state.stack_get(base + reg);
+    if is_secret_value(state, val) {
+        // Best-guess: existing raises on secret operands use the native
+        // secret-value template with the stock Lua operation word.
+        let site = OperandSite {
+            proto,
+            pc,
+            reg: Some(reg),
+        };
+        return secret_violation(state, opname, val, Some(site));
+    }
     let type_name = val.type_name();
     // pc is already incremented past the current instruction, so use pc-1.
     let current_pc = pc.saturating_sub(1);
@@ -1216,7 +1231,12 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                         continue;
                     }
 
-                    crate::table_security::check_table_access(state, root_global, Some(key))?;
+                    crate::table_security::check_table_access(
+                        state,
+                        root_global,
+                        Some(key),
+                        TableAccess::Index,
+                    )?;
                     if slot_idx == 0 {
                         let snapshot =
                             crate::table_security::wrap_table_value(state, root_global, snapshot);
@@ -1242,7 +1262,12 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                         continue;
                     };
 
-                    crate::table_security::check_table_access(state, live_ref, Some(key))?;
+                    crate::table_security::check_table_access(
+                        state,
+                        live_ref,
+                        Some(key),
+                        TableAccess::Index,
+                    )?;
                     if let Some(live_table) = state.gc.tables.get(live_ref)
                         && !(live_table.array_len() == 0 && live_table.hash_size() == 0)
                     {
@@ -1528,7 +1553,13 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Not => {
                     let b = instr.b() as usize;
                     let b_val = state.stack_get(base + b);
-                    state.stack_set(ra, Val::Bool(!checked_truthiness(state, b_val)?));
+                    let site = OperandSite {
+                        proto: &proto,
+                        pc,
+                        reg: Some(b),
+                    };
+                    let truthy = checked_truthiness(state, b_val, NEGATE, Some(site))?;
+                    state.stack_set(ra, Val::Bool(!truthy));
                 }
 
                 // ----- String operations -----
@@ -1545,6 +1576,12 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                             state.stack_set(ra, Val::Num(s.len() as f64));
                         }
                         Val::Table(r) => {
+                            crate::table_security::check_table_access(
+                                state,
+                                r,
+                                None,
+                                TableAccess::GetLength,
+                            )?;
                             // Lua 5.1.1: tables always use raw length (no __len).
                             let t =
                                 state.gc.tables.get(r).ok_or_else(|| {
@@ -1591,7 +1628,16 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Eq => {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
-                    let equal = if let Some(equal) = checked_secret_equality(state, b_val, c_val)? {
+                    let operand = |field: u32| OperandSite {
+                        proto: &proto,
+                        pc,
+                        reg: (!is_k(field)).then_some(field as usize),
+                    };
+                    let equal = if let Some(equal) = checked_secret_equality(
+                        state,
+                        (b_val, Some(operand(instr.b()))),
+                        (c_val, Some(operand(instr.c()))),
+                    )? {
                         equal
                     } else if val_equal(b_val, c_val, &state.gc) {
                         // Raw-equal succeeded.
@@ -1635,7 +1681,17 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                             call_tm_res(state, tm_val, b_val, c_val, res)?;
                             // PUC-Rio reads from L->top after callTMres
                             // decrements it. We saved the result position.
-                            checked_truthiness(state, state.stack_get(res))?
+                            let site = OperandSite {
+                                proto: &proto,
+                                pc,
+                                reg: None,
+                            };
+                            checked_truthiness(
+                                state,
+                                state.stack_get(res),
+                                BOOLEAN_TEST,
+                                Some(site),
+                            )?
                         } else {
                             false
                         }
@@ -1656,7 +1712,9 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
                     state.call_stack[state.ci].saved_pc = pc;
-                    let result = val_less_than(b_val, c_val, state, &proto, pc)?;
+                    let regs = [instr.b(), instr.c()]
+                        .map(|field| (!is_k(field)).then_some(field as usize));
+                    let result = val_less_than(b_val, c_val, state, &proto, pc, regs)?;
                     let expected = a != 0;
                     if result == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
@@ -1670,7 +1728,9 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                     let b_val = rk(&state.stack, base, &proto.constants, instr.b());
                     let c_val = rk(&state.stack, base, &proto.constants, instr.c());
                     state.call_stack[state.ci].saved_pc = pc;
-                    let result = val_less_equal(b_val, c_val, state, &proto, pc)?;
+                    let regs = [instr.b(), instr.c()]
+                        .map(|field| (!is_k(field)).then_some(field as usize));
+                    let result = val_less_equal(b_val, c_val, state, &proto, pc, regs)?;
                     let expected = a != 0;
                     if result == expected {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
@@ -1684,7 +1744,12 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                 OpCode::Test => {
                     let val = state.stack_get(ra);
                     let c = instr.c() != 0;
-                    if checked_truthiness(state, val)? == c {
+                    let site = OperandSite {
+                        proto: &proto,
+                        pc,
+                        reg: Some(a),
+                    };
+                    if checked_truthiness(state, val, BOOLEAN_TEST, Some(site))? == c {
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
                         pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;
                     } else {
@@ -1696,7 +1761,12 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                     let b = instr.b() as usize;
                     let rb = state.stack_get(base + b);
                     let c = instr.c() != 0;
-                    if checked_truthiness(state, rb)? == c {
+                    let site = OperandSite {
+                        proto: &proto,
+                        pc,
+                        reg: Some(b),
+                    };
+                    if checked_truthiness(state, rb, BOOLEAN_TEST, Some(site))? == c {
                         state.stack_set(ra, rb);
                         let jump_instr = Instruction::from_raw(proto.code[pc]);
                         pc = ((pc as i64) + i64::from(jump_instr.sbx()) + 1) as usize;
@@ -2124,7 +2194,12 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                         return Err(type_error(state, &proto, pc, base, a, "index"));
                     };
 
-                    crate::table_security::check_table_access(state, table_ref, None)?;
+                    crate::table_security::check_table_access(
+                        state,
+                        table_ref,
+                        None,
+                        TableAccess::IndexedAssignment,
+                    )?;
                     let offset = (c - 1) * LFIELDS_PER_FLUSH as usize;
                     let last = offset + n;
 

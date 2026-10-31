@@ -1,7 +1,10 @@
 //! Runtime helpers extracted from the main execute loop.
 
 use crate::error::LuaResult;
-use crate::table_security::{checked_order_operand, checked_truthiness};
+use crate::table_security::{
+    BOOLEAN_TEST, INDEXED_ASSIGNMENT, OperandSite, TableAccess, checked_order_operand,
+    checked_truthiness, is_secret_value, secret_violation,
+};
 use crate::vm::value::{append_lua_number_bytes, lua_number_string_len};
 
 use super::super::gc::arena::Arena;
@@ -171,7 +174,7 @@ fn call_order_tm(state: &mut LuaState, lhs: Val, rhs: Val, event: TMS) -> LuaRes
     cmp_result?;
 
     let result = state.stack_get(call_base);
-    Ok(Some(checked_truthiness(state, result)?))
+    Ok(Some(checked_truthiness(state, result, BOOLEAN_TEST, None)?))
 }
 
 /// Concatenate registers `base+b` through `base+c`, storing the result
@@ -340,7 +343,7 @@ fn val_to_string_bytes(val: Val, gc: &Gc, buffer: &mut Vec<u8>) {
 /// Raw table get.
 #[allow(dead_code)]
 fn table_get(state: &LuaState, table_ref: GcRef<Table>, key: Val) -> LuaResult<Val> {
-    crate::table_security::check_table_access(state, table_ref, Some(key))?;
+    crate::table_security::check_table_access(state, table_ref, Some(key), TableAccess::Index)?;
     let table = state
         .gc
         .tables
@@ -356,7 +359,12 @@ pub(super) fn table_set(
     key: Val,
     value: Val,
 ) -> LuaResult<()> {
-    crate::table_security::check_table_access(state, table_ref, Some(key))?;
+    crate::table_security::check_table_access(
+        state,
+        table_ref,
+        Some(key),
+        TableAccess::IndexedAssignment,
+    )?;
     ensure_table_not_frozen(state, table_ref)?;
     let value = crate::table_security::wrap_table_value(state, table_ref, value);
     let table = state
@@ -482,8 +490,14 @@ pub(super) fn vm_gettable(
         let mut current = t;
         let mut contents_secret = false;
         let resolved_key = resolve_gettable_key(key, &state.gc);
-        for _ in 0..MAXTAGLOOP {
-            current = crate::table_security::checked_secret_table_read(state, current)?;
+        for step in 0..MAXTAGLOOP {
+            // Only the syntactic operand has a variable name; __index hops do not.
+            let site = OperandSite {
+                proto,
+                pc,
+                reg: obj_reg.filter(|_| step == 0),
+            };
+            current = crate::table_security::checked_secret_table_read(state, current, Some(site))?;
             if let Val::Table(table) = current {
                 contents_secret |= crate::table_security::table_wraps_contents(state, table);
             }
@@ -583,7 +597,7 @@ fn handle_table_gettable(
     resolved_key: ResolvedGetKey,
     result_reg: usize,
 ) -> LuaResult<GettableStep> {
-    crate::table_security::check_table_access(state, table_ref, Some(key))?;
+    crate::table_security::check_table_access(state, table_ref, Some(key), TableAccess::Index)?;
     let table = state
         .gc
         .tables
@@ -637,6 +651,14 @@ fn handle_non_table_gettable(
         None => {
             if let Some(reg) = obj_reg {
                 return Err(type_error(state, proto, pc, base, reg, "index"));
+            }
+            if is_secret_value(state, current) {
+                let site = OperandSite {
+                    proto,
+                    pc,
+                    reg: None,
+                };
+                return Err(secret_violation(state, "index", current, Some(site)));
             }
             Err(runtime_error(
                 proto,
@@ -705,7 +727,12 @@ fn handle_table_settable(
     key: Val,
     value: Val,
 ) -> LuaResult<SettableStep> {
-    crate::table_security::check_table_access(state, table_ref, Some(key))?;
+    crate::table_security::check_table_access(
+        state,
+        table_ref,
+        Some(key),
+        TableAccess::IndexedAssignment,
+    )?;
     if table_has_no_metatable(state, table_ref)? {
         raw_set_new_slot(state, table_ref, key, value)?;
         return Ok(SettableStep::Done);
@@ -845,6 +872,15 @@ fn settable_type_error(
     base: usize,
     obj_reg: Option<usize>,
 ) -> crate::LuaError {
+    if is_secret_value(state, current) {
+        // Native secret-value formatter word for writes (S9 §11).
+        let site = OperandSite {
+            proto,
+            pc,
+            reg: obj_reg,
+        };
+        return secret_violation(state, INDEXED_ASSIGNMENT, current, Some(site));
+    }
     if let Some(reg) = obj_reg {
         return type_error(state, proto, pc, base, reg, "index");
     }
@@ -914,9 +950,11 @@ pub(super) fn val_less_than(
     state: &mut LuaState,
     proto: &Proto,
     pc: usize,
+    [a_reg, b_reg]: [Option<usize>; 2],
 ) -> LuaResult<bool> {
-    let a = checked_order_operand(state, a)?;
-    let b = checked_order_operand(state, b)?;
+    let site = |reg| OperandSite { proto, pc, reg };
+    let a = checked_order_operand(state, a, Some(site(a_reg)))?;
+    let b = checked_order_operand(state, b, Some(site(b_reg)))?;
     match (&a, &b) {
         (Val::Num(x), Val::Num(y)) => Ok(x < y),
         (Val::Str(x), Val::Str(y)) => {
@@ -951,9 +989,11 @@ pub(super) fn val_less_equal(
     state: &mut LuaState,
     proto: &Proto,
     pc: usize,
+    [a_reg, b_reg]: [Option<usize>; 2],
 ) -> LuaResult<bool> {
-    let a = checked_order_operand(state, a)?;
-    let b = checked_order_operand(state, b)?;
+    let site = |reg| OperandSite { proto, pc, reg };
+    let a = checked_order_operand(state, a, Some(site(a_reg)))?;
+    let b = checked_order_operand(state, b, Some(site(b_reg)))?;
     match (&a, &b) {
         (Val::Num(x), Val::Num(y)) => Ok(x <= y),
         (Val::Str(x), Val::Str(y)) => {

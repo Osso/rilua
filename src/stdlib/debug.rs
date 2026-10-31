@@ -571,7 +571,12 @@ pub fn db_getmetatable(state: &mut LuaState) -> LuaResult<u32> {
     }
     let val = arg(state, 0);
     if let Val::Table(table_ref) = val {
-        crate::table_security::check_table_access(state, table_ref, None)?;
+        crate::table_security::check_table_access(
+            state,
+            table_ref,
+            None,
+            crate::table_security::TableAccess::Index,
+        )?;
     }
     let mt = match val {
         Val::Table(r) => state.gc.tables.get(r).and_then(Table::metatable),
@@ -603,7 +608,12 @@ pub fn db_setmetatable(state: &mut LuaState) -> LuaResult<u32> {
     let obj = arg(state, 0);
     let mt_val = arg(state, 1);
     if let Val::Table(table_ref) = obj {
-        crate::table_security::check_table_access(state, table_ref, None)?;
+        crate::table_security::check_table_access(
+            state,
+            table_ref,
+            None,
+            crate::table_security::TableAccess::Index,
+        )?;
     }
 
     let mt_ref = match mt_val {

@@ -1,7 +1,7 @@
 use rilua::api::state_is_secure;
 use rilua::table_security::{
-    check_table_access, set_table_security, wrap_host_secret_bool, wrap_host_secret_number,
-    wrap_host_secret_string, wrap_secret,
+    TableAccess, check_table_access, set_table_security, wrap_host_secret_bool,
+    wrap_host_secret_number, wrap_host_secret_string, wrap_secret,
 };
 use rilua::vm::table::Table;
 use rilua::{Lua, LuaApi, LuaApiMut, Val};
@@ -206,7 +206,8 @@ fn tainted_closure_cannot_order_secret_numbers_even_through_secure_call() {
         for _, operation in ipairs(operations) do
             debug.setobjecttaint(operation, 'TestAddon')
             local ok, message = pcall(securecallfunction, operation)
-            assert(not ok and string.find(message, 'untainted caller', 1, true), tostring(message))
+            assert(not ok and string.find(message, "a secret number value", 1, true)
+                and string.find(message, "execution tainted by 'TestAddon'", 1, true), tostring(message))
         end
         assert(one < two and 2 > one)
     "#,
@@ -220,8 +221,9 @@ fn tainted_code_cannot_inspect_secret_booleans_even_by_alias_identity() {
         .exec(
             r#"
         local yes, no = host_true(), host_false()
+        local unwrapped, unwrapError = pcall(call_tainted, function() return secretunwrap(no) end)
+        assert(not unwrapped and string.find(unwrapError, 'untainted caller', 1, true), tostring(unwrapError))
         local operations = {
-            function() return secretunwrap(no) end,
             function() if no then return 1 end end,
             function() if yes then return 1 end end,
             function() return not no end,
@@ -240,7 +242,7 @@ fn tainted_code_cannot_inspect_secret_booleans_even_by_alias_identity() {
         }
         for _, operation in ipairs(operations) do
             local ok, message = pcall(call_tainted, operation)
-            assert(not ok and string.find(message, 'untainted caller', 1, true), tostring(message))
+            assert(not ok and string.find(message, 'a secret boolean value', 1, true), tostring(message))
         end
         local ok = pcall(call_tainted, function() return secretwrap(false) end)
         assert(not ok)
@@ -354,7 +356,7 @@ fn secret_nil_equality_and_table_reads_reject_tainted_callers() {
         for _, operation in ipairs(operations) do
             debug.setobjecttaint(operation, 'TestAddon')
             local ok, message = pcall(securecallfunction, operation)
-            assert(not ok and string.find(message, 'untainted caller', 1, true), tostring(message))
+            assert(not ok and string.find(message, "value, while execution tainted by 'TestAddon')", 1, true), tostring(message))
         end
     "#,
         )
@@ -432,15 +434,15 @@ fn table_security_core_rejects_tainted_and_secret_key_access_cumulatively() {
     let secret = wrap_secret(state, Val::Num(17.0)).unwrap();
     set_table_security(state, table, 1).unwrap();
     set_table_security(state, table, 0).unwrap();
-    assert!(check_table_access(state, table, Some(Val::Num(17.0))).is_ok());
-    assert!(check_table_access(state, table, Some(secret)).is_err());
+    assert!(check_table_access(state, table, Some(Val::Num(17.0)), TableAccess::Index).is_ok());
+    assert!(check_table_access(state, table, Some(secret), TableAccess::Index).is_err());
     state.call_stack[0].taint = Some("UntrustedAddon".to_owned());
-    assert!(check_table_access(state, table, None).is_err());
+    assert!(check_table_access(state, table, None, TableAccess::Index).is_err());
     assert!(set_table_security(state, table, 0).is_err());
     assert!(wrap_secret(state, Val::Num(2.0)).is_err());
     assert!(rilua::table_security::unwrap_secret(state, secret).is_err());
     state.call_stack[0].taint = None;
-    assert!(check_table_access(state, table, None).is_ok());
+    assert!(check_table_access(state, table, None, TableAccess::Index).is_ok());
 }
 
 #[test]
@@ -460,8 +462,8 @@ fn table_security_gc_keeps_payload_alive_only_while_wrapper_is_rooted() {
     assert!(lua.state().gc.tables.get(table).is_none());
     assert!(lua.state().gc.userdata.get(wrapper_ref).is_none());
     let next_table = lua.state_mut().gc.alloc_table(Table::new());
-    assert!(check_table_access(lua.state(), next_table, None).is_ok());
-    assert!(check_table_access(lua.state(), table, None).is_err());
+    assert!(check_table_access(lua.state(), next_table, None, TableAccess::Index).is_ok());
+    assert!(check_table_access(lua.state(), table, None, TableAccess::Index).is_err());
     let plain = lua
         .state_mut()
         .gc
@@ -482,7 +484,15 @@ fn table_security_flags_do_not_survive_collected_table_slot_reuse() {
     assert!(lua.state().gc.tables.get(table).is_none());
     let replacement = lua.state_mut().gc.alloc_table(Table::with_sizes(1, 0));
     lua.state_mut().call_stack[0].taint = Some("Addon".to_owned());
-    assert!(check_table_access(lua.state(), replacement, Some(Val::Num(1.0))).is_ok());
+    assert!(
+        check_table_access(
+            lua.state(),
+            replacement,
+            Some(Val::Num(1.0)),
+            TableAccess::Index
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -531,7 +541,7 @@ fn table_security_reused_arena_slots_drop_restrictions_and_secret_payload() {
     assert_eq!(secret.index(), userdata.index());
     assert_ne!(secret.generation(), userdata.generation());
     state.call_stack[0].taint = Some("Addon".to_owned());
-    assert!(check_table_access(state, replacement, None).is_ok());
+    assert!(check_table_access(state, replacement, None, TableAccess::Index).is_ok());
     assert!(!rilua::table_security::is_secret_value(
         state,
         Val::Userdata(userdata)
