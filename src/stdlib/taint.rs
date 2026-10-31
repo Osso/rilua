@@ -399,6 +399,30 @@ fn securecall(state: &mut LuaState) -> LuaResult<u32> {
     Ok(n_results)
 }
 
+/// Call the function at `func_idx` with `taint` as the only visible stack taint.
+///
+/// Caller frames are suspended for the call, as in `securecall`, so
+/// `issecure()` and `debug.getstacktaint()` inside the callee report `taint`
+/// (`None` = secure). The callee frame receives `taint` instead of its closure
+/// stamp; the stamp is not modified, so the call is reentrant. Caller taints
+/// are restored on success and on error.
+pub fn call_with_stack_taint(
+    state: &mut LuaState,
+    func_idx: usize,
+    num_results: i32,
+    taint: Option<String>,
+) -> LuaResult<()> {
+    let saved_taints: Vec<_> = state.call_stack[..=state.ci]
+        .iter_mut()
+        .map(|frame| frame.taint.take())
+        .collect();
+    let result = state.call_function_with_taint(func_idx, num_results, taint);
+    for (frame, taint) in state.call_stack.iter_mut().zip(saved_taints) {
+        frame.taint = taint;
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // forceinsecure()
 // ---------------------------------------------------------------------------
@@ -795,6 +819,70 @@ mod tests {
             1
         );
         assert_eq!(state.stack_get(result_start), Val::Bool(true));
+    }
+
+    fn call_secure_with_explicit_taint(state: &mut LuaState) -> LuaResult<u32> {
+        let func_idx = state.base;
+        call_with_stack_taint(state, func_idx, LUA_MULTRET, None)?;
+        Ok(state.top.saturating_sub(func_idx) as u32)
+    }
+
+    #[test]
+    fn call_with_stack_taint_overrides_stamp_for_one_reentrant_call() {
+        let mut lua = Lua::new().expect("failed to create Lua state");
+        LuaApiMut::register_function(&mut lua, "callsecure", call_secure_with_explicit_taint)
+            .expect("register callsecure");
+        lua.exec(
+            r#"
+            local function probe(depth)
+                local secure, taint = issecure(), debug.getstacktaint()
+                if depth > 0 then
+                    local nestedSecure, nestedTaint = probe(depth - 1)
+                    return secure, taint, nestedSecure, nestedTaint
+                end
+                return secure, taint
+            end
+            debug.setobjecttaint(probe, "OwnerAddon")
+            local function failing() error("boom") end
+            local function caller()
+                local secure, taint, nestedSecure, nestedTaint = callsecure(probe, 1)
+                _secure, _taint = secure, taint
+                _nestedSecure, _nestedTaint = nestedSecure, nestedTaint
+                _afterCallTaint = debug.getstacktaint()
+                _okFailing, _failingMessage = pcall(callsecure, failing)
+                _afterErrorTaint = debug.getstacktaint()
+                _directSecure, _directTaint = probe(0)
+            end
+            debug.setobjecttaint(caller, "CallerAddon")
+            caller()
+            "#,
+        )
+        .expect("explicit taint call script should execute");
+
+        let secure: bool = lua.global("_secure").expect("secure flag");
+        let taint: Option<String> = lua.global("_taint").expect("taint");
+        let nested_secure: bool = lua.global("_nestedSecure").expect("nested secure flag");
+        let nested_taint: String = lua.global("_nestedTaint").expect("nested taint");
+        let after_call: String = lua.global("_afterCallTaint").expect("after call taint");
+        let ok_failing: bool = lua.global("_okFailing").expect("pcall status");
+        let failing_message: String = lua.global("_failingMessage").expect("error message");
+        let after_error: String = lua.global("_afterErrorTaint").expect("after error taint");
+        let direct_secure: bool = lua.global("_directSecure").expect("direct secure flag");
+        let direct_taint: String = lua.global("_directTaint").expect("direct taint");
+
+        assert!(
+            secure,
+            "explicit secure call must hide caller and stamp taint"
+        );
+        assert_eq!(taint, None);
+        assert!(!nested_secure, "recursive call keeps the closure stamp");
+        assert_eq!(nested_taint, "OwnerAddon");
+        assert_eq!(after_call, "CallerAddon");
+        assert!(!ok_failing);
+        assert!(failing_message.ends_with("boom"), "{failing_message}");
+        assert_eq!(after_error, "CallerAddon");
+        assert!(!direct_secure, "closure stamp must not be modified");
+        assert_eq!(direct_taint, "OwnerAddon");
     }
 
     #[test]
