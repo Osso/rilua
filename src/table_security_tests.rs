@@ -283,3 +283,30 @@ fn host_secret_number_inspector_closure_error_preserves_secure_unwrap() -> LuaRe
     assert_eq!(selector, InspectedNumberSelector::Fixture);
     Ok(())
 }
+
+#[test]
+fn secret_boolean_error_text_uses_name_and_taint_origin() -> LuaResult<()> {
+    let mut lua = host_number_inspector_lua()?;
+    lua.exec(r#"
+        SecretBool = secretwrap(true)
+        local function value() return SecretBool end
+        local function named() local x = value(); if x then return 1 end end
+        local function anonymous() if value() then return 1 end end
+        local function revoked_named() drop_number_access(); named() end
+        local function revoked_anonymous() drop_number_access(); anonymous() end
+        local function tainted_named() named() end
+        local function tainted_anonymous() anonymous() end
+        debug.setobjecttaint(tainted_named, 'ProbeAddon')
+        debug.setobjecttaint(tainted_anonymous, 'ProbeAddon')
+        local cases = {
+            {revoked_named, "attempt to perform boolean test on local 'x' (a secret boolean value)"},
+            {revoked_anonymous, "attempt to perform boolean test on a secret boolean value"},
+            {tainted_named, "attempt to perform boolean test on local 'x' (a secret boolean value, while execution tainted by 'ProbeAddon')"},
+            {tainted_anonymous, "attempt to perform boolean test on a secret boolean value (execution tainted by 'ProbeAddon')"},
+        }
+        for _, case in ipairs(cases) do
+            local ok, err = pcall(case[1])
+            assert(not ok and err == case[2], tostring(err))
+        end
+    "#)
+}
