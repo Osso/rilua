@@ -216,6 +216,23 @@ fn tainted_closure_cannot_order_secret_numbers_even_through_secure_call() {
 }
 
 #[test]
+fn tainted_secretwrap_returns_secret_values_without_changing_taint() {
+    host_bool_lua()
+        .exec(
+            r#"
+        local number, text = call_tainted(function()
+            local a, b = secretwrap(3, 'payload')
+            assert(issecretvalue(a) and issecretvalue(b))
+            assert(debug.getstacktaint() == 'TestAddon')
+            return a, b
+        end)
+        assert(secretunwrap(number) == 3 and secretunwrap(text) == 'payload')
+        "#,
+        )
+        .unwrap();
+}
+
+#[test]
 fn tainted_code_cannot_inspect_secret_booleans_even_by_alias_identity() {
     host_bool_lua()
         .exec(
