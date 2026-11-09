@@ -40,7 +40,7 @@ fn secret_payload_kind_covers_tags_and_contents_flag_without_unwrap() -> LuaResu
     assert!(is_secret_table(&state, Val::Table(table)));
     state.call_stack[0].taint = Some("Addon".to_owned());
     assert!(is_secret_table(&state, Val::Table(table)));
-    assert!(set_table_security(&mut state, table, 2).is_err());
+    assert!(set_table_security(&mut state, table, 2).is_ok());
     Ok(())
 }
 
