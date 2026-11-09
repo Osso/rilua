@@ -62,7 +62,7 @@ fn host_secret_number_and_string_preserve_taint_and_payload_guards() {
         let secret = wrap_host_secret_number(state, 3.0);
         state.push(secret);
         assert_eq!(state_is_secure(state), before);
-        assert!(wrap_secret(state, Val::Num(3.0)).is_err());
+        assert!(wrap_secret(state, Val::Num(3.0)).is_ok());
         Ok(1)
     }
     fn host_string(state: &mut LuaState) -> LuaResult<u32> {
@@ -71,7 +71,7 @@ fn host_secret_number_and_string_preserve_taint_and_payload_guards() {
         let secret = wrap_host_secret_string(state, &payload);
         state.push(secret);
         assert_eq!(state_is_secure(state), before);
-        assert!(wrap_secret(state, Val::Num(3.0)).is_err());
+        assert!(wrap_secret(state, Val::Num(3.0)).is_ok());
         Ok(1)
     }
 
@@ -92,8 +92,8 @@ fn host_secret_number_and_string_preserve_taint_and_payload_guards() {
                 local ok, message = pcall(secretunwrap, value)
                 assert(not ok and string.find(message, 'untainted caller', 1, true))
             end
-            local ok, message = pcall(secretwrap, 3, '1.5%')
-            assert(not ok and string.find(message, 'untainted caller', 1, true))
+            local wrappedNumber, wrappedText = secretwrap(3, '1.5%')
+            assert(issecretvalue(wrappedNumber) and issecretvalue(wrappedText))
             assert(debug.getstacktaint() == 'TestAddon')
             return number, text
         end)
@@ -261,8 +261,8 @@ fn tainted_code_cannot_inspect_secret_booleans_even_by_alias_identity() {
             local ok, message = pcall(call_tainted, operation)
             assert(not ok and string.find(message, 'a secret boolean value', 1, true), tostring(message))
         end
-        local ok = pcall(call_tainted, function() return secretwrap(false) end)
-        assert(not ok)
+        local wrapped = call_tainted(function() return secretwrap(false) end)
+        assert(issecretvalue(wrapped))
         assert(secretunwrap(no) == false and secretunwrap(yes) == true)
     "#,
         )
@@ -455,8 +455,8 @@ fn table_security_core_rejects_tainted_and_secret_key_access_cumulatively() {
     assert!(check_table_access(state, table, Some(secret), TableAccess::Index).is_err());
     state.call_stack[0].taint = Some("UntrustedAddon".to_owned());
     assert!(check_table_access(state, table, None, TableAccess::Index).is_err());
-    assert!(set_table_security(state, table, 0).is_err());
-    assert!(wrap_secret(state, Val::Num(2.0)).is_err());
+    assert!(set_table_security(state, table, 0).is_ok());
+    assert!(wrap_secret(state, Val::Num(2.0)).is_ok());
     assert!(rilua::table_security::unwrap_secret(state, secret).is_err());
     state.call_stack[0].taint = None;
     assert!(check_table_access(state, table, None, TableAccess::Index).is_ok());

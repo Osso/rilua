@@ -215,7 +215,6 @@ pub fn check_table_access(
 /// values and future checked writes/results. Keys and absent nil remain public.
 /// INFERRED: eager wrapper storage makes raw/retained-iterator reads secret too.
 pub fn set_table_security(state: &mut LuaState, table: GcRef<Table>, option: u32) -> LuaResult<()> {
-    ensure_secure_caller(state)?;
     let flag = match option {
         0 => DISALLOW_TAINTED_ACCESS,
         1 => DISALLOW_SECRET_KEYS,
@@ -246,7 +245,6 @@ pub fn is_secret_value(state: &LuaState, value: Val) -> bool {
 /// Wrap without changing an already wrapped value. Returned values must be
 /// rooted by the caller before any subsequent GC safe point.
 pub fn wrap_secret(state: &mut LuaState, value: Val) -> LuaResult<Val> {
-    ensure_secure_caller(state)?;
     if is_secret_value(state, value) {
         return Ok(value);
     }
@@ -573,6 +571,9 @@ fn ensure_secure_caller(state: &LuaState) -> LuaResult<()> {
 }
 
 fn lua_set_table_security(state: &mut LuaState) -> LuaResult<u32> {
+    if !state_is_secure(state) {
+        return Ok(0);
+    }
     let Val::Table(table) = state.stack_get(state.base) else {
         return Err(runtime_error("settablesecurity requires a table"));
     };
@@ -588,7 +589,6 @@ fn lua_set_table_security(state: &mut LuaState) -> LuaResult<u32> {
 }
 
 fn lua_secret_wrap(state: &mut LuaState) -> LuaResult<u32> {
-    ensure_secure_caller(state)?;
     let count = state.top - state.base;
     for index in 0..count {
         let value = wrap_secret(state, state.stack_get(state.base + index))?;
