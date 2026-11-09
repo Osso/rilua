@@ -560,16 +560,6 @@ pub fn revoke_secret_access(state: &mut LuaState) -> LuaResult<()> {
     Ok(())
 }
 
-fn ensure_secure_caller(state: &LuaState) -> LuaResult<()> {
-    if state_is_secure(state) {
-        Ok(())
-    } else {
-        Err(runtime_error(
-            "table security operation requires an untainted caller",
-        ))
-    }
-}
-
 fn lua_set_table_security(state: &mut LuaState) -> LuaResult<u32> {
     if !state_is_secure(state) {
         return Ok(0);
