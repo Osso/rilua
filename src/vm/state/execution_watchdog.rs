@@ -46,7 +46,7 @@ impl LuaState {
         finish_scope(result)
     }
 
-    /// Run host callbacks for the configured dispatch owner without timing them.
+    /// Run Lua execution under a trusted owner scope; timing is configured separately.
     pub fn with_instruction_owner<T>(
         &mut self,
         owner: &str,
