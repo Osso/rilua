@@ -20,16 +20,11 @@ fn overrun_dispatch(state: &mut LuaState) -> LuaResult<u32> {
     dispatch_with_timeout(state, Duration::ZERO)
 }
 
-fn exempt_dispatch(state: &mut LuaState) -> LuaResult<u32> {
-    state.with_watchdog_exemption(dispatch)
-}
-
 #[test]
-fn execution_watchdog_rejects_overrun_and_restores_after_exemption() -> LuaResult<()> {
+fn execution_watchdog_rejects_overrun_and_recovers_after_error() -> LuaResult<()> {
     let mut lua = Lua::new()?;
     lua.register_function("dispatch", dispatch)?;
     lua.register_function("overrun_dispatch", overrun_dispatch)?;
-    lua.register_function("exempt_dispatch", exempt_dispatch)?;
     lua.exec(
         r"
         function work()
@@ -42,8 +37,7 @@ fn execution_watchdog_rejects_overrun_and_restores_after_exemption() -> LuaResul
         assert(dispatch(work) == 500500)
         local ok, message = pcall(overrun_dispatch, work)
         assert(not ok and string.find(message, 'script ran too long', 1, true))
-        assert(exempt_dispatch(work) == 500500)
-        assert(not pcall(overrun_dispatch, work))
+        assert(dispatch(work) == 500500)
         assert(1 + 2 == 3)
     ",
     )?;

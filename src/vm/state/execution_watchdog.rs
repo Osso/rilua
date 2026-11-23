@@ -12,7 +12,6 @@ pub const DEFAULT_WATCHDOG_DISPATCH_INTERVAL: u32 = 10_001;
 pub(super) struct ExecutionWatchdogs {
     owners: Vec<String>,
     pub(super) active: Option<usize>,
-    exempt: bool,
     watchdog: Option<ExecutionWatchdog>,
 }
 
@@ -35,7 +34,7 @@ impl LuaState {
             return Err(runtime_error("watchdog dispatch interval must be positive"));
         }
         let previous = self.instruction_budgets.watchdog.take();
-        if self.instruction_budgets.active.is_some() && !self.instruction_budgets.exempt {
+        if self.instruction_budgets.active.is_some() {
             self.instruction_budgets.watchdog = Some(ExecutionWatchdog {
                 deadline: Instant::now() + timeout,
                 dispatch_interval,
@@ -58,26 +57,9 @@ impl LuaState {
             self.instruction_budgets.owners.len() - 1
         });
         let previous = self.instruction_budgets.active;
-        self.instruction_budgets.active = if self.instruction_budgets.exempt {
-            None
-        } else {
-            Some(index)
-        };
+        self.instruction_budgets.active = Some(index);
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
         self.instruction_budgets.active = previous;
-        finish_scope(result)
-    }
-
-    /// Exclude nested owner callbacks and coroutine dispatch from host timing.
-    pub fn with_watchdog_exemption<T>(&mut self, operation: impl FnOnce(&mut Self) -> T) -> T {
-        let previous_owner = self.instruction_budgets.active.take();
-        let previous_exempt = self.instruction_budgets.exempt;
-        let previous_watchdog = self.instruction_budgets.watchdog.take();
-        self.instruction_budgets.exempt = true;
-        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
-        self.instruction_budgets.exempt = previous_exempt;
-        self.instruction_budgets.active = previous_owner;
-        self.instruction_budgets.watchdog = previous_watchdog;
         finish_scope(result)
     }
 

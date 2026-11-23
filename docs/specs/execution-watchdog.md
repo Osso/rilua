@@ -6,7 +6,7 @@
 
 - `with_instruction_owner(owner, closure) -> LuaResult<T>`: enter and leave a trusted owner scope. Nested scopes temporarily replace the active owner. The host selects ownership; Lua taint does not.
 - `with_execution_watchdog(timeout, dispatch_interval, closure) -> LuaResult<T>`: start a per-invocation deadline and poll it at the requested dispatch interval. A zero interval is rejected. The host controls the invocation boundary and timeout.
-- `with_watchdog_exemption(closure) -> T`: pause owner attribution and watchdog checks in the dynamic scope. State restores after success, Lua error or unwinding panic.
+
 
 `DEFAULT_WATCHDOG_DISPATCH_INTERVAL` is 10,001 dispatch steps. At each poll, the VM compares the current monotonic time with the invocation deadline. An expired deadline raises `script ran too long`. The deadline is set when `with_execution_watchdog` starts, not at the last poll. Rust callback work between VM dispatch steps is included in elapsed time, but cannot be interrupted until the next poll. Compilation is outside a call unless the host wraps it explicitly.
 
@@ -16,6 +16,6 @@ The prior cumulative instruction quota, per-owner usage snapshots, reset API and
 
 ## Verification
 
-`tests/helpers/execution_watchdog.rs` verifies an under-threshold owner invocation, an overrun with the exact error, recovery after exemption and error, nested owner scopes and coroutine dispatch. The unit test in `src/vm/state/execution_watchdog.rs` verifies the configured poll interval and deadline behavior.
+`tests/helpers/execution_watchdog.rs` verifies an under-threshold owner invocation, an overrun with the exact error, recovery after the error, nested owner scopes and coroutine dispatch. The unit test in `src/vm/state/execution_watchdog.rs` verifies the configured poll interval and deadline behavior.
 
 The VM specializes execution at invocation entry. The unmetered loop has no per-dispatch watchdog check; the watchdog loop checks the counter at each dispatch and reads the clock only when the configured poll interval expires.
