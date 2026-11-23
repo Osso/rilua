@@ -1034,16 +1034,15 @@ fn runtime_error_simple(message: &str) -> LuaError {
 ///
 /// Returns when the outermost Lua call returns.
 pub fn execute(state: &mut LuaState) -> LuaResult<()> {
-    if state.instruction_meter_owner().is_some() {
+    if state.has_execution_watchdog() {
         execute_inner::<true>(state)
     } else {
         execute_inner::<false>(state)
     }
 }
 
-// Host owner/exemption scopes change only around synchronous nested execution.
-// Specializing at activation entry removes per-instruction budget checks from
-// unused-feature execution; nested host calls select their own activation mode.
+// Host watchdog scopes change only around synchronous nested execution.
+// Specializing at activation entry removes per-dispatch checks when unused.
 fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
     // PUC-Rio's `nexeccalls` pattern: tracks how many Lua functions were
     // entered via OP_CALL within this execute() invocation. Starts at 1
@@ -1098,11 +1097,8 @@ fn execute_inner<const METERED: bool>(state: &mut LuaState) -> LuaResult<()> {
                 return Err(runtime_error(&proto, pc, "interrupted!"));
             }
 
-            // Host metering is independent of Lua-editable hooks and taint.
-            if METERED
-                && let Some(owner) = state.instruction_meter_owner()
-                && let Err(error) = state.charge_instruction(owner)
-            {
+            // Host watchdog polling is independent of Lua-editable hooks.
+            if METERED && let Err(error) = state.poll_execution_watchdog() {
                 state.call_stack[state.ci].saved_pc = pc;
                 return Err(error);
             }

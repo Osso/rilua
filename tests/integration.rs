@@ -16,8 +16,8 @@ mod closure_taint;
 #[path = "helpers/secret_kind.rs"]
 mod secret_kind;
 
-#[path = "helpers/instruction_budget.rs"]
-mod instruction_budget;
+#[path = "helpers/execution_watchdog.rs"]
+mod execution_watchdog;
 
 #[path = "helpers/secret_access.rs"]
 mod secret_access;

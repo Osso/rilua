@@ -6,7 +6,7 @@ Verified: 2026-10-06. Base: a76ffa8. Original functional implementation: 6856c39
 
 | Capability | Contract | Implementation commits | Behavioral proof |
 | --- | --- | --- | --- |
-| Trusted owner instruction budgets | Host-selected owner scopes; independent counters; live-frame exhaustion; exemptions restore after errors/unwind; host reset refills | 1d66886, 6f4bd7a | 2 unit + 2 embedding tests: limits, tampering, exemptions, owners, coroutine/pcall evasion, unwind |
+| Trusted owner watchdogs | Host-selected owner scopes; per-invocation deadlines; dispatch polling; exemptions restore after errors/unwind | Current contract: [execution watchdog](execution-watchdog.md) | Unit and embedding tests cover deadline polling, owner scope, exemption, coroutine execution and recovery |
 | Secret access revocation | Immediate context and descendants denied through tail calls, securecall, coroutine resume/yield; returns on context end; taint unchanged | e4d4ef7, 0aa93e4, 6856c39 | 1 unit + 3 embedding tests: context/errors, resumers, yields, public struct compatibility |
 | Secret kind and table contents | Metadata-only payload tag; flagged tables shallowly wrap stored/returned values; keys, length, missing nil public | 3a39bf9, 59be95d, 3908dbf, 6f4bd7a | 1 unit + 3 embedding tests: all tags, tainted metadata, reads/writes/iterators, redirects, prepared slots, GC |
 | Secret byte transforms | Trusted byte closure; authentic secret strings only; always secret output; no Lua plaintext; taint unchanged | b6395a8 | 1 unit + 1 embedding test: binary/NUL strings, errors, tainted shortening, unwrap denial, GC |
@@ -29,7 +29,7 @@ Verified: 2026-10-06. Base: a76ffa8. Original functional implementation: 6856c39
 - Final coroutine-only change 6856c39: `cargo test secret_access` passes 1 unit + 3 embedding tests; `cargo test coroutine` passes 1 unit + 28 integration + 13 oracle tests. Includes nested resumers entered before first revocation, plus yield/resume restoration. Other proofs remain applicable to unchanged code.
 - `cargo fmt --check`, `cargo check`: pass at 6856c39. All-target Clippy at 6f4bd7a exits 0 with no warning on changed lines; lib/integration Clippy at 6856c39 exits 0 with no sidecar/test warning. Existing lint backlog and Rust 1.99 strlen signature warning remain unsuppressed. Doc tests: 3 pass at 6f4bd7a.
 
-New tests: 5 unit and 9 integration tests. Contracts: [budgets](instruction-budgets.md), [secrets](table-security.md). Fixtures: tests/helpers/instruction_budget.rs, secret_access.rs, secret_kind.rs, host_secret_transform.rs; src/table_security_tests.rs and state/instruction_budget.rs.
+Historical tests: 5 unit and 9 integration tests. Current contract: [execution watchdog](execution-watchdog.md); [secrets](table-security.md). Current fixtures: tests/helpers/execution_watchdog.rs, secret_access.rs, secret_kind.rs, host_secret_transform.rs; src/table_security_tests.rs and state/execution_watchdog.rs.
 
 ## Final verification: dcc5a28
 

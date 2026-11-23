@@ -1,25 +1,21 @@
-# Host-owned execution budgets
+# Host-owned execution watchdogs
 
 ## Contract
 
-`Lua::state_mut()` exposes these embedding APIs on `LuaState`:
+`Lua::state_mut()` exposes these host APIs on `LuaState`:
 
-- `set_instruction_budget(owner: &str, limit: Option<u64>)`: configure and reset usage. None means metered but unlimited; zero denies execution.
-- `instruction_budget(owner) -> Option<InstructionBudget>`: snapshot `{ limit, used }`.
-- `reset_instruction_usage(owner) -> LuaResult<()>`: refill at the host's chosen budget-period boundary; unknown owners fail.
-- `with_instruction_owner(owner, closure) -> LuaResult<T>`: enter/leave a trusted owner scope; unknown owners fail. Nested host scopes temporarily replace the owner.
-- `with_instruction_budget_exemption(closure) -> T`: enter/leave an exemption, including nested owner scopes. Scope state is restored after success, Lua error or unwinding panic. Panic-abort cannot restore a terminated process.
+- `with_instruction_owner(owner, closure) -> LuaResult<T>`: enter and leave a trusted owner scope. Nested scopes temporarily replace the active owner. The host selects ownership; Lua taint does not.
+- `with_execution_watchdog(timeout, dispatch_interval, closure) -> LuaResult<T>`: start a per-invocation deadline and poll it at the requested dispatch interval. A zero interval is rejected. The host controls the invocation boundary and timeout.
+- `with_watchdog_exemption(closure) -> T`: pause owner attribution and watchdog checks in the dynamic scope. State restores after success, Lua error or unwinding panic.
 
-Owner strings may be addon names/taint tags, but **ownership is selected by trusted Rust dispatch, not Lua taint**. Existing taint stamps live in a Lua-visible registry and debug APIs can change stack taint: deriving trusted attribution from either would permit evasion. The host must scope every untrusted entry (and delayed coroutine resumes); merely configuring a limit does not identify its owner. Do not expose arbitrary owner selection, resets, configuration or exemptions to Lua. No globals are added.
+`DEFAULT_WATCHDOG_DISPATCH_INTERVAL` is 10,001 dispatch steps. At each poll, the VM compares the current monotonic time with the invocation deadline. An expired deadline raises `script ran too long`. The deadline is set when `with_execution_watchdog` starts, not at the last poll. Rust callback work between VM dispatch steps is included in elapsed time, but cannot be interrupted until the next poll. Compilation is outside a call unless the host wraps it explicitly.
 
-Each dispatched Lua instruction is charged before it runs. Rust callback work, compilation, allocations and elapsed time are not measured. Count/line-hook Lua, nested calls, protected calls, securecall and coroutine execution inside the scope are charged to that owner. Auxiliary/skipped bytecode words are not separate dispatches. Usage saturates at u64::MAX; limited usage stops at the limit. Metering never allocates or looks up a name per instruction.
+The watchdog runs only while the host has entered an owner scope. This keeps it away from secure/unowned execution. Owner names remain host-controlled; do not expose arbitrary owner selection or watchdog configuration to Lua. Nested synchronous Lua calls and resumed coroutines use the active invocation watchdog. The watchdog is restored at the host scope boundary.
 
-Exhaustion raises a Runtime error naming the owner while the offending frame is still live; saved_pc identifies its rejected instruction. pcall/coroutine.resume cannot permit additional execution inside an exhausted owner scope: the next instruction is also denied. Different host owner scopes have independent counters. Errors do not refund consumption: only a host reset/configuration refills. Owner/exemption state always restores at scope exit, so subsequent unrelated dispatch is unaffected.
-
-INFERRED: this is an instruction allowance, not a native WoW wall-time throttle. Exemption pauses accounting and enforcement, never refills budgets. The host chooses periods, limits, ownership and event policy. The retained 12.0.5 notes say addon throttles no longer apply while processing PLAYER_LOGOUT and ADDONS_UNLOADING. Dispatch those events within exemption scopes; event production belongs to the simulator, not rilua.
+The prior cumulative instruction quota, per-owner usage snapshots, reset API and `instruction budget exhausted` error are removed. This watchdog is not the simulator's separate bucket throttle.
 
 ## Verification
 
-Unit tests cover exact limit/zero/reset, independent owners, nested exemptions and unwind restoration. `tests/helpers/instruction_budget.rs` covers debug/taint tampering, normal exhaustion, exemption success/error, reset, coroutine/pcall evasion and nested host ownership.
+`tests/helpers/execution_watchdog.rs` verifies an under-threshold owner invocation, an overrun with the exact error, recovery after exemption and error, nested owner scopes and coroutine dispatch. The unit test in `src/vm/state/execution_watchdog.rs` verifies the configured poll interval and deadline behavior.
 
-Disabled by default: activation entry selects a metered or unmetered dispatch specialization. The unmetered loop contains no per-instruction budget checks, counters, owner lookup, clock reads or hooks. Synchronous nested host calls select their own activation mode; owner/exemption scopes restore before returning to the suspended activation. Criterion `vm_execution/control_flow_dispatch` is compared against base a76ffa8 to check unused-feature cost.
+The VM specializes execution at invocation entry. The unmetered loop has no per-dispatch watchdog check; the watchdog loop checks the counter at each dispatch and reads the clock only when the configured poll interval expires.

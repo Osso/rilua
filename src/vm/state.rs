@@ -21,9 +21,9 @@
 mod api_ops;
 #[cfg(test)]
 mod api_ops_tests;
-mod instruction_budget;
+mod execution_watchdog;
 mod secret_access;
-pub use instruction_budget::InstructionBudget;
+pub use execution_watchdog::DEFAULT_WATCHDOG_DISPATCH_INTERVAL;
 
 mod environment_transfer;
 pub use environment_transfer::EnvironmentTransferHook;
@@ -754,8 +754,8 @@ pub struct LuaState {
     /// Whether nil-global call errors include the recovered global name.
     pub(crate) named_nil_global_calls: bool,
 
-    /// Host-only execution policy, shared across coroutine stack swaps.
-    instruction_budgets: instruction_budget::InstructionBudgets,
+    /// Host-only owner and watchdog state, shared across coroutine stack swaps.
+    instruction_budgets: execution_watchdog::ExecutionWatchdogs,
     secret_access_contexts: Option<Box<secret_access::SecretAccessContexts>>,
     pub(crate) has_secret_contents_policy: bool,
 
@@ -851,7 +851,7 @@ impl LuaState {
             saved_threads: Vec::new(),
             taint_mode: false,
             named_nil_global_calls: false,
-            instruction_budgets: instruction_budget::InstructionBudgets::default(),
+            instruction_budgets: execution_watchdog::ExecutionWatchdogs::default(),
             secret_access_contexts: None,
             has_secret_contents_policy: false,
             app_data: None,
