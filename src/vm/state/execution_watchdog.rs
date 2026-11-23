@@ -97,8 +97,19 @@ impl LuaState {
             });
         }
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
+        let charge_result = if result.is_ok() {
+            self.charge_script_bucket_throttle()
+        } else {
+            Ok(())
+        };
         self.instruction_budgets.throttle = previous;
-        finish_scope(result)
+        match result {
+            Ok(operation_result) => {
+                charge_result?;
+                operation_result
+            }
+            Err(panic) => resume_unwind(panic),
+        }
     }
 
     /// Run Lua execution under a trusted owner scope; timing is configured separately.
@@ -153,6 +164,13 @@ impl LuaState {
             return Ok(());
         }
         throttle.dispatches_remaining = throttle.dispatch_interval;
+        self.charge_script_bucket_throttle()
+    }
+
+    fn charge_script_bucket_throttle(&mut self) -> LuaResult<()> {
+        let Some(throttle) = self.instruction_budgets.throttle.as_mut() else {
+            return Ok(());
+        };
         let now = Instant::now();
         let bucket = self
             .instruction_budgets
@@ -207,19 +225,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bucket_throttle_raises_the_addon_limit_error_at_dispatch_interval() -> LuaResult<()> {
+    fn bucket_throttle_charges_the_final_invocation_slice() {
         let mut state = LuaState::new();
-        state.with_instruction_owner("ExampleAddon", |state| {
-            state.with_script_bucket_throttle("ExampleAddon", 0, 0, 1, |state| {
-                let result = state.poll_execution_watchdog();
-                assert_eq!(
-                    result.unwrap_err().to_string(),
-                    "insecure scripts exceeded execution limit for addon ExampleAddon"
-                );
-                Ok(())
-            })
-        })?;
-        Ok(())
+        let result = state.with_instruction_owner("ExampleAddon", |state| {
+            state.with_script_bucket_throttle("ExampleAddon", 0, 0, 1, |_| Ok(()))
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "insecure scripts exceeded execution limit for addon ExampleAddon"
+        );
     }
 
     #[test]
