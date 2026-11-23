@@ -75,16 +75,42 @@ impl LuaState {
         if dispatch_interval == 0 {
             return Err(runtime_error("throttle dispatch interval must be positive"));
         }
-        if !self.instruction_budgets.buckets.contains_key(owner) {
-            let now = Instant::now();
-            self.instruction_budgets.buckets.insert(
-                owner.to_owned(),
-                ScriptBucket {
-                    remaining_ms: burst_ms as f64,
-                    last_refill: now,
-                },
-            );
-        }
+        self.initialize_script_bucket(owner, burst_ms);
+        let previous = self.replace_script_bucket_throttle(
+            owner,
+            rate_ms_per_second,
+            burst_ms,
+            dispatch_interval,
+        );
+        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
+        let charge_result = if result.is_ok() {
+            self.charge_script_bucket_throttle()
+        } else {
+            Ok(())
+        };
+        self.instruction_budgets.throttle = previous;
+        finish_throttle_scope(result, charge_result)
+    }
+
+    fn initialize_script_bucket(&mut self, owner: &str, burst_ms: u64) {
+        let now = Instant::now();
+        self.instruction_budgets
+            .buckets
+            .entry(owner.to_owned())
+            .or_insert(ScriptBucket {
+                // INFERRED (R88bn): a new bucket starts at its burst limit.
+                remaining_ms: burst_ms as f64,
+                last_refill: now,
+            });
+    }
+
+    fn replace_script_bucket_throttle(
+        &mut self,
+        owner: &str,
+        rate_ms_per_second: u64,
+        burst_ms: u64,
+        dispatch_interval: u32,
+    ) -> Option<ExecutionThrottle> {
         let previous = self.instruction_budgets.throttle.take();
         if self.instruction_budgets.active.is_some() {
             self.instruction_budgets.throttle = Some(ExecutionThrottle {
@@ -96,20 +122,7 @@ impl LuaState {
                 last_charge: Instant::now(),
             });
         }
-        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
-        let charge_result = if result.is_ok() {
-            self.charge_script_bucket_throttle()
-        } else {
-            Ok(())
-        };
-        self.instruction_budgets.throttle = previous;
-        match result {
-            Ok(operation_result) => {
-                charge_result?;
-                operation_result
-            }
-            Err(panic) => resume_unwind(panic),
-        }
+        previous
     }
 
     /// Run Lua execution under a trusted owner scope; timing is configured separately.
@@ -196,6 +209,19 @@ impl LuaState {
             .owners
             .iter()
             .position(|name| name == owner)
+    }
+}
+
+fn finish_throttle_scope<T>(
+    result: std::thread::Result<LuaResult<T>>,
+    charge_result: LuaResult<()>,
+) -> LuaResult<T> {
+    match result {
+        Ok(operation_result) => {
+            charge_result?;
+            operation_result
+        }
+        Err(panic) => resume_unwind(panic),
     }
 }
 
